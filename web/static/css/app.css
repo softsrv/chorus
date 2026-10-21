@@ -9,7 +9,7 @@
 @source not "./tailwindcss";
 @source not "./daisyui{,*}.mjs";
 
-/* DaisyUI plugin (downloaded by `make daisyui-install`).
+/* DaisyUI plugin (vendored; see `make daisyui-install`).
    List every theme you want compiled into the output CSS.
    Flags: --default (applied to :root), --prefersdark (applied under prefers-color-scheme: dark). */
 @plugin "./daisyui.mjs" {

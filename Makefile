@@ -67,14 +67,16 @@ check: vet test test-integration vulncheck
 
 ## ── CSS ──────────────────────────────────────────────────────────────────────
 
-# Download DaisyUI .mjs bundles next to app.css so the @plugin directive
-# can resolve them. Re-run this whenever you upgrade DaisyUI.
+# The DaisyUI .mjs bundles are committed next to app.css so the @plugin
+# directive resolves in CI and Docker builds. To upgrade, bump
+# DAISYUI_VERSION, run this, and commit the result.
+DAISYUI_VERSION ?= 5.5.20
 daisyui-install:
-	curl -sLo web/static/css/daisyui.mjs \
-	  https://github.com/saadeghi/daisyui/releases/latest/download/daisyui.mjs
-	curl -sLo web/static/css/daisyui-theme.mjs \
-	  https://github.com/saadeghi/daisyui/releases/latest/download/daisyui-theme.mjs
-	@echo "DaisyUI bundles downloaded to web/static/css/"
+	curl -fsSLo web/static/css/daisyui.mjs \
+	  https://github.com/saadeghi/daisyui/releases/download/v$(DAISYUI_VERSION)/daisyui.mjs
+	curl -fsSLo web/static/css/daisyui-theme.mjs \
+	  https://github.com/saadeghi/daisyui/releases/download/v$(DAISYUI_VERSION)/daisyui-theme.mjs
+	@echo "DaisyUI $(DAISYUI_VERSION) downloaded to web/static/css/"
 
 tailwind:
 	tailwindcss -i ./web/static/css/app.css -o ./web/static/css/dist/app.css --minify
