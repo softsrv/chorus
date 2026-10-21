@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chorus</title>
+  <link rel="stylesheet" href="/static/css/dist/app.css" />
+  <script type="module" src="/static/js/app.js"></script>
+</head>
+<body class="min-h-screen bg-base-200">
+  <!-- Chorus web test client. It talks to the JSON API exactly as the native
+       apps will (bearer tokens, /api/v1), so anything that works here works
+       for them. Not intended as the production web experience. -->
+  <nav class="navbar bg-base-100 shadow-sm px-4">
+    <div class="flex-1">
+      <a href="/" class="text-xl font-bold">Chorus</a>
+      <span class="badge badge-ghost ml-2">API test client</span>
+    </div>
+    <div id="nav-actions" class="flex-none flex items-center gap-2"></div>
+  </nav>
+
+  <div class="container mx-auto px-4 py-6 grid gap-6 lg:grid-cols-[1fr_24rem]">
+    <main id="app" class="min-w-0"></main>
+    <aside class="min-w-0">
+      <div class="card bg-base-100 shadow">
+        <div class="card-body p-4">
+          <div class="flex items-center justify-between">
+            <h2 class="card-title text-base">API log</h2>
+            <button id="log-clear" class="btn btn-ghost btn-xs">Clear</button>
+          </div>
+          <ol id="log" class="space-y-2 text-xs max-h-[70vh] overflow-y-auto"></ol>
+        </div>
+      </div>
+    </aside>
+  </div>
+</body>
+</html>

@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+/* Tell Tailwind where to scan for utility classes.
+   Paths are relative to this file (web/static/css/). */
+@source "../index.html";
+@source "../js/**/*.js";
+
+/* Exclude the standalone binaries themselves from source scanning. */
+@source not "./tailwindcss";
+@source not "./daisyui{,*}.mjs";
+
+/* DaisyUI plugin (downloaded by `make daisyui-install`).
+   List every theme you want compiled into the output CSS.
+   Flags: --default (applied to :root), --prefersdark (applied under prefers-color-scheme: dark). */
+@plugin "./daisyui.mjs" {
+  themes: light --default, dark --prefersdark;
+}

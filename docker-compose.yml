@@ -1,0 +1,31 @@
+# Local development services. The app itself runs on the host (make dev) so
+# air can hot-reload it.
+name: chorus
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: chorus
+      POSTGRES_PASSWORD: chorus
+      POSTGRES_DB: chorus
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+      # Creates the chorus_test database used by integration tests.
+      - ./deploy/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U chorus -d chorus"]  # TCP: the init-time server is socket-only
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  smtp4dev:
+    image: rnwood/smtp4dev:latest
+    ports:
+      - "127.0.0.1:2525:25"   # SMTP
+      - "127.0.0.1:5080:80"   # web UI: read verification / reset emails here
+
+volumes:
+  pgdata:

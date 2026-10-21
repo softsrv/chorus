@@ -1,0 +1,23 @@
+# Secrets
+.env
+
+# Build output
+bin/
+tmp/
+
+# Test output
+coverage.out
+*.test
+
+# OS metadata
+.DS_Store
+
+# DaisyUI standalone bundles (fetched by `make daisyui-install`)
+web/static/css/daisyui.mjs
+web/static/css/daisyui-theme.mjs
+
+# Compiled CSS output
+web/static/css/dist/*.css
+
+# Node (if using the npm Tailwind CLI)
+node_modules/

@@ -1,0 +1,11 @@
+.env
+.env.*
+.git/
+.gitignore
+*.md
+bin/
+tmp/
+node_modules/
+web/static/css/dist/
+coverage.out
+.air.toml
