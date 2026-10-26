@@ -79,10 +79,10 @@ func main() {
 	// Google sign-in is optional: it is enabled only when both the client id
 	// and secret are set, and the app runs normally without them.
 	var googleSignIn *app.GoogleSignIn
-	if cfg.GoogleClientID != "" && cfg.GoogleClientSecret != "" {
+	if cfg.Google.Enabled {
 		googleSignIn = app.NewGoogleSignIn(queries, authSvc, app.GoogleSignInConfig{
-			ClientID:     cfg.GoogleClientID,
-			ClientSecret: cfg.GoogleClientSecret,
+			ClientID:     cfg.Google.ClientID,
+			ClientSecret: cfg.Google.ClientSecret,
 			RedirectURL:  strings.TrimRight(cfg.AppBaseURL, "/") + "/api/v1/auth/google/callback",
 		})
 	}
@@ -153,6 +153,13 @@ func main() {
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
+type GoogleConfig struct {
+	ClientID     string
+	ClientSecret string
+	TokenKey     string
+	Enabled      bool
+}
+
 type config struct {
 	AppEnv             string
 	Port               string
@@ -172,34 +179,97 @@ type config struct {
 	SMTPPassword       string
 	SMTPFromEmail      string
 	SMTPFromName       string
-	GoogleClientID     string
-	GoogleClientSecret string
+	Google             GoogleConfig
 }
 
 func mustLoadConfig() config {
+	cfg, err := loadConfig(os.Getenv, slog.Default())
+	if err != nil {
+		slog.Error("configuration error", "error", err)
+		os.Exit(1)
+	}
+	return cfg
+}
+
+func loadConfig(getenv func(string) string, logger *slog.Logger) (config, error) {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	getEnvOrDefault := func(key, def string) string {
+		if v := getenv(key); v != "" {
+			return v
+		}
+		return def
+	}
+
+	requireEnv := func(key string) (string, error) {
+		v := getenv(key)
+		if v == "" {
+			return "", fmt.Errorf("required environment variable %s is not set", key)
+		}
+		return v, nil
+	}
+
+	appBaseURL, err := requireEnv("APP_BASE_URL")
+	if err != nil {
+		return config{}, err
+	}
+	databaseURL, err := requireEnv("DATABASE_URL")
+	if err != nil {
+		return config{}, err
+	}
+	jwtSecret, err := requireEnv("JWT_SECRET")
+	if err != nil {
+		return config{}, err
+	}
+	smtpHost, err := requireEnv("SMTP_HOST")
+	if err != nil {
+		return config{}, err
+	}
+	smtpPort, err := requireEnv("SMTP_PORT")
+	if err != nil {
+		return config{}, err
+	}
+	smtpFromEmail, err := requireEnv("SMTP_FROM_EMAIL")
+	if err != nil {
+		return config{}, err
+	}
+
+	if len(jwtSecret) < 32 {
+		return config{}, errors.New("JWT_SECRET must be at least 32 bytes")
+	}
+
 	cfg := config{
 		AppEnv:        getEnvOrDefault("APP_ENV", "development"),
 		Port:          getEnvOrDefault("PORT", "8080"),
-		AppBaseURL:    mustGetEnv("APP_BASE_URL"),
-		DatabaseURL:   mustGetEnv("DATABASE_URL"),
-		JWTSecret:     mustGetEnv("JWT_SECRET"),
-		SMTPHost:      mustGetEnv("SMTP_HOST"),
-		SMTPPort:      mustGetEnv("SMTP_PORT"),
-		SMTPUsername:  os.Getenv("SMTP_USERNAME"),
-		SMTPPassword:  os.Getenv("SMTP_PASSWORD"),
-		SMTPFromEmail: mustGetEnv("SMTP_FROM_EMAIL"),
+		AppBaseURL:    appBaseURL,
+		DatabaseURL:   databaseURL,
+		JWTSecret:     jwtSecret,
+		SMTPHost:      smtpHost,
+		SMTPPort:      smtpPort,
+		SMTPUsername:  getenv("SMTP_USERNAME"),
+		SMTPPassword:  getenv("SMTP_PASSWORD"),
+		SMTPFromEmail: smtpFromEmail,
 		SMTPFromName:  getEnvOrDefault("SMTP_FROM_NAME", "Chorus"),
-		// Optional: Google sign-in is off unless both are set.
-		GoogleClientID:     getEnvOrDefault("GOOGLE_CLIENT_ID", ""),
-		GoogleClientSecret: getEnvOrDefault("GOOGLE_CLIENT_SECRET", ""),
+		Google: GoogleConfig{
+			ClientID:     getEnvOrDefault("GOOGLE_CLIENT_ID", ""),
+			ClientSecret: getEnvOrDefault("GOOGLE_CLIENT_SECRET", ""),
+			TokenKey:     getEnvOrDefault("GOOGLE_TOKEN_KEY", ""),
+		},
 	}
 
-	if len(cfg.JWTSecret) < 32 {
-		slog.Error("JWT_SECRET must be at least 32 bytes")
-		os.Exit(1)
+	hasID := cfg.Google.ClientID != ""
+	hasSecret := cfg.Google.ClientSecret != ""
+	if hasID && hasSecret {
+		cfg.Google.Enabled = true
+	} else if hasID || hasSecret {
+		logger.Warn("Google sign-in is disabled: both GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be set")
 	}
 
-	var err error
 	cfg.DBMaxConns, err = strconv.Atoi(getEnvOrDefault("DB_MAX_CONNS", "25"))
 	if err != nil {
 		cfg.DBMaxConns = 25
@@ -235,23 +305,7 @@ func mustLoadConfig() config {
 		cfg.PasswordMinLen = 8
 	}
 
-	return cfg
-}
-
-func mustGetEnv(key string) string {
-	v := os.Getenv(key)
-	if v == "" {
-		slog.Error(fmt.Sprintf("required environment variable %s is not set", key))
-		os.Exit(1)
-	}
-	return v
-}
-
-func getEnvOrDefault(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
+	return cfg, nil
 }
 
 func setupLogger(env string) {
