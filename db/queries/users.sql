@@ -3,6 +3,22 @@ INSERT INTO users (id, email, display_name, password_hash, email_verified, creat
 VALUES ($1, $2, $3, $4, false, NOW(), NOW())
 RETURNING *;
 
+-- name: CreateGoogleUser :one
+-- Creates a passwordless account for a Google sign-in. Google has verified the
+-- email, so the account starts verified.
+INSERT INTO users (id, email, display_name, password_hash, google_subject, email_verified, created_at, updated_at)
+VALUES ($1, $2, $3, NULL, $4, true, NOW(), NOW())
+RETURNING *;
+
+-- name: GetUserByGoogleSubject :one
+SELECT * FROM users WHERE google_subject = $1 LIMIT 1;
+
+-- name: SetGoogleSubject :execrows
+-- Links a Google account to an existing user. Conditional on google_subject IS
+-- NULL so an account already linked to a Google identity is never relinked.
+UPDATE users SET google_subject = $2, updated_at = NOW()
+WHERE id = $1 AND google_subject IS NULL;
+
 -- name: GetUserByID :one
 SELECT * FROM users WHERE id = $1 LIMIT 1;
 

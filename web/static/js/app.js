@@ -1,7 +1,16 @@
 // Chorus web test client. Plain DOM, no framework. All user-supplied text is
 // inserted with textContent (never innerHTML), so API data can't inject markup.
 
-import { api, publicApi, refresh, setTokens, clearTokens, setLogger, session, ApiError, DEVICE_NAME } from './api.js';
+import { api, publicApi, refresh, setTokens, clearTokens, setLogger, session, ApiError, DEVICE_NAME, authConfig, googleRedeem } from './api.js';
+
+let authConfigPromise = null;
+
+function getAuthConfig() {
+  if (!authConfigPromise) {
+    authConfigPromise = authConfig().catch(() => ({ google_sign_in: false, google_calendar: false }));
+  }
+  return authConfigPromise;
+}
 
 const $app = document.getElementById('app');
 const $nav = document.getElementById('nav-actions');
@@ -150,6 +159,31 @@ async function boot() {
   if (location.pathname === '/reset-password' && params.get('token')) return resetPasswordView(params.get('token'));
   if (location.pathname === '/forgot-password') return authView('forgot');
 
+  if (location.pathname === '/google-sign-in') {
+    const errorParam = params.get('error');
+    const codeParam = params.get('code');
+    if (errorParam) {
+      history.replaceState(null, '', '/');
+      const msg = errorParam === 'cancelled' ? 'Google sign-in was cancelled' : 'Google sign-in failed';
+      toast(msg, 'error');
+      return authView('login', msg);
+    }
+    if (codeParam) {
+      $app.replaceChildren(el('div', { class: 'max-w-md mx-auto' }, card('Signing in with Google…')));
+      try {
+        await googleRedeem(codeParam);
+        history.replaceState(null, '', '/');
+        return homeView();
+      } catch (err) {
+        history.replaceState(null, '', '/');
+        toast('Google sign-in failed', 'error');
+        return authView('login', 'Google sign-in failed');
+      }
+    }
+    history.replaceState(null, '', '/');
+    return authView('login');
+  }
+
   if (!session.user) await refresh();
   if (session.user) return homeView();
   return authView('login');
@@ -181,10 +215,14 @@ function renderNav() {
 
 // ── Auth views ────────────────────────────────────────────────────────────────
 
-function authView(tab) {
+async function authView(tab, alertMsg = null) {
   renderNav();
+  const cfg = await getAuthConfig();
   const tabs = [['login', 'Sign in'], ['register', 'Register'], ['forgot', 'Forgot password']];
-  const $body = el('div');
+  const $body = el('div', { class: 'space-y-3' });
+  if (alertMsg) {
+    $body.append(alertBox('error', alertMsg));
+  }
   const tabBar = el('div', { role: 'tablist', class: 'tabs tabs-box' },
     tabs.map(([id, label]) => el('a', {
       role: 'tab', class: `tab ${id === tab ? 'tab-active' : ''}`, text: label, href: '#',
@@ -203,6 +241,12 @@ function authView(tab) {
         goHome();
       },
     }));
+    if (cfg?.google_sign_in === true) {
+      $body.append(
+        el('div', { class: 'divider', text: 'or' }),
+        el('a', { class: 'btn btn-outline w-full', href: '/api/v1/auth/google/start', text: 'Sign in with Google' })
+      );
+    }
   } else if (tab === 'register') {
     $body.append(form({
       fields: [
@@ -216,6 +260,12 @@ function authView(tab) {
         $form.replaceWith(alertBox('success', `${res.message} (Local dev: open smtp4dev at http://localhost:5080.)`));
       },
     }));
+    if (cfg?.google_sign_in === true) {
+      $body.append(
+        el('div', { class: 'divider', text: 'or' }),
+        el('a', { class: 'btn btn-outline w-full', href: '/api/v1/auth/google/start', text: 'Sign in with Google' })
+      );
+    }
   } else {
     $body.append(form({
       fields: [{ name: 'email', label: 'Email', type: 'email', required: true, autocomplete: 'email' }],
@@ -575,6 +625,8 @@ async function accountView() {
       }, $sessionsErr),
     })));
 
+  const hasPassword = session.user?.has_password !== false;
+
   $app.replaceChildren(el('div', { class: 'max-w-2xl mx-auto space-y-6' },
     el('button', { class: 'btn btn-ghost btn-sm', text: '← Back', onclick: () => homeView() }),
     card('Profile', el('p', { class: 'text-sm opacity-70', text: session.user.email }), form({
@@ -582,22 +634,30 @@ async function accountView() {
       submit: 'Save',
       onSubmit: async (v) => { session.user = await api('PUT', '/me', v); renderNav(); toast('Saved', 'success'); },
     })),
-    card('Change password', form({
-      fields: [
-        { name: 'current_password', label: 'Current password', type: 'password', required: true, autocomplete: 'current-password' },
-        { name: 'new_password', label: 'New password', type: 'password', required: true, autocomplete: 'new-password' },
-      ],
-      submit: 'Change password',
-      onSubmit: async (v, $form) => { await api('POST', '/me/password', v); $form.reset(); toast('Password changed. Other devices were signed out.', 'success'); accountView(); },
-    })),
+    hasPassword
+      ? card('Change password', form({
+          fields: [
+            { name: 'current_password', label: 'Current password', type: 'password', required: true, autocomplete: 'current-password' },
+            { name: 'new_password', label: 'New password', type: 'password', required: true, autocomplete: 'new-password' },
+          ],
+          submit: 'Change password',
+          onSubmit: async (v, $form) => { await api('POST', '/me/password', v); $form.reset(); toast('Password changed. Other devices were signed out.', 'success'); accountView(); },
+        }))
+      : card('Password', el('p', { class: 'text-sm opacity-70', text: 'You sign in with Google; no password is set.' })),
     card('Signed-in devices', $sessionsErr, el('ul', {}, sessionRows)),
     card('Delete account',
       el('p', { class: 'text-sm', text: 'Permanently deletes your account. Households where you are the only member are deleted too.' }),
-      form({
-        fields: [{ name: 'password', label: 'Confirm password', type: 'password', required: true, autocomplete: 'current-password' }],
-        submit: 'Delete my account',
-        onSubmit: async (v) => { await api('DELETE', '/me', v); clearTokens(); goHome(); },
-      }))));
+      hasPassword
+        ? form({
+            fields: [{ name: 'password', label: 'Confirm password', type: 'password', required: true, autocomplete: 'current-password' }],
+            submit: 'Delete my account',
+            onSubmit: async (v) => { await api('DELETE', '/me', v); clearTokens(); goHome(); },
+          })
+        : form({
+            fields: [{ name: 'email', label: 'Confirm email', type: 'email', required: true, autocomplete: 'email' }],
+            submit: 'Delete my account',
+            onSubmit: async (v) => { await api('DELETE', '/me', v); clearTokens(); goHome(); },
+          }))));
 }
 
 boot().catch((err) => showError($app, err));

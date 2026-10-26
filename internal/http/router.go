@@ -22,6 +22,7 @@ type RouterConfig struct {
 	HouseholdSvc      *app.HouseholdService
 	ChoreSvc          *app.ChoreService
 	EventSvc          *app.EventService
+	GoogleSignIn      *app.GoogleSignIn // nil = Google sign-in disabled
 	JWTSecret         string
 	Secure            bool // true in production
 	TrustedProxyCount int
@@ -39,6 +40,7 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	householdH := handlers.NewHouseholdHandler(cfg.HouseholdSvc)
 	choreH := handlers.NewChoreHandler(cfg.ChoreSvc)
 	eventH := handlers.NewEventHandler(cfg.EventSvc)
+	googleH := handlers.NewGoogleHandler(cfg.GoogleSignIn, cfg.TrustedProxyCount)
 
 	// ── Rate limiters ─────────────────────────────────────────────────────────
 	// Each limiter spawns a sweep goroutine that exits when ctx is cancelled.
@@ -53,6 +55,9 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	resetRL := middleware.NewRateLimiter(ctx, 10, time.Hour, ipKey)
 	verifyRL := middleware.NewRateLimiter(ctx, 10, time.Hour, ipKey)
 	inviteRL := middleware.NewRateLimiter(ctx, 10, time.Hour, userKey)
+	googleStartRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
+	googleCallbackRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
+	googleRedeemRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
 
 	limit := func(rl *middleware.RateLimiter, h http.HandlerFunc) http.Handler { return rl.Middleware(h) }
 
@@ -70,6 +75,13 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("POST /api/v1/auth/forgot-password", limit(forgotRL, authH.ForgotPassword))
 	api.Handle("POST /api/v1/auth/reset-password", limit(resetRL, authH.ResetPassword))
 	api.Handle("POST /api/v1/auth/logout", authed(authH.Logout))
+
+	// ── Google sign-in (public). When Google isn't configured, config reports
+	// it off and the other three answer the JSON 404 without contacting Google.
+	api.HandleFunc("GET /api/v1/auth/config", googleH.AuthConfig)
+	api.Handle("GET /api/v1/auth/google/start", limit(googleStartRL, googleH.GoogleStart))
+	api.Handle("GET /api/v1/auth/google/callback", limit(googleCallbackRL, googleH.GoogleCallback))
+	api.Handle("POST /api/v1/auth/google/redeem", limit(googleRedeemRL, googleH.GoogleRedeem))
 
 	// ── Current user ──────────────────────────────────────────────────────────
 	api.Handle("GET /api/v1/me", authed(meH.Get))
@@ -122,12 +134,13 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 
 	staticFS := web.Static(!cfg.Secure)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(staticFS)))
-	// The web client is a single page; these are the paths emailed links land on.
+	// The web client is a single page; these are the paths emailed links (and
+	// the Google sign-in callback redirect) land on.
 	serveIndex := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache")
 		http.ServeFileFS(w, r, staticFS, "index.html")
 	}
-	for _, p := range []string{"/{$}", "/verify-email", "/reset-password", "/forgot-password"} {
+	for _, p := range []string{"/{$}", "/verify-email", "/reset-password", "/forgot-password", "/google-sign-in"} {
 		mux.HandleFunc("GET "+p, serveIndex)
 	}
 

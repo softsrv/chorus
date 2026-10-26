@@ -52,11 +52,21 @@ func CleanupTokens(ctx context.Context, q *db.Queries) {
 	if err != nil {
 		slog.Error("token cleanup: delete stale household invites", "error", err)
 	}
+	n5, err := q.DeleteStaleOAuthStates(ctx)
+	if err != nil {
+		slog.Error("token cleanup: delete stale oauth states", "error", err)
+	}
+	n6, err := q.DeleteStaleSignInHandoffs(ctx)
+	if err != nil {
+		slog.Error("token cleanup: delete stale google sign-in handoffs", "error", err)
+	}
 
 	slog.Info("token cleanup complete",
 		"refresh_tokens_deleted", n1,
 		"reset_tokens_deleted", n2,
 		"verification_codes_deleted", n3,
 		"household_invites_deleted", n4,
+		"oauth_states_deleted", n5,
+		"google_sign_in_handoffs_deleted", n6,
 	)
 }

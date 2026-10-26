@@ -48,6 +48,15 @@ type Event struct {
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 }
 
+type GoogleSignInHandoff struct {
+	ID        uuid.UUID          `json:"id"`
+	CodeHash  string             `json:"code_hash"`
+	UserID    uuid.UUID          `json:"user_id"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+	UsedAt    pgtype.Timestamptz `json:"used_at"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
 type Household struct {
 	ID        uuid.UUID          `json:"id"`
 	Name      string             `json:"name"`
@@ -72,6 +81,17 @@ type HouseholdMember struct {
 	UserID      uuid.UUID          `json:"user_id"`
 	Role        string             `json:"role"`
 	JoinedAt    pgtype.Timestamptz `json:"joined_at"`
+}
+
+type OauthState struct {
+	ID           uuid.UUID          `json:"id"`
+	StateHash    string             `json:"state_hash"`
+	Purpose      string             `json:"purpose"`
+	UserID       *uuid.UUID         `json:"user_id"`
+	PkceVerifier string             `json:"pkce_verifier"`
+	ExpiresAt    pgtype.Timestamptz `json:"expires_at"`
+	UsedAt       pgtype.Timestamptz `json:"used_at"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 }
 
 type PasswordResetToken struct {
@@ -100,10 +120,11 @@ type User struct {
 	ID                  uuid.UUID          `json:"id"`
 	Email               string             `json:"email"`
 	DisplayName         string             `json:"display_name"`
-	PasswordHash        string             `json:"password_hash"`
+	PasswordHash        pgtype.Text        `json:"password_hash"`
 	EmailVerified       bool               `json:"email_verified"`
 	FailedLoginAttempts int32              `json:"failed_login_attempts"`
 	LockedUntil         pgtype.Timestamptz `json:"locked_until"`
 	CreatedAt           pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+	GoogleSubject       pgtype.Text        `json:"google_subject"`
 }

@@ -25,7 +25,10 @@ type userJSON struct {
 	Email         string    `json:"email"`
 	DisplayName   string    `json:"display_name"`
 	EmailVerified bool      `json:"email_verified"`
-	CreatedAt     time.Time `json:"created_at"`
+	// HasPassword is false for passwordless (Google-only) accounts, which
+	// can't change a password or confirm destructive actions with one.
+	HasPassword bool      `json:"has_password"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 func toUser(u db.User) userJSON {
@@ -34,6 +37,7 @@ func toUser(u db.User) userJSON {
 		Email:         u.Email,
 		DisplayName:   u.DisplayName,
 		EmailVerified: u.EmailVerified,
+		HasPassword:   u.PasswordHash.Valid && u.PasswordHash.String != "",
 		CreatedAt:     u.CreatedAt.Time.UTC(),
 	}
 }

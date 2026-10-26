@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -75,6 +76,17 @@ func main() {
 	choreSvc := app.NewChoreService(queries)
 	eventSvc := app.NewEventService(queries)
 
+	// Google sign-in is optional: it is enabled only when both the client id
+	// and secret are set, and the app runs normally without them.
+	var googleSignIn *app.GoogleSignIn
+	if cfg.GoogleClientID != "" && cfg.GoogleClientSecret != "" {
+		googleSignIn = app.NewGoogleSignIn(queries, authSvc, app.GoogleSignInConfig{
+			ClientID:     cfg.GoogleClientID,
+			ClientSecret: cfg.GoogleClientSecret,
+			RedirectURL:  strings.TrimRight(cfg.AppBaseURL, "/") + "/api/v1/auth/google/callback",
+		})
+	}
+
 	// ── Background context (token cleanup + rate-limiter sweepers) ────────────
 	// cleanupCtx is cancelled after the HTTP server drains, giving background
 	// goroutines a clean signal to stop without racing active requests.
@@ -89,6 +101,7 @@ func main() {
 		HouseholdSvc:      householdSvc,
 		ChoreSvc:          choreSvc,
 		EventSvc:          eventSvc,
+		GoogleSignIn:      googleSignIn,
 		JWTSecret:         cfg.JWTSecret,
 		Secure:            cfg.AppEnv == "production",
 		TrustedProxyCount: cfg.TrustedProxyCount,
@@ -159,6 +172,8 @@ type config struct {
 	SMTPPassword       string
 	SMTPFromEmail      string
 	SMTPFromName       string
+	GoogleClientID     string
+	GoogleClientSecret string
 }
 
 func mustLoadConfig() config {
@@ -174,6 +189,9 @@ func mustLoadConfig() config {
 		SMTPPassword:  os.Getenv("SMTP_PASSWORD"),
 		SMTPFromEmail: mustGetEnv("SMTP_FROM_EMAIL"),
 		SMTPFromName:  getEnvOrDefault("SMTP_FROM_NAME", "Chorus"),
+		// Optional: Google sign-in is off unless both are set.
+		GoogleClientID:     getEnvOrDefault("GOOGLE_CLIENT_ID", ""),
+		GoogleClientSecret: getEnvOrDefault("GOOGLE_CLIENT_SECRET", ""),
 	}
 
 	if len(cfg.JWTSecret) < 32 {

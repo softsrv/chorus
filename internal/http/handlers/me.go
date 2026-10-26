@@ -15,7 +15,7 @@ import (
 
 type accountAuthServicer interface {
 	ChangePassword(ctx context.Context, userID, currentSessionID uuid.UUID, currentPassword, newPassword string) error
-	DeleteAccount(ctx context.Context, userID uuid.UUID, password string) error
+	DeleteAccount(ctx context.Context, userID, currentSessionID uuid.UUID, password, confirmEmail string) error
 	ResendVerification(ctx context.Context, userID uuid.UUID) error
 }
 
@@ -77,15 +77,19 @@ func (h *MeHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 }
 
 // Delete permanently deletes the account. The password is required again so a
-// stolen access token alone can't destroy the account.
+// stolen access token alone can't destroy the account. A passwordless
+// (Google-only) user types their account email instead, from a session they
+// signed in to within the last few minutes.
 func (h *MeHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Password string `json:"password"`
+		Email    string `json:"email"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := h.auth.DeleteAccount(r.Context(), currentUser(r), req.Password); err != nil {
+	sessionID, _ := middleware.SessionIDFromContext(r.Context())
+	if err := h.auth.DeleteAccount(r.Context(), currentUser(r), sessionID, req.Password, req.Email); err != nil {
 		if errors.Is(err, app.ErrInvalidCredentials) {
 			respond.ValidationError(w, map[string]string{"password": "is incorrect"})
 			return

@@ -12,17 +12,55 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const createGoogleUser = `-- name: CreateGoogleUser :one
+INSERT INTO users (id, email, display_name, password_hash, google_subject, email_verified, created_at, updated_at)
+VALUES ($1, $2, $3, NULL, $4, true, NOW(), NOW())
+RETURNING id, email, display_name, password_hash, email_verified, failed_login_attempts, locked_until, created_at, updated_at, google_subject
+`
+
+type CreateGoogleUserParams struct {
+	ID            uuid.UUID   `json:"id"`
+	Email         string      `json:"email"`
+	DisplayName   string      `json:"display_name"`
+	GoogleSubject pgtype.Text `json:"google_subject"`
+}
+
+// Creates a passwordless account for a Google sign-in. Google has verified the
+// email, so the account starts verified.
+func (q *Queries) CreateGoogleUser(ctx context.Context, arg CreateGoogleUserParams) (User, error) {
+	row := q.db.QueryRow(ctx, createGoogleUser,
+		arg.ID,
+		arg.Email,
+		arg.DisplayName,
+		arg.GoogleSubject,
+	)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.DisplayName,
+		&i.PasswordHash,
+		&i.EmailVerified,
+		&i.FailedLoginAttempts,
+		&i.LockedUntil,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.GoogleSubject,
+	)
+	return i, err
+}
+
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (id, email, display_name, password_hash, email_verified, created_at, updated_at)
 VALUES ($1, $2, $3, $4, false, NOW(), NOW())
-RETURNING id, email, display_name, password_hash, email_verified, failed_login_attempts, locked_until, created_at, updated_at
+RETURNING id, email, display_name, password_hash, email_verified, failed_login_attempts, locked_until, created_at, updated_at, google_subject
 `
 
 type CreateUserParams struct {
-	ID           uuid.UUID `json:"id"`
-	Email        string    `json:"email"`
-	DisplayName  string    `json:"display_name"`
-	PasswordHash string    `json:"password_hash"`
+	ID           uuid.UUID   `json:"id"`
+	Email        string      `json:"email"`
+	DisplayName  string      `json:"display_name"`
+	PasswordHash pgtype.Text `json:"password_hash"`
 }
 
 func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, error) {
@@ -43,6 +81,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.LockedUntil,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.GoogleSubject,
 	)
 	return i, err
 }
@@ -57,7 +96,7 @@ func (q *Queries) DeleteUserByID(ctx context.Context, id uuid.UUID) error {
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, email, display_name, password_hash, email_verified, failed_login_attempts, locked_until, created_at, updated_at FROM users WHERE email = $1 LIMIT 1
+SELECT id, email, display_name, password_hash, email_verified, failed_login_attempts, locked_until, created_at, updated_at, google_subject FROM users WHERE email = $1 LIMIT 1
 `
 
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
@@ -73,12 +112,35 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 		&i.LockedUntil,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.GoogleSubject,
+	)
+	return i, err
+}
+
+const getUserByGoogleSubject = `-- name: GetUserByGoogleSubject :one
+SELECT id, email, display_name, password_hash, email_verified, failed_login_attempts, locked_until, created_at, updated_at, google_subject FROM users WHERE google_subject = $1 LIMIT 1
+`
+
+func (q *Queries) GetUserByGoogleSubject(ctx context.Context, googleSubject pgtype.Text) (User, error) {
+	row := q.db.QueryRow(ctx, getUserByGoogleSubject, googleSubject)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.DisplayName,
+		&i.PasswordHash,
+		&i.EmailVerified,
+		&i.FailedLoginAttempts,
+		&i.LockedUntil,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.GoogleSubject,
 	)
 	return i, err
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, email, display_name, password_hash, email_verified, failed_login_attempts, locked_until, created_at, updated_at FROM users WHERE id = $1 LIMIT 1
+SELECT id, email, display_name, password_hash, email_verified, failed_login_attempts, locked_until, created_at, updated_at, google_subject FROM users WHERE id = $1 LIMIT 1
 `
 
 func (q *Queries) GetUserByID(ctx context.Context, id uuid.UUID) (User, error) {
@@ -94,12 +156,13 @@ func (q *Queries) GetUserByID(ctx context.Context, id uuid.UUID) (User, error) {
 		&i.LockedUntil,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.GoogleSubject,
 	)
 	return i, err
 }
 
 const getUserForSession = `-- name: GetUserForSession :one
-SELECT u.id, u.email, u.display_name, u.password_hash, u.email_verified, u.failed_login_attempts, u.locked_until, u.created_at, u.updated_at FROM users u
+SELECT u.id, u.email, u.display_name, u.password_hash, u.email_verified, u.failed_login_attempts, u.locked_until, u.created_at, u.updated_at, u.google_subject FROM users u
 JOIN refresh_tokens rt ON rt.user_id = u.id
 WHERE rt.id = $1
   AND u.id = $2
@@ -128,6 +191,7 @@ func (q *Queries) GetUserForSession(ctx context.Context, arg GetUserForSessionPa
 		&i.LockedUntil,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.GoogleSubject,
 	)
 	return i, err
 }
@@ -173,9 +237,29 @@ func (q *Queries) SetEmailVerified(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+const setGoogleSubject = `-- name: SetGoogleSubject :execrows
+UPDATE users SET google_subject = $2, updated_at = NOW()
+WHERE id = $1 AND google_subject IS NULL
+`
+
+type SetGoogleSubjectParams struct {
+	ID            uuid.UUID   `json:"id"`
+	GoogleSubject pgtype.Text `json:"google_subject"`
+}
+
+// Links a Google account to an existing user. Conditional on google_subject IS
+// NULL so an account already linked to a Google identity is never relinked.
+func (q *Queries) SetGoogleSubject(ctx context.Context, arg SetGoogleSubjectParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setGoogleSubject, arg.ID, arg.GoogleSubject)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const updateDisplayName = `-- name: UpdateDisplayName :one
 UPDATE users SET display_name = $2, updated_at = NOW() WHERE id = $1
-RETURNING id, email, display_name, password_hash, email_verified, failed_login_attempts, locked_until, created_at, updated_at
+RETURNING id, email, display_name, password_hash, email_verified, failed_login_attempts, locked_until, created_at, updated_at, google_subject
 `
 
 type UpdateDisplayNameParams struct {
@@ -196,6 +280,7 @@ func (q *Queries) UpdateDisplayName(ctx context.Context, arg UpdateDisplayNamePa
 		&i.LockedUntil,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.GoogleSubject,
 	)
 	return i, err
 }
@@ -205,8 +290,8 @@ UPDATE users SET password_hash = $2, failed_login_attempts = 0, locked_until = N
 `
 
 type UpdatePasswordHashParams struct {
-	ID           uuid.UUID `json:"id"`
-	PasswordHash string    `json:"password_hash"`
+	ID           uuid.UUID   `json:"id"`
+	PasswordHash pgtype.Text `json:"password_hash"`
 }
 
 func (q *Queries) UpdatePasswordHash(ctx context.Context, arg UpdatePasswordHashParams) error {

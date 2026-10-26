@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/softsrv/chorus/internal/app"
 	"github.com/softsrv/chorus/internal/db"
 )
@@ -144,7 +146,7 @@ func TestIntegration_InvitesAndAdminRules(t *testing.T) {
 	}
 	// Account deletion is blocked for the same reason.
 	var hbErr app.HouseholdBlockingError
-	if err := authSvc.DeleteAccount(ctx, parent, "correct-password-123"); !errors.As(err, &hbErr) {
+	if err := authSvc.DeleteAccount(ctx, parent, uuid.Nil, "correct-password-123", ""); !errors.As(err, &hbErr) {
 		t.Errorf("delete sole admin account: expected HouseholdBlockingError, got %v", err)
 	}
 
@@ -161,7 +163,7 @@ func TestIntegration_InvitesAndAdminRules(t *testing.T) {
 	}
 
 	// Now the parent is the sole member; deleting the account deletes the household.
-	if err := authSvc.DeleteAccount(ctx, parent, "correct-password-123"); err != nil {
+	if err := authSvc.DeleteAccount(ctx, parent, uuid.Nil, "correct-password-123", ""); err != nil {
 		t.Fatalf("DeleteAccount: %v", err)
 	}
 	var n int
