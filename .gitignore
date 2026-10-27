@@ -4,6 +4,7 @@
 # Build output
 bin/
 tmp/
+/app
 
 # Test output
 coverage.out

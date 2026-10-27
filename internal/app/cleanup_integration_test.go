@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/softsrv/chorus/internal/app"
@@ -27,7 +28,7 @@ func seedUser(t *testing.T, ctx context.Context, pool *pgxpool.Pool) uuid.UUID {
 		ID:           id,
 		Email:        fmt.Sprintf("cleanup-test-%s@example.com", id),
 		DisplayName:  "Cleanup Test",
-		PasswordHash: "$2a$12$placeholder",
+		PasswordHash: pgtype.Text{String: "$2a$12$placeholder", Valid: true},
 	}); err != nil {
 		t.Fatalf("seedUser CreateUser: %v", err)
 	}
@@ -241,5 +242,67 @@ func TestIntegration_TokenCleanup_VerificationCodes(t *testing.T) {
 	}
 	if !exists(t, ctx, pool, "email_verification_codes", freshPending) {
 		t.Error("pending verification code should not have been deleted")
+	}
+}
+
+// TestIntegration_TokenCleanup_GoogleSignIn verifies stale OAuth state rows
+// and Google sign-in hand-off codes are swept, and live ones are kept:
+//
+//   - used or expired more than 7 days ago → deleted
+//   - used recently / still pending        → preserved
+func TestIntegration_TokenCleanup_GoogleSignIn(t *testing.T) {
+	pool := testDB(t)
+	ctx := context.Background()
+	userID := seedUser(t, ctx, pool)
+
+	insert := func(table string, expiresAt time.Time, usedAt *time.Time) uuid.UUID {
+		t.Helper()
+		id, err := uuid.NewV7()
+		if err != nil {
+			t.Fatalf("uuid: %v", err)
+		}
+		var q string
+		args := []any{id, "hash-" + id.String(), expiresAt, usedAt}
+		switch table {
+		case "oauth_states":
+			q = `INSERT INTO oauth_states (id, state_hash, expires_at, used_at, purpose, pkce_verifier)
+				VALUES ($1, $2, $3, $4, 'sign_in', 'verifier')`
+		case "google_sign_in_handoffs":
+			q = `INSERT INTO google_sign_in_handoffs (id, code_hash, expires_at, used_at, user_id)
+				VALUES ($1, $2, $3, $4, $5)`
+			args = append(args, userID)
+		}
+		if _, err := pool.Exec(ctx, q, args...); err != nil {
+			t.Fatalf("insert %s: %v", table, err)
+		}
+		t.Cleanup(func() { _, _ = pool.Exec(context.Background(), "DELETE FROM "+table+" WHERE id = $1", id) })
+		return id
+	}
+
+	now := time.Now()
+	ago8 := now.Add(-8 * 24 * time.Hour)
+	ago1 := now.Add(-24 * time.Hour)
+	future := now.Add(10 * time.Minute)
+
+	for _, table := range []string{"oauth_states", "google_sign_in_handoffs"} {
+		staleUsed := insert(table, future, &ago8)
+		staleExpired := insert(table, ago8, nil)
+		freshUsed := insert(table, future, &ago1)
+		freshPending := insert(table, future, nil)
+
+		app.CleanupTokens(ctx, db.New(pool))
+
+		if exists(t, ctx, pool, table, staleUsed) {
+			t.Errorf("%s: row used 8d ago should have been deleted", table)
+		}
+		if exists(t, ctx, pool, table, staleExpired) {
+			t.Errorf("%s: row expired 8d ago should have been deleted", table)
+		}
+		if !exists(t, ctx, pool, table, freshUsed) {
+			t.Errorf("%s: row used 1d ago should not have been deleted", table)
+		}
+		if !exists(t, ctx, pool, table, freshPending) {
+			t.Errorf("%s: pending row should not have been deleted", table)
+		}
 	}
 }

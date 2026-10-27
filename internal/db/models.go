@@ -48,12 +48,43 @@ type Event struct {
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 }
 
+type GoogleCalendarConnection struct {
+	ID              uuid.UUID          `json:"id"`
+	UserID          uuid.UUID          `json:"user_id"`
+	AccessTokenEnc  []byte             `json:"access_token_enc"`
+	RefreshTokenEnc []byte             `json:"refresh_token_enc"`
+	TokenExpiry     pgtype.Timestamptz `json:"token_expiry"`
+	AccessLevel     string             `json:"access_level"`
+	Broken          bool               `json:"broken"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+type GoogleSignInHandoff struct {
+	ID        uuid.UUID          `json:"id"`
+	CodeHash  string             `json:"code_hash"`
+	UserID    uuid.UUID          `json:"user_id"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+	UsedAt    pgtype.Timestamptz `json:"used_at"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
 type Household struct {
 	ID        uuid.UUID          `json:"id"`
 	Name      string             `json:"name"`
 	Timezone  string             `json:"timezone"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+}
+
+type HouseholdCalendar struct {
+	ID           uuid.UUID          `json:"id"`
+	HouseholdID  uuid.UUID          `json:"household_id"`
+	SetBy        uuid.UUID          `json:"set_by"`
+	CalendarID   string             `json:"calendar_id"`
+	CalendarName string             `json:"calendar_name"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
 }
 
 type HouseholdInvite struct {
@@ -72,6 +103,17 @@ type HouseholdMember struct {
 	UserID      uuid.UUID          `json:"user_id"`
 	Role        string             `json:"role"`
 	JoinedAt    pgtype.Timestamptz `json:"joined_at"`
+}
+
+type OauthState struct {
+	ID           uuid.UUID          `json:"id"`
+	StateHash    string             `json:"state_hash"`
+	Purpose      string             `json:"purpose"`
+	UserID       *uuid.UUID         `json:"user_id"`
+	PkceVerifier string             `json:"pkce_verifier"`
+	ExpiresAt    pgtype.Timestamptz `json:"expires_at"`
+	UsedAt       pgtype.Timestamptz `json:"used_at"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 }
 
 type PasswordResetToken struct {
@@ -100,10 +142,11 @@ type User struct {
 	ID                  uuid.UUID          `json:"id"`
 	Email               string             `json:"email"`
 	DisplayName         string             `json:"display_name"`
-	PasswordHash        string             `json:"password_hash"`
+	PasswordHash        pgtype.Text        `json:"password_hash"`
 	EmailVerified       bool               `json:"email_verified"`
 	FailedLoginAttempts int32              `json:"failed_login_attempts"`
 	LockedUntil         pgtype.Timestamptz `json:"locked_until"`
 	CreatedAt           pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+	GoogleSubject       pgtype.Text        `json:"google_subject"`
 }

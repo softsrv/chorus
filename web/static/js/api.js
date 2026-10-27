@@ -89,6 +89,16 @@ export async function publicApi(method, path, body) {
   return request(method, path, body, { auth: false });
 }
 
+export async function authConfig() {
+  return publicApi('GET', '/auth/config');
+}
+
+export async function googleRedeem(code, deviceName = DEVICE_NAME) {
+  const t = await publicApi('POST', '/auth/google/redeem', { code, device_name: deviceName });
+  setTokens(t);
+  return t;
+}
+
 async function request(method, path, body, { auth }) {
   const headers = { Accept: 'application/json' };
   if (body !== undefined) headers['Content-Type'] = 'application/json';

@@ -13,6 +13,9 @@ import (
 
 type Querier interface {
 	AddHouseholdMember(ctx context.Context, arg AddHouseholdMemberParams) error
+	// Single use: conditional on used_at IS NULL, unexpired, and the flow's
+	// purpose, so a state can't be replayed or used to complete another flow.
+	ConsumeOAuthState(ctx context.Context, arg ConsumeOAuthStateParams) (OauthState, error)
 	CountRecentPasswordResetsByEmail(ctx context.Context, email string) (int64, error)
 	CountRecentVerificationCodesByUserID(ctx context.Context, userID uuid.UUID) (int64, error)
 	// Every chore query is scoped by household_id. Membership is checked by the
@@ -21,20 +24,33 @@ type Querier interface {
 	CreateChore(ctx context.Context, arg CreateChoreParams) (Chore, error)
 	// Every event query is scoped by household_id; see chores.sql.
 	CreateEvent(ctx context.Context, arg CreateEventParams) (Event, error)
+	// Creates a passwordless account for a Google sign-in. Google has verified the
+	// email, so the account starts verified.
+	CreateGoogleUser(ctx context.Context, arg CreateGoogleUserParams) (User, error)
 	CreateHousehold(ctx context.Context, arg CreateHouseholdParams) (Household, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	DeleteChore(ctx context.Context, arg DeleteChoreParams) (int64, error)
 	DeleteEvent(ctx context.Context, arg DeleteEventParams) (int64, error)
 	DeleteExpiredRefreshTokens(ctx context.Context) (int64, error)
+	// Returns the deleted row so its token can be revoked at Google afterwards.
+	DeleteGoogleCalendarConnectionByUser(ctx context.Context, userID uuid.UUID) (GoogleCalendarConnection, error)
 	DeleteHousehold(ctx context.Context, id uuid.UUID) error
+	// Only the member who set it can clear it.
+	DeleteHouseholdCalendar(ctx context.Context, arg DeleteHouseholdCalendarParams) (int64, error)
 	// Deletes every household where the user is the only member.
 	DeleteSoleMemberHouseholds(ctx context.Context, userID uuid.UUID) error
 	DeleteStaleHouseholdInvites(ctx context.Context) (int64, error)
+	DeleteStaleOAuthStates(ctx context.Context) (int64, error)
 	DeleteStalePasswordResetTokens(ctx context.Context) (int64, error)
+	DeleteStaleSignInHandoffs(ctx context.Context) (int64, error)
 	DeleteStaleVerificationCodes(ctx context.Context) (int64, error)
 	DeleteUserByID(ctx context.Context, id uuid.UUID) error
 	GetChore(ctx context.Context, arg GetChoreParams) (Chore, error)
 	GetEvent(ctx context.Context, arg GetEventParams) (Event, error)
+	GetGoogleCalendarConnectionByUser(ctx context.Context, userID uuid.UUID) (GoogleCalendarConnection, error)
+	// Every family-calendar query is scoped by household_id; callers check
+	// membership with getHousehold first.
+	GetHouseholdCalendar(ctx context.Context, householdID uuid.UUID) (GetHouseholdCalendarRow, error)
 	// Returns the household together with the caller's role. No row means either
 	// the household doesn't exist or the user isn't a member; callers treat both
 	// as "not found" so household IDs can't be probed.
@@ -46,6 +62,7 @@ type Querier interface {
 	GetRefreshTokenByHash(ctx context.Context, tokenHash string) (RefreshToken, error)
 	GetRefreshTokenByID(ctx context.Context, id uuid.UUID) (RefreshToken, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
+	GetUserByGoogleSubject(ctx context.Context, googleSubject pgtype.Text) (User, error)
 	GetUserByID(ctx context.Context, id uuid.UUID) (User, error)
 	// Loads the user behind an access token, but only while the session (refresh
 	// token) it was issued under is still live. This makes logout and session
@@ -55,8 +72,10 @@ type Querier interface {
 	IncrementFailedLoginAttempts(ctx context.Context, id uuid.UUID) error
 	InsertEmailVerificationCode(ctx context.Context, arg InsertEmailVerificationCodeParams) (EmailVerificationCode, error)
 	InsertHouseholdInvite(ctx context.Context, arg InsertHouseholdInviteParams) (HouseholdInvite, error)
+	InsertOAuthState(ctx context.Context, arg InsertOAuthStateParams) (OauthState, error)
 	InsertPasswordResetToken(ctx context.Context, arg InsertPasswordResetTokenParams) (PasswordResetToken, error)
 	InsertRefreshToken(ctx context.Context, arg InsertRefreshTokenParams) (RefreshToken, error)
+	InsertSignInHandoff(ctx context.Context, arg InsertSignInHandoffParams) (GoogleSignInHandoff, error)
 	ListActiveRefreshTokensByUserID(ctx context.Context, userID uuid.UUID) ([]RefreshToken, error)
 	// Households where the user is the only admin but other members remain.
 	// Used to block account deletion that would orphan a household.
@@ -68,11 +87,15 @@ type Querier interface {
 	ListHouseholdsForUser(ctx context.Context, userID uuid.UUID) ([]ListHouseholdsForUserRow, error)
 	LockAccount(ctx context.Context, arg LockAccountParams) error
 	LockHouseholdAdmins(ctx context.Context, householdID uuid.UUID) ([]uuid.UUID, error)
+	MarkGoogleCalendarConnectionBroken(ctx context.Context, userID uuid.UUID) (int64, error)
 	MarkHouseholdInviteUsed(ctx context.Context, arg MarkHouseholdInviteUsedParams) error
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
 	MarkPasswordResetTokenUsed(ctx context.Context, id uuid.UUID) (int64, error)
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
 	MarkVerificationCodeUsed(ctx context.Context, id uuid.UUID) (int64, error)
+	// Single use: conditional on used_at IS NULL and unexpired, so two concurrent
+	// redemptions can't both succeed.
+	RedeemSignInHandoff(ctx context.Context, codeHash string) (uuid.UUID, error)
 	RemoveHouseholdMember(ctx context.Context, arg RemoveHouseholdMemberParams) (int64, error)
 	ResetLoginAttempts(ctx context.Context, id uuid.UUID) error
 	RevokeAllUserRefreshTokens(ctx context.Context, userID uuid.UUID) error
@@ -81,13 +104,24 @@ type Querier interface {
 	SetChoreCompleted(ctx context.Context, arg SetChoreCompletedParams) (Chore, error)
 	SetChoreOpen(ctx context.Context, arg SetChoreOpenParams) (Chore, error)
 	SetEmailVerified(ctx context.Context, id uuid.UUID) error
+	// Links a Google account to an existing user. Conditional on google_subject IS
+	// NULL so an account already linked to a Google identity is never relinked.
+	SetGoogleSubject(ctx context.Context, arg SetGoogleSubjectParams) (int64, error)
 	UpdateChore(ctx context.Context, arg UpdateChoreParams) (Chore, error)
 	UpdateDisplayName(ctx context.Context, arg UpdateDisplayNameParams) (User, error)
 	UpdateEvent(ctx context.Context, arg UpdateEventParams) (Event, error)
+	UpdateGoogleCalendarAccessToken(ctx context.Context, arg UpdateGoogleCalendarAccessTokenParams) (int64, error)
 	UpdateHousehold(ctx context.Context, arg UpdateHouseholdParams) (Household, error)
 	UpdateHouseholdMemberRole(ctx context.Context, arg UpdateHouseholdMemberRoleParams) (int64, error)
 	UpdatePasswordHash(ctx context.Context, arg UpdatePasswordHashParams) error
 	UpdateRefreshTokenLastUsed(ctx context.Context, arg UpdateRefreshTokenLastUsedParams) error
+	// One connection per user: a reconnect replaces the tokens and access level
+	// and clears the broken flag.
+	UpsertGoogleCalendarConnection(ctx context.Context, arg UpsertGoogleCalendarConnectionParams) (GoogleCalendarConnection, error)
+	// Sets the household's family calendar. An existing one is only replaced when
+	// it was set by the same member: for anyone else the guarded DO UPDATE
+	// matches nothing and no row is returned.
+	UpsertHouseholdCalendar(ctx context.Context, arg UpsertHouseholdCalendarParams) (HouseholdCalendar, error)
 }
 
 var _ Querier = (*Queries)(nil)

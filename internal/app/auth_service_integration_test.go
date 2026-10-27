@@ -315,7 +315,7 @@ func TestIntegration_AccountLockout(t *testing.T) {
 		ID:           id,
 		Email:        email,
 		DisplayName:  "Lockout",
-		PasswordHash: "$2a$12$placeholder",
+		PasswordHash: pgtype.Text{String: "$2a$12$placeholder", Valid: true},
 	})
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
@@ -331,5 +331,87 @@ func TestIntegration_AccountLockout(t *testing.T) {
 
 	if _, err = svc.Login(ctx, email, "any-password", app.DeviceMeta{}); !errors.Is(err, app.ErrAccountLocked) {
 		t.Errorf("expected ErrAccountLocked, got %v", err)
+	}
+}
+
+// createPasswordlessUser inserts a Google-only account (NULL password_hash)
+// directly through the queries the Google sign-in flow uses.
+func createPasswordlessUser(t *testing.T, pool *pgxpool.Pool, prefix string) db.User {
+	t.Helper()
+	ctx := context.Background()
+	id, err := uuid.NewV7()
+	if err != nil {
+		t.Fatalf("uuid.NewV7: %v", err)
+	}
+	user, err := db.New(pool).CreateGoogleUser(ctx, db.CreateGoogleUserParams{
+		ID:            id,
+		Email:         uniqueEmail(prefix),
+		DisplayName:   prefix,
+		GoogleSubject: pgtype.Text{String: "google-sub-" + id.String(), Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("CreateGoogleUser: %v", err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), "DELETE FROM users WHERE id = $1", user.ID) })
+	return user
+}
+
+// Password sign-in to a passwordless account is refused as invalid
+// credentials, and guessing never counts toward or triggers the lockout.
+func TestIntegration_PasswordlessLoginNeverLocks(t *testing.T) {
+	pool := testDB(t)
+	svc := testAuthService(t, pool, &captureMailer{})
+	ctx := context.Background()
+
+	user := createPasswordlessUser(t, pool, "passwordless")
+	if user.PasswordHash.Valid {
+		t.Fatalf("CreateGoogleUser stored a password hash: %+v", user.PasswordHash)
+	}
+
+	for _, pw := range append([]string{"", "correct-password-123"}, strings.Split(strings.Repeat("guess,", 12), ",")...) {
+		if _, err := svc.Login(ctx, user.Email, pw, app.DeviceMeta{}); !errors.Is(err, app.ErrInvalidCredentials) {
+			t.Fatalf("Login(%q): expected ErrInvalidCredentials, got %v", pw, err)
+		}
+	}
+
+	got, err := db.New(pool).GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if got.FailedLoginAttempts != 0 || got.LockedUntil.Valid {
+		t.Errorf("passwordless account was counted/locked: attempts=%d locked_until=%v", got.FailedLoginAttempts, got.LockedUntil)
+	}
+}
+
+// A password account that also has Google linked keeps password sign-in and
+// the existing lockout threshold unchanged.
+func TestIntegration_GoogleLinkedPasswordUserLoginAndLockout(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	svc := testAuthService(t, pool, mailer)
+	ctx := context.Background()
+	q := db.New(pool)
+
+	signedIn := registerVerified(t, pool, svc, mailer, "linked")
+	user := signedIn.User
+	n, err := q.SetGoogleSubject(ctx, db.SetGoogleSubjectParams{
+		ID:            user.ID,
+		GoogleSubject: pgtype.Text{String: "google-sub-" + user.ID.String(), Valid: true},
+	})
+	if err != nil || n != 1 {
+		t.Fatalf("SetGoogleSubject: n=%d err=%v", n, err)
+	}
+
+	if _, err := svc.Login(ctx, user.Email, "correct-password-123", app.DeviceMeta{}); err != nil {
+		t.Fatalf("linked password user login: %v", err)
+	}
+
+	for i := 0; i < 10; i++ {
+		if _, err := svc.Login(ctx, user.Email, "wrong-password", app.DeviceMeta{}); !errors.Is(err, app.ErrInvalidCredentials) {
+			t.Fatalf("attempt %d: expected ErrInvalidCredentials, got %v", i+1, err)
+		}
+	}
+	if _, err := svc.Login(ctx, user.Email, "correct-password-123", app.DeviceMeta{}); !errors.Is(err, app.ErrAccountLocked) {
+		t.Errorf("after threshold: expected ErrAccountLocked, got %v", err)
 	}
 }

@@ -24,7 +24,16 @@ import (
 const (
 	maxFailedLoginAttempts = 10
 	lockDuration           = time.Hour
+	// recentSignInWindow is how fresh a passwordless user's session must be
+	// for destructive account actions that would otherwise need a password.
+	recentSignInWindow = 10 * time.Minute
 )
+
+// hasPassword reports whether the account can sign in with a password.
+// Google-only accounts have a NULL (or empty) password_hash.
+func hasPassword(u db.User) bool {
+	return u.PasswordHash.Valid && u.PasswordHash.String != ""
+}
 
 // DeviceMeta holds metadata captured from the HTTP request.
 type DeviceMeta struct {
@@ -148,7 +157,7 @@ func (s *AuthService) Register(ctx context.Context, rawEmail, password, displayN
 		ID:           id,
 		Email:        normalizedEmail,
 		DisplayName:  displayName,
-		PasswordHash: string(hash),
+		PasswordHash: pgtype.Text{String: string(hash), Valid: true},
 	})
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -189,12 +198,23 @@ func (s *AuthService) Login(ctx context.Context, rawEmail, password string, meta
 		return TokenResult{}, fmt.Errorf("get user: %w", err)
 	}
 
+	// A passwordless (Google-only) account can never sign in with a password.
+	// Spend the same bcrypt time as the other paths, and refuse before the
+	// lock check and the failed-attempts counter: guessing passwords against
+	// such an account must neither count nor lock it.
+	if !hasPassword(user) {
+		if s.dummyHash != nil {
+			_ = bcrypt.CompareHashAndPassword(s.dummyHash, []byte(password))
+		}
+		return TokenResult{}, ErrInvalidCredentials
+	}
+
 	// Check account lock before anything else.
 	if user.LockedUntil.Valid && user.LockedUntil.Time.After(time.Now()) {
 		return TokenResult{}, ErrAccountLocked
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash.String), []byte(password)); err != nil {
 		if incrErr := s.q.IncrementFailedLoginAttempts(ctx, user.ID); incrErr != nil {
 			slog.Error("increment failed login attempts", "user_id", user.ID, "error", incrErr)
 		}
@@ -371,7 +391,7 @@ func (s *AuthService) CompletePasswordReset(ctx context.Context, rawToken, newPa
 	}
 	if err := qtx.UpdatePasswordHash(ctx, db.UpdatePasswordHashParams{
 		ID:           prt.UserID,
-		PasswordHash: string(newHash),
+		PasswordHash: pgtype.Text{String: string(newHash), Valid: true},
 	}); err != nil {
 		return fmt.Errorf("update password: %w", err)
 	}
@@ -429,7 +449,12 @@ func (s *AuthService) ChangePassword(ctx context.Context, userID, currentSession
 		return fmt.Errorf("get user: %w", err)
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(currentPassword)); err != nil {
+	// A passwordless (Google-only) account has nothing to compare against.
+	if !hasPassword(user) {
+		return &ValidationError{Fields: map[string]string{"current_password": "no password is set on this account; you sign in with Google"}}
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash.String), []byte(currentPassword)); err != nil {
 		return ErrInvalidCredentials
 	}
 
@@ -451,7 +476,7 @@ func (s *AuthService) ChangePassword(ctx context.Context, userID, currentSession
 	qtx := s.q.WithTx(tx)
 	if err := qtx.UpdatePasswordHash(ctx, db.UpdatePasswordHashParams{
 		ID:           userID,
-		PasswordHash: string(newHash),
+		PasswordHash: pgtype.Text{String: string(newHash), Valid: true},
 	}); err != nil {
 		return fmt.Errorf("update password: %w", err)
 	}
@@ -469,17 +494,34 @@ func (s *AuthService) ChangePassword(ctx context.Context, userID, currentSession
 	return nil
 }
 
-// DeleteAccount permanently deletes the user after re-checking their password.
+// DeleteAccount permanently deletes the user after re-checking who is asking.
+// A password user must supply their password. A passwordless (Google-only)
+// user must type their account email instead, and the session making the
+// request must have been created within recentSignInWindow, so a stolen
+// long-lived session alone can't destroy the account.
 // Households where they are the only member are deleted with them. Deletion is
 // refused if it would leave a household that still has members without an
 // admin; the user must promote someone else first.
-func (s *AuthService) DeleteAccount(ctx context.Context, userID uuid.UUID, password string) error {
+func (s *AuthService) DeleteAccount(ctx context.Context, userID, currentSessionID uuid.UUID, password, confirmEmail string) error {
 	user, err := s.q.GetUserByID(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("get user: %w", err)
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
-		return ErrInvalidCredentials
+	if hasPassword(user) {
+		if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash.String), []byte(password)); err != nil {
+			return ErrInvalidCredentials
+		}
+	} else {
+		if users.NormalizeEmail(confirmEmail) != user.Email {
+			return &ValidationError{Fields: map[string]string{"email": "does not match your account email"}}
+		}
+		rt, err := s.q.GetRefreshTokenByID(ctx, currentSessionID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("get session: %w", err)
+		}
+		if err != nil || rt.UserID != userID || !rt.CreatedAt.Valid || time.Since(rt.CreatedAt.Time) > recentSignInWindow {
+			return &ValidationError{Fields: map[string]string{"email": "for your security, sign in with Google again, then delete your account within 10 minutes"}}
+		}
 	}
 
 	tx, err := s.pool.Begin(ctx)

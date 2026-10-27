@@ -18,9 +18,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/softsrv/chorus/internal/app"
+	"github.com/softsrv/chorus/internal/auth"
 	"github.com/softsrv/chorus/internal/db"
 	internalhttp "github.com/softsrv/chorus/internal/http"
 )
@@ -64,6 +66,8 @@ type testServer struct {
 	pool *pgxpool.Pool
 }
 
+const secret = "router-integration-secret-at-least-32-bytes"
+
 func newTestServer(t *testing.T) *testServer {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
@@ -78,7 +82,6 @@ func newTestServer(t *testing.T) *testServer {
 
 	q := db.New(pool)
 	mail := &mailbox{text: map[string]string{}}
-	const secret = "router-integration-secret-at-least-32-bytes"
 	authSvc := app.NewAuthService(q, pool, mail, app.AuthServiceConfig{
 		JWTSecret: secret, AccessExpiry: 15 * time.Minute, RefreshExpiry: 24 * time.Hour,
 		BCryptCost: 10, PasswordMinLen: 8, AppBaseURL: "http://chorus.test", AppName: "Chorus",
@@ -92,7 +95,6 @@ func newTestServer(t *testing.T) *testServer {
 		UserSvc:      app.NewUserService(q),
 		HouseholdSvc: app.NewHouseholdService(q, pool),
 		ChoreSvc:     app.NewChoreService(q),
-		EventSvc:     app.NewEventService(q),
 		JWTSecret:    secret,
 	})
 	srv := httptest.NewServer(handler)
@@ -260,30 +262,10 @@ func TestAPI_EndToEnd(t *testing.T) {
 	s.expect(http.StatusNoContent, "DELETE", cp, kid.AccessToken, nil, nil)
 	s.expect(http.StatusNotFound, "GET", cp, kid.AccessToken, nil, nil)
 
-	// Events.
-	start := time.Date(2026, 11, 5, 18, 0, 0, 0, time.UTC)
-	var ev struct{ ID uuid.UUID }
-	s.expect(http.StatusCreated, "POST", hp+"/events", kid.AccessToken, map[string]any{
-		"title": "Soccer", "starts_at": start, "ends_at": start.Add(90 * time.Minute), "location": "Park",
-	}, &ev)
-	var evs struct{ Items []map[string]any }
-	q := url.Values{"from": {"2026-11-01T00:00:00Z"}, "to": {"2026-12-01T00:00:00Z"}}
-	s.expect(http.StatusOK, "GET", hp+"/events?"+q.Encode(), parent.AccessToken, nil, &evs)
-	if len(evs.Items) != 1 {
-		t.Errorf("events in November: got %d", len(evs.Items))
-	}
-	var bad apiError
-	s.expect(http.StatusUnprocessableEntity, "POST", hp+"/events", kid.AccessToken, map[string]any{
-		"title": "Backwards", "starts_at": start, "ends_at": start.Add(-time.Hour),
-	}, &bad)
-	if bad.Error.Fields["ends_at"] == "" {
-		t.Errorf("expected ends_at field error, got %+v", bad)
-	}
-
 	// Outsiders see nothing.
 	outsider := s.signUp("outsider")
 	s.expect(http.StatusNotFound, "GET", hp, outsider.AccessToken, nil, nil)
-	s.expect(http.StatusNotFound, "GET", hp+"/events/"+ev.ID.String(), outsider.AccessToken, nil, nil)
+	s.expect(http.StatusNotFound, "GET", hp+"/calendar", outsider.AccessToken, nil, nil)
 }
 
 func TestAPI_SessionsAndLogout(t *testing.T) {
@@ -364,4 +346,184 @@ func TestAPI_RequestHardening(t *testing.T) {
 			t.Errorf("%s: got %q, want %q", h, got, want)
 		}
 	}
+}
+
+// passwordless is a Google-only account (NULL password_hash) signed in on one
+// session. It is built straight from the queries the Google sign-in flow uses,
+// so these tests don't depend on talking to Google.
+type passwordless struct {
+	ID          uuid.UUID
+	Email       string
+	SessionID   uuid.UUID
+	AccessToken string
+}
+
+func (s *testServer) signUpPasswordless(name string) passwordless {
+	s.t.Helper()
+	ctx := context.Background()
+	q := db.New(s.pool)
+	id := uuid.Must(uuid.NewV7())
+	email := fmt.Sprintf("%s-%s@example.com", name, uuid.NewString()[:8])
+	user, err := q.CreateGoogleUser(ctx, db.CreateGoogleUserParams{
+		ID: id, Email: email, DisplayName: name,
+		GoogleSubject: pgtype.Text{String: "google-sub-" + id.String(), Valid: true},
+	})
+	if err != nil {
+		s.t.Fatalf("CreateGoogleUser: %v", err)
+	}
+	s.t.Cleanup(func() { _, _ = s.pool.Exec(context.Background(), "DELETE FROM users WHERE id = $1", user.ID) })
+
+	_, hashed, err := auth.GenerateRefreshToken()
+	if err != nil {
+		s.t.Fatalf("GenerateRefreshToken: %v", err)
+	}
+	sessionID := uuid.Must(uuid.NewV7())
+	if _, err := q.InsertRefreshToken(ctx, db.InsertRefreshTokenParams{
+		ID: sessionID, UserID: user.ID, TokenHash: hashed,
+		ExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true},
+	}); err != nil {
+		s.t.Fatalf("InsertRefreshToken: %v", err)
+	}
+	tp, err := auth.IssueAccessToken(user.ID, sessionID, secret, 15*time.Minute)
+	if err != nil {
+		s.t.Fatalf("IssueAccessToken: %v", err)
+	}
+	return passwordless{ID: user.ID, Email: email, SessionID: sessionID, AccessToken: tp.AccessToken}
+}
+
+func (s *testServer) userExists(id uuid.UUID) bool {
+	s.t.Helper()
+	var found bool
+	if err := s.pool.QueryRow(context.Background(), "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)", id).Scan(&found); err != nil {
+		s.t.Fatalf("user exists: %v", err)
+	}
+	return found
+}
+
+// CLM-11: /me reports has_password, and a passwordless user asking to change
+// a password gets a field validation error rather than invalid credentials.
+func TestAPI_PasswordlessAccountBasics(t *testing.T) {
+	s := newTestServer(t)
+	pwUser := s.signUp("haspw")
+	gUser := s.signUpPasswordless("nopw")
+
+	var me struct {
+		HasPassword *bool `json:"has_password"`
+	}
+	s.expect(http.StatusOK, "GET", "/api/v1/me", pwUser.AccessToken, nil, &me)
+	if me.HasPassword == nil || !*me.HasPassword {
+		t.Errorf("password user: has_password = %v, want true", me.HasPassword)
+	}
+	me.HasPassword = nil
+	s.expect(http.StatusOK, "GET", "/api/v1/me", gUser.AccessToken, nil, &me)
+	if me.HasPassword == nil || *me.HasPassword {
+		t.Errorf("passwordless user: has_password = %v, want false", me.HasPassword)
+	}
+
+	var before, after db.User
+	q := db.New(s.pool)
+	before, _ = q.GetUserByID(context.Background(), gUser.ID)
+	var e apiError
+	s.expect(http.StatusUnprocessableEntity, "POST", "/api/v1/me/password", gUser.AccessToken,
+		map[string]string{"current_password": "anything", "new_password": "brand-new-password"}, &e)
+	if e.Error.Code == "invalid_credentials" || e.Error.Fields["current_password"] == "" || e.Error.Fields["current_password"] == "is incorrect" {
+		t.Errorf("passwordless change password: got %+v, want a current_password field error that isn't invalid credentials", e)
+	}
+	after, _ = q.GetUserByID(context.Background(), gUser.ID)
+	if after.PasswordHash != before.PasswordHash || after.PasswordHash.Valid || !after.UpdatedAt.Time.Equal(before.UpdatedAt.Time) {
+		t.Errorf("passwordless user row changed: before %+v after %+v", before.PasswordHash, after.PasswordHash)
+	}
+
+	// CLM-13: password sign-in to a passwordless account is invalid credentials.
+	s.expect(http.StatusUnauthorized, "POST", "/api/v1/auth/login", "",
+		map[string]string{"email": gUser.Email, "password": "correct-password-123"}, &e)
+	if e.Error.Code != "invalid_credentials" {
+		t.Errorf("passwordless login: code %q, want invalid_credentials", e.Error.Code)
+	}
+}
+
+// CLM-10: a passwordless user deletes their account by typing their email
+// from a recently created session; password users still need their password.
+func TestAPI_DeleteAccountPasswordless(t *testing.T) {
+	s := newTestServer(t)
+
+	t.Run("matching email from a fresh session deletes", func(t *testing.T) {
+		u := s.signUpPasswordless("delok")
+		s.expect(http.StatusNoContent, "DELETE", "/api/v1/me", u.AccessToken,
+			map[string]string{"email": "  " + strings.ToUpper(u.Email) + " "}, nil)
+		if s.userExists(u.ID) {
+			t.Error("user still exists after delete")
+		}
+	})
+
+	t.Run("wrong email is refused", func(t *testing.T) {
+		u := s.signUpPasswordless("delwrong")
+		var e apiError
+		s.expect(http.StatusUnprocessableEntity, "DELETE", "/api/v1/me", u.AccessToken,
+			map[string]string{"email": "someone-else@example.com"}, &e)
+		if e.Error.Fields["email"] == "" {
+			t.Errorf("wrong email: expected email field error, got %+v", e)
+		}
+		s.expect(http.StatusUnprocessableEntity, "DELETE", "/api/v1/me", u.AccessToken,
+			map[string]string{"password": "correct-password-123"}, nil)
+		if !s.userExists(u.ID) {
+			t.Error("user deleted despite wrong email")
+		}
+	})
+
+	t.Run("stale session is refused with re-sign-in message", func(t *testing.T) {
+		u := s.signUpPasswordless("delstale")
+		if _, err := s.pool.Exec(context.Background(),
+			"UPDATE refresh_tokens SET created_at = NOW() - INTERVAL '11 minutes' WHERE id = $1", u.SessionID); err != nil {
+			t.Fatalf("backdate session: %v", err)
+		}
+		var e apiError
+		s.expect(http.StatusUnprocessableEntity, "DELETE", "/api/v1/me", u.AccessToken,
+			map[string]string{"email": u.Email}, &e)
+		if !strings.Contains(e.Error.Fields["email"], "sign in with Google again") {
+			t.Errorf("stale session: expected re-sign-in message, got %+v", e)
+		}
+		if !s.userExists(u.ID) {
+			t.Error("user deleted from a stale session")
+		}
+	})
+
+	t.Run("sole admin of a household with members is blocked", func(t *testing.T) {
+		u := s.signUpPasswordless("deladmin")
+		other := s.signUp("delmember")
+		var h struct{ ID uuid.UUID }
+		s.expect(http.StatusCreated, "POST", "/api/v1/households", u.AccessToken,
+			map[string]string{"name": "Google Home", "timezone": "UTC"}, &h)
+		var inv struct{ Code string }
+		s.expect(http.StatusCreated, "POST", "/api/v1/households/"+h.ID.String()+"/invites", u.AccessToken, nil, &inv)
+		s.expect(http.StatusOK, "POST", "/api/v1/invites/accept", other.AccessToken, map[string]string{"code": inv.Code}, nil)
+
+		var e apiError
+		s.expect(http.StatusConflict, "DELETE", "/api/v1/me", u.AccessToken,
+			map[string]string{"email": u.Email}, &e)
+		if e.Error.Code != "sole_admin" {
+			t.Errorf("sole admin: code %q, want sole_admin", e.Error.Code)
+		}
+		if !s.userExists(u.ID) {
+			t.Error("sole admin deleted")
+		}
+	})
+
+	t.Run("password user still needs the correct password", func(t *testing.T) {
+		u := s.signUp("delpw")
+		for _, body := range []map[string]string{
+			{"password": "wrong-password"},
+			{"password": ""},
+			{"email": "whatever@example.com"},
+		} {
+			var e apiError
+			s.expect(http.StatusUnprocessableEntity, "DELETE", "/api/v1/me", u.AccessToken, body, &e)
+			if e.Error.Fields["password"] != "is incorrect" {
+				t.Errorf("password user %v: got %+v, want password 'is incorrect'", body, e)
+			}
+		}
+		if !s.userExists(u.User.ID) {
+			t.Error("password user deleted without the right password")
+		}
+	})
 }
