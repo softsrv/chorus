@@ -68,8 +68,9 @@ func TestRefusedVersusTransient(t *testing.T) {
 	}
 }
 
-// apiDo reads a 403's reason: rateLimitExceeded and userRateLimitExceeded are
-// rate limits; any other 403 is a refusal.
+// apiDo reads a 403's reason: rateLimitExceeded, userRateLimitExceeded,
+// dailyLimitExceeded and quotaExceeded are temporary; any other 403
+// (forbidden, insufficientPermissions) is a refusal.
 func TestAPIDoRateLimitReason(t *testing.T) {
 	for _, tc := range []struct {
 		name, body  string
@@ -77,7 +78,10 @@ func TestAPIDoRateLimitReason(t *testing.T) {
 	}{
 		{"rateLimitExceeded", `{"error":{"code":403,"errors":[{"domain":"usageLimits","reason":"rateLimitExceeded"}]}}`, true},
 		{"userRateLimitExceeded", `{"error":{"code":403,"errors":[{"domain":"usageLimits","reason":"userRateLimitExceeded"}]}}`, true},
+		{"dailyLimitExceeded", `{"error":{"code":403,"errors":[{"domain":"usageLimits","reason":"dailyLimitExceeded"}]}}`, true},
+		{"quotaExceeded", `{"error":{"code":403,"errors":[{"domain":"usageLimits","reason":"quotaExceeded"}]}}`, true},
 		{"forbidden", `{"error":{"code":403,"errors":[{"domain":"global","reason":"forbidden"}]}}`, false},
+		{"insufficientPermissions", `{"error":{"code":403,"errors":[{"domain":"global","reason":"insufficientPermissions"}]}}`, false},
 		{"not json", `nope`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

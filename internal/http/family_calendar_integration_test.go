@@ -820,6 +820,9 @@ func TestFamilyCalendar_ListingRateLimitNotBroken(t *testing.T) {
 	}{
 		{"403 rateLimitExceeded", http.StatusForbidden, `{"error":{"code":403,"message":"INTERNAL-SENTINEL","errors":[{"domain":"usageLimits","reason":"rateLimitExceeded"}]}}`, http.StatusServiceUnavailable, "google_unavailable", ""},
 		{"403 userRateLimitExceeded", http.StatusForbidden, `{"error":{"code":403,"errors":[{"domain":"usageLimits","reason":"userRateLimitExceeded"}]}}`, http.StatusServiceUnavailable, "google_unavailable", ""},
+		{"403 dailyLimitExceeded", http.StatusForbidden, `{"error":{"code":403,"message":"INTERNAL-SENTINEL","errors":[{"domain":"usageLimits","reason":"dailyLimitExceeded"}]}}`, http.StatusServiceUnavailable, "google_unavailable", ""},
+		{"403 quotaExceeded", http.StatusForbidden, `{"error":{"code":403,"errors":[{"domain":"usageLimits","reason":"quotaExceeded"}]}}`, http.StatusServiceUnavailable, "google_unavailable", ""},
+		{"403 insufficientPermissions", http.StatusForbidden, `{"error":{"code":403,"errors":[{"domain":"global","reason":"insufficientPermissions"}]}}`, http.StatusOK, "", "broken"},
 		{"429", http.StatusTooManyRequests, "INTERNAL-SENTINEL", http.StatusServiceUnavailable, "google_unavailable", ""},
 		{"503", http.StatusServiceUnavailable, "INTERNAL-SENTINEL", http.StatusServiceUnavailable, "google_unavailable", ""},
 		{"403 forbidden", http.StatusForbidden, `{"error":{"code":403,"errors":[{"domain":"global","reason":"forbidden"}]}}`, http.StatusOK, "", "broken"},
@@ -1162,6 +1165,8 @@ func TestFamilyCalendar_TagCheckCatchesFullUpdate(t *testing.T) {
 func TestFamilyCalendar_TagGoogleRefusal(t *testing.T) {
 	s, fake, mom, sam, hp := tagFixture(t)
 	const rateLimit403 = `{"error":{"code":403,"message":"INTERNAL-SENTINEL","errors":[{"domain":"usageLimits","reason":"rateLimitExceeded"}]}}`
+	const dailyLimit403 = `{"error":{"code":403,"message":"INTERNAL-SENTINEL","errors":[{"domain":"usageLimits","reason":"dailyLimitExceeded"}]}}`
+	const forbidden403 = `{"error":{"code":403,"message":"INTERNAL-SENTINEL","errors":[{"domain":"global","reason":"insufficientPermissions"}]}}`
 	for _, tc := range []struct {
 		googleStatus, want int
 		code               string
@@ -1171,6 +1176,8 @@ func TestFamilyCalendar_TagGoogleRefusal(t *testing.T) {
 		{http.StatusGone, http.StatusNotFound, "entry_gone", ""},
 		{http.StatusForbidden, http.StatusForbidden, "not_editable", ""},
 		{http.StatusForbidden, http.StatusServiceUnavailable, "google_unavailable", rateLimit403},
+		{http.StatusForbidden, http.StatusServiceUnavailable, "google_unavailable", dailyLimit403},
+		{http.StatusForbidden, http.StatusForbidden, "not_editable", forbidden403},
 		{http.StatusUnauthorized, http.StatusForbidden, "forbidden", ""},
 		{http.StatusTooManyRequests, http.StatusServiceUnavailable, "google_unavailable", ""},
 		{http.StatusInternalServerError, http.StatusServiceUnavailable, "google_unavailable", ""},

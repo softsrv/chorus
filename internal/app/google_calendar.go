@@ -596,7 +596,7 @@ func refusedByGoogle(err error) bool {
 }
 
 // googleRateLimited reports whether a Calendar API error body names a rate
-// limit reason. Only the reason codes are read; the body is never passed on.
+// limit or quota reason. Only the reason codes are read; the body is never passed on.
 func googleRateLimited(body io.Reader) bool {
 	var out struct {
 		Error struct {
@@ -610,7 +610,10 @@ func googleRateLimited(body io.Reader) bool {
 	}
 	for _, e := range out.Error.Errors {
 		switch e.Reason {
-		case "rateLimitExceeded", "userRateLimitExceeded":
+		// Google's usageLimits family: per-user and per-project rate limits
+		// and the daily / project quota. All are temporary; none means the
+		// token or the calendar is refused.
+		case "rateLimitExceeded", "userRateLimitExceeded", "dailyLimitExceeded", "quotaExceeded":
 			return true
 		}
 	}
