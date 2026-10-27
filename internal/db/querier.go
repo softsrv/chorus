@@ -32,6 +32,8 @@ type Querier interface {
 	DeleteChore(ctx context.Context, arg DeleteChoreParams) (int64, error)
 	DeleteEvent(ctx context.Context, arg DeleteEventParams) (int64, error)
 	DeleteExpiredRefreshTokens(ctx context.Context) (int64, error)
+	// Returns the deleted row so its token can be revoked at Google afterwards.
+	DeleteGoogleCalendarConnectionByUser(ctx context.Context, userID uuid.UUID) (GoogleCalendarConnection, error)
 	DeleteHousehold(ctx context.Context, id uuid.UUID) error
 	// Deletes every household where the user is the only member.
 	DeleteSoleMemberHouseholds(ctx context.Context, userID uuid.UUID) error
@@ -43,6 +45,7 @@ type Querier interface {
 	DeleteUserByID(ctx context.Context, id uuid.UUID) error
 	GetChore(ctx context.Context, arg GetChoreParams) (Chore, error)
 	GetEvent(ctx context.Context, arg GetEventParams) (Event, error)
+	GetGoogleCalendarConnectionByUser(ctx context.Context, userID uuid.UUID) (GoogleCalendarConnection, error)
 	// Returns the household together with the caller's role. No row means either
 	// the household doesn't exist or the user isn't a member; callers treat both
 	// as "not found" so household IDs can't be probed.
@@ -79,6 +82,7 @@ type Querier interface {
 	ListHouseholdsForUser(ctx context.Context, userID uuid.UUID) ([]ListHouseholdsForUserRow, error)
 	LockAccount(ctx context.Context, arg LockAccountParams) error
 	LockHouseholdAdmins(ctx context.Context, householdID uuid.UUID) ([]uuid.UUID, error)
+	MarkGoogleCalendarConnectionBroken(ctx context.Context, userID uuid.UUID) (int64, error)
 	MarkHouseholdInviteUsed(ctx context.Context, arg MarkHouseholdInviteUsedParams) error
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
 	MarkPasswordResetTokenUsed(ctx context.Context, id uuid.UUID) (int64, error)
@@ -101,10 +105,14 @@ type Querier interface {
 	UpdateChore(ctx context.Context, arg UpdateChoreParams) (Chore, error)
 	UpdateDisplayName(ctx context.Context, arg UpdateDisplayNameParams) (User, error)
 	UpdateEvent(ctx context.Context, arg UpdateEventParams) (Event, error)
+	UpdateGoogleCalendarAccessToken(ctx context.Context, arg UpdateGoogleCalendarAccessTokenParams) (int64, error)
 	UpdateHousehold(ctx context.Context, arg UpdateHouseholdParams) (Household, error)
 	UpdateHouseholdMemberRole(ctx context.Context, arg UpdateHouseholdMemberRoleParams) (int64, error)
 	UpdatePasswordHash(ctx context.Context, arg UpdatePasswordHashParams) error
 	UpdateRefreshTokenLastUsed(ctx context.Context, arg UpdateRefreshTokenLastUsedParams) error
+	// One connection per user: a reconnect replaces the tokens and access level
+	// and clears the broken flag.
+	UpsertGoogleCalendarConnection(ctx context.Context, arg UpsertGoogleCalendarConnectionParams) (GoogleCalendarConnection, error)
 }
 
 var _ Querier = (*Queries)(nil)

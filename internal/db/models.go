@@ -48,6 +48,18 @@ type Event struct {
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 }
 
+type GoogleCalendarConnection struct {
+	ID              uuid.UUID          `json:"id"`
+	UserID          uuid.UUID          `json:"user_id"`
+	AccessTokenEnc  []byte             `json:"access_token_enc"`
+	RefreshTokenEnc []byte             `json:"refresh_token_enc"`
+	TokenExpiry     pgtype.Timestamptz `json:"token_expiry"`
+	AccessLevel     string             `json:"access_level"`
+	Broken          bool               `json:"broken"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
 type GoogleSignInHandoff struct {
 	ID        uuid.UUID          `json:"id"`
 	CodeHash  string             `json:"code_hash"`

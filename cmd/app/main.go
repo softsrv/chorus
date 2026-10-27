@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -87,6 +88,22 @@ func main() {
 		})
 	}
 
+	// Google Calendar is optional too: it needs Google configured and a
+	// GOOGLE_TOKEN_KEY (standard base64 of 32 bytes) to encrypt stored tokens.
+	// Without either the calendar status reports "unavailable".
+	var googleCalendar *app.GoogleCalendar
+	if cfg.Google.Enabled {
+		if cipher, err := googleTokenCipher(cfg.Google.TokenKey); err != nil {
+			slog.Warn("Google Calendar is disabled", "reason", err.Error())
+		} else {
+			googleCalendar = app.NewGoogleCalendar(queries, cipher, app.GoogleCalendarConfig{
+				ClientID:     cfg.Google.ClientID,
+				ClientSecret: cfg.Google.ClientSecret,
+				RedirectURL:  strings.TrimRight(cfg.AppBaseURL, "/") + "/api/v1/me/google-calendar/callback",
+			})
+		}
+	}
+
 	// ── Background context (token cleanup + rate-limiter sweepers) ────────────
 	// cleanupCtx is cancelled after the HTTP server drains, giving background
 	// goroutines a clean signal to stop without racing active requests.
@@ -102,6 +119,7 @@ func main() {
 		ChoreSvc:          choreSvc,
 		EventSvc:          eventSvc,
 		GoogleSignIn:      googleSignIn,
+		GoogleCalendar:    googleCalendar,
 		JWTSecret:         cfg.JWTSecret,
 		Secure:            cfg.AppEnv == "production",
 		TrustedProxyCount: cfg.TrustedProxyCount,
@@ -149,6 +167,18 @@ func main() {
 
 	pool.Close()
 	slog.Info("shutdown complete")
+}
+
+// googleTokenCipher builds the token cipher from GOOGLE_TOKEN_KEY.
+func googleTokenCipher(key string) (*app.TokenCipher, error) {
+	if key == "" {
+		return nil, errors.New("GOOGLE_TOKEN_KEY is not set")
+	}
+	raw, err := base64.StdEncoding.DecodeString(key)
+	if err != nil || len(raw) != 32 {
+		return nil, errors.New("GOOGLE_TOKEN_KEY must be standard base64 of 32 bytes")
+	}
+	return app.NewTokenCipher(raw)
 }
 
 // ── Config ────────────────────────────────────────────────────────────────────

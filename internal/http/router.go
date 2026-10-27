@@ -22,7 +22,8 @@ type RouterConfig struct {
 	HouseholdSvc      *app.HouseholdService
 	ChoreSvc          *app.ChoreService
 	EventSvc          *app.EventService
-	GoogleSignIn      *app.GoogleSignIn // nil = Google sign-in disabled
+	GoogleSignIn      *app.GoogleSignIn   // nil = Google sign-in disabled
+	GoogleCalendar    *app.GoogleCalendar // nil = Google Calendar unavailable
 	JWTSecret         string
 	Secure            bool // true in production
 	TrustedProxyCount int
@@ -41,6 +42,7 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	choreH := handlers.NewChoreHandler(cfg.ChoreSvc)
 	eventH := handlers.NewEventHandler(cfg.EventSvc)
 	googleH := handlers.NewGoogleHandler(cfg.GoogleSignIn, cfg.TrustedProxyCount)
+	calendarH := handlers.NewGoogleCalendarHandler(cfg.GoogleCalendar)
 
 	// ── Rate limiters ─────────────────────────────────────────────────────────
 	// Each limiter spawns a sweep goroutine that exits when ctx is cancelled.
@@ -58,6 +60,7 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	googleStartRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
 	googleCallbackRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
 	googleRedeemRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
+	calendarCallbackRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
 
 	limit := func(rl *middleware.RateLimiter, h http.HandlerFunc) http.Handler { return rl.Middleware(h) }
 
@@ -91,6 +94,15 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("POST /api/v1/me/password", verified(meH.ChangePassword))
 	api.Handle("GET /api/v1/me/sessions", verified(meH.ListSessions))
 	api.Handle("DELETE /api/v1/me/sessions/{id}", verified(meH.RevokeSession))
+
+	// ── Google Calendar connection. Status reports "unavailable" when Google
+	// isn't configured; connect, disconnect and callback then answer the JSON
+	// 404 without contacting Google. The callback is public: Google redirects
+	// the browser there without a bearer token, and the state names the user.
+	api.Handle("GET /api/v1/me/google-calendar", verified(calendarH.Status))
+	api.Handle("POST /api/v1/me/google-calendar/connect", verified(calendarH.Connect))
+	api.Handle("DELETE /api/v1/me/google-calendar", verified(calendarH.Disconnect))
+	api.Handle("GET /api/v1/me/google-calendar/callback", limit(calendarCallbackRL, calendarH.Callback))
 
 	// ── Households ────────────────────────────────────────────────────────────
 	api.Handle("GET /api/v1/households", verified(householdH.List))
@@ -135,12 +147,12 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	staticFS := web.Static(!cfg.Secure)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(staticFS)))
 	// The web client is a single page; these are the paths emailed links (and
-	// the Google sign-in callback redirect) land on.
+	// the Google sign-in and calendar callback redirects) land on.
 	serveIndex := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache")
 		http.ServeFileFS(w, r, staticFS, "index.html")
 	}
-	for _, p := range []string{"/{$}", "/verify-email", "/reset-password", "/forgot-password", "/google-sign-in"} {
+	for _, p := range []string{"/{$}", "/verify-email", "/reset-password", "/forgot-password", "/google-sign-in", "/account"} {
 		mux.HandleFunc("GET "+p, serveIndex)
 	}
 

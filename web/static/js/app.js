@@ -185,7 +185,10 @@ async function boot() {
   }
 
   if (!session.user) await refresh();
-  if (session.user) return homeView();
+  if (session.user) {
+    if (location.pathname === '/account') return accountView();
+    return homeView();
+  }
   return authView('login');
 }
 
@@ -609,6 +612,21 @@ async function membersTab(h, $root) {
 
 async function accountView() {
   renderNav();
+  const calOutcome = new URLSearchParams(location.search).get('google_calendar');
+  let $outcomeAlert = null;
+  if (calOutcome) {
+    history.replaceState(null, '', location.pathname);
+    if (calOutcome === 'connected') {
+      const msg = 'Google Calendar connected.';
+      $outcomeAlert = alertBox('success', msg);
+      toast(msg, 'success');
+    } else {
+      const msg = 'Could not connect Google Calendar. Please try again.';
+      $outcomeAlert = alertBox('error', msg);
+      toast(msg, 'error');
+    }
+  }
+
   const { items: sessions } = await api('GET', '/me/sessions');
   const $sessionsErr = el('div');
 
@@ -627,13 +645,80 @@ async function accountView() {
 
   const hasPassword = session.user?.has_password !== false;
 
+  const $calErr = el('div');
+  const $calCard = el('div', { class: 'card bg-base-100 shadow' });
+
+  const onConnect = action(async () => {
+    const resp = await api('POST', '/me/google-calendar/connect');
+    if (resp?.url) {
+      window.location = resp.url;
+    }
+  }, $calErr);
+
+  const onDisconnect = action(async () => {
+    await api('DELETE', '/me/google-calendar');
+    toast('Google Calendar disconnected.', 'info');
+    renderCalendarCard({ status: 'not_connected' });
+  }, $calErr);
+
+  function renderCalendarCard(cal) {
+    $calErr.replaceChildren();
+    let content;
+    switch (cal.status) {
+      case 'not_connected':
+        content = [
+          el('p', { class: 'text-sm opacity-70', text: 'Connect your Google Calendar to sync family events.' }),
+          el('button', { class: 'btn btn-primary btn-sm', text: 'Connect Google Calendar', onclick: onConnect }),
+        ];
+        break;
+      case 'connected':
+        content = [
+          el('p', { class: 'text-sm font-medium', text: 'Connected' }),
+          cal.access === 'read_only'
+            ? el('p', { class: 'text-xs opacity-70', text: 'Read-only access (Chorus cannot modify your calendar).' })
+            : null,
+          el('button', { class: 'btn btn-outline btn-error btn-sm', text: 'Disconnect', onclick: onDisconnect }),
+        ];
+        break;
+      case 'broken':
+        content = [
+          el('p', { class: 'text-sm text-error', text: 'Google Calendar connection is broken.' }),
+          el('div', { class: 'flex gap-2' },
+            el('button', { class: 'btn btn-primary btn-sm', text: 'Reconnect', onclick: onConnect }),
+            el('button', { class: 'btn btn-ghost btn-sm text-error', text: 'Disconnect', onclick: onDisconnect })),
+        ];
+        break;
+      case 'unavailable':
+      default:
+        content = [
+          el('p', { class: 'text-sm opacity-70', text: 'Google Calendar is not configured.' }),
+        ];
+        break;
+    }
+    $calCard.replaceChildren(
+      el('div', { class: 'card-body gap-3' },
+        el('h2', { class: 'card-title', text: 'Google Calendar' }),
+        $calErr,
+        ...content));
+  }
+
+  let cal = { status: 'unavailable' };
+  try {
+    cal = await api('GET', '/me/google-calendar');
+  } catch {
+    cal = { status: 'unavailable' };
+  }
+  renderCalendarCard(cal);
+
   $app.replaceChildren(el('div', { class: 'max-w-2xl mx-auto space-y-6' },
     el('button', { class: 'btn btn-ghost btn-sm', text: '← Back', onclick: () => homeView() }),
+    $outcomeAlert,
     card('Profile', el('p', { class: 'text-sm opacity-70', text: session.user.email }), form({
       fields: [{ name: 'display_name', label: 'Display name', required: true, value: session.user.display_name }],
       submit: 'Save',
       onSubmit: async (v) => { session.user = await api('PUT', '/me', v); renderNav(); toast('Saved', 'success'); },
     })),
+    $calCard,
     hasPassword
       ? card('Change password', form({
           fields: [
