@@ -650,6 +650,123 @@ async function accountView() {
     renderCalendarCard({ status: 'not_connected' });
   }, $calErr);
 
+  async function loadFamilyCalendars($root) {
+    const $sectionErr = el('div');
+    $root.replaceChildren(
+      el('h3', { class: 'text-sm font-semibold', text: 'Family calendars' }),
+      $sectionErr,
+      el('p', { class: 'text-xs opacity-70', text: 'Loading calendars…' }),
+    );
+
+    let calResp;
+    let householdsList;
+    try {
+      [calResp, householdsList] = await Promise.all([
+        api('GET', '/me/google-calendar/calendars'),
+        api('GET', '/households').then((r) => r.items || []),
+      ]);
+    } catch (err) {
+      $root.replaceChildren(
+        el('h3', { class: 'text-sm font-semibold', text: 'Family calendars' }),
+        $sectionErr,
+        el('p', { class: 'text-xs opacity-70', text: 'Could not load your Google calendars.' }),
+      );
+      showError($sectionErr, err);
+      return;
+    }
+
+    const calendars = calResp?.items || [];
+    if (calendars.length === 0) {
+      $root.replaceChildren(
+        el('h3', { class: 'text-sm font-semibold', text: 'Family calendars' }),
+        $sectionErr,
+        el('p', { class: 'text-xs opacity-70', text: 'No Google calendars found.' }),
+      );
+      return;
+    }
+
+    if (householdsList.length === 0) {
+      $root.replaceChildren(
+        el('h3', { class: 'text-sm font-semibold', text: 'Family calendars' }),
+        $sectionErr,
+        el('p', { class: 'text-xs opacity-70', text: 'You do not belong to any households yet.' }),
+      );
+      return;
+    }
+
+    const householdStatuses = await Promise.all(
+      householdsList.map(async (h) => {
+        try {
+          const status = await api('GET', `/households/${h.id}/calendar`);
+          return { h, status };
+        } catch (err) {
+          return { h, status: null, err };
+        }
+      })
+    );
+
+    const rows = householdStatuses.map(({ h, status }) => {
+      const $rowErr = el('div');
+      const setBy = status?.set_by;
+      const isOtherSetter = setBy && setBy.id && setBy.id !== session.user?.id;
+
+      if (isOtherSetter) {
+        const calName = status.calendar_name || status.calendar_id || 'Calendar';
+        const setterName = setBy.display_name || 'another member';
+        return el('div', { class: 'space-y-1' },
+          el('div', { class: 'text-sm font-medium', text: h.name }),
+          el('p', { class: 'text-xs opacity-70', text: `${h.name}: ${calName} (set by ${setterName})` }),
+        );
+      }
+
+      const $select = el('select', { class: 'select select-bordered select-sm w-full max-w-xs' },
+        calendars.map((c) => el('option', {
+          value: c.id,
+          text: c.name + (c.primary ? ' (primary)' : ''),
+          selected: status?.calendar_id ? c.id === status.calendar_id : !!c.primary,
+        }))
+      );
+
+      const $saveBtn = el('button', {
+        class: 'btn btn-primary btn-sm',
+        text: 'Set as family calendar',
+        onclick: action(async () => {
+          await api('PUT', `/households/${h.id}/calendar`, { calendar_id: $select.value });
+          toast(`Updated family calendar for ${h.name}.`, 'success');
+          loadFamilyCalendars($root);
+        }, $rowErr),
+      });
+
+      const buttons = [$saveBtn];
+      if (setBy && setBy.id === session.user?.id) {
+        buttons.push(el('button', {
+          class: 'btn btn-ghost btn-sm text-error',
+          text: 'Clear',
+          onclick: action(async () => {
+            await api('DELETE', `/households/${h.id}/calendar`);
+            toast(`Cleared family calendar for ${h.name}.`, 'info');
+            loadFamilyCalendars($root);
+          }, $rowErr),
+        }));
+      }
+
+      return el('div', { class: 'space-y-1' },
+        el('div', { class: 'text-sm font-medium', text: h.name }),
+        $rowErr,
+        el('div', { class: 'flex flex-wrap items-center gap-2' },
+          $select,
+          ...buttons,
+        ),
+      );
+    });
+
+    $root.replaceChildren(
+      el('h3', { class: 'text-sm font-semibold', text: 'Family calendars' }),
+      $sectionErr,
+      el('div', { class: 'space-y-3' }, ...rows),
+    );
+  }
+
   function renderCalendarCard(cal) {
     $calErr.replaceChildren();
     let content;
@@ -660,15 +777,19 @@ async function accountView() {
           el('button', { class: 'btn btn-primary btn-sm', text: 'Connect Google Calendar', onclick: onConnect }),
         ];
         break;
-      case 'connected':
+      case 'connected': {
+        const $familySection = el('div', { class: 'space-y-3 pt-3 border-t border-base-300' });
+        loadFamilyCalendars($familySection);
         content = [
           el('p', { class: 'text-sm font-medium', text: 'Connected' }),
           cal.access === 'read_only'
             ? el('p', { class: 'text-xs opacity-70', text: 'Read-only access (Chorus cannot modify your calendar).' })
             : null,
           el('button', { class: 'btn btn-outline btn-error btn-sm', text: 'Disconnect', onclick: onDisconnect }),
+          $familySection,
         ];
         break;
+      }
       case 'broken':
         content = [
           el('p', { class: 'text-sm text-error', text: 'Google Calendar connection is broken.' }),
