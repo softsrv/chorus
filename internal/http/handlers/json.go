@@ -106,6 +106,12 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, app.ErrGoogleUnavailable):
 		w.Header().Set("Retry-After", "30")
 		respond.Error(w, http.StatusServiceUnavailable, "google_unavailable", "Google Calendar is temporarily unavailable. Try again shortly.")
+	case errors.Is(err, app.ErrEntryGone):
+		respond.Error(w, http.StatusNotFound, "entry_gone", "This calendar entry no longer exists.")
+	case errors.Is(err, app.ErrEntryNotEditable):
+		respond.Error(w, http.StatusForbidden, "not_editable", "This calendar entry can't be edited.")
+	case errors.Is(err, app.ErrGoogleRejected):
+		respond.Error(w, http.StatusBadGateway, "google_rejected", "Google Calendar rejected the change.")
 	case errors.Is(err, app.ErrInviteInvalid):
 		respond.Error(w, http.StatusBadRequest, "invalid_invite", "Invite code is invalid or has expired.")
 	default:

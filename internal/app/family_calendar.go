@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,6 +33,17 @@ const (
 // temporarily. Nothing was changed; the caller may retry.
 var ErrGoogleUnavailable = errGoogleUnavailable
 
+// Outcomes of a tag change that Google refused. Google's title is unchanged
+// in each case; its answer is never passed on.
+var (
+	// ErrEntryGone means the entry no longer exists in the family calendar.
+	ErrEntryGone = errors.New("calendar entry no longer exists")
+	// ErrEntryNotEditable means Google refused the change for this entry.
+	ErrEntryNotEditable = errors.New("calendar entry can't be edited")
+	// ErrGoogleRejected means Google answered the change with another error.
+	ErrGoogleRejected = errors.New("google rejected the calendar change")
+)
+
 // HouseholdCalendarStatus is a household's family calendar as its members see
 // it. The calendar fields are set whenever a family calendar is chosen. It
 // never carries a token or the setter's calendar list.
@@ -50,17 +63,39 @@ type MyCalendars struct {
 	Calendars []GoogleCalendarInfo
 }
 
+// FamilyEntry is one family calendar entry as members see it. Title is
+// Google's title unchanged; Tags are the member ids parsed from its tag
+// group. CanTag is true only when the family calendar's connection has
+// read_write access and Google reports the entry editable.
+type FamilyEntry struct {
+	GoogleEntry
+	Tags   []uuid.UUID
+	CanTag bool
+}
+
 // HouseholdEntries is the result of listing a household's family calendar.
 // Entries is non-nil (possibly empty) when Status is FamilyCalendarOK.
+// Members are the household's current members as tag choices.
 type HouseholdEntries struct {
 	Status  string
-	Entries []GoogleEntry
+	Entries []FamilyEntry
+	Members []TagMember
+}
+
+// TaggedEntry is an entry after a tag change: the title Google stored and the
+// tags read back from it.
+type TaggedEntry struct {
+	ID     string
+	Title  string
+	Tags   []uuid.UUID
+	CanTag bool
 }
 
 // FamilyCalendar is a household's shared Google calendar: one member who has
 // connected Google picks one of their calendars, and every member sees its
-// entries, fetched server-side with that member's token. It only reads from
-// Google. A nil GoogleCalendar means Google Calendar is unavailable here.
+// entries, fetched server-side with that member's token. Its only write to
+// Google is an entry's title, when a member tags the entry. A nil
+// GoogleCalendar means Google Calendar is unavailable here.
 type FamilyCalendar struct {
 	q  *db.Queries
 	gc *GoogleCalendar
@@ -220,8 +255,9 @@ func (s *FamilyCalendar) Status(ctx context.Context, userID, householdID uuid.UU
 }
 
 // ListEntries returns the family calendar's entries overlapping [from, to),
-// fetched with the setter's token from the stored calendar only. The range
-// rules are checked before anything else is looked up.
+// fetched with the setter's token from the stored calendar only, each with
+// the tags parsed from its title, plus the household's members as tag
+// choices. The range rules are checked before anything else is looked up.
 func (s *FamilyCalendar) ListEntries(ctx context.Context, userID, householdID uuid.UUID, from, to time.Time) (HouseholdEntries, error) {
 	if _, err := getHousehold(ctx, s.q, userID, householdID); err != nil {
 		return HouseholdEntries{}, err
@@ -235,22 +271,29 @@ func (s *FamilyCalendar) ListEntries(ctx context.Context, userID, householdID uu
 	if err := v.err(); err != nil {
 		return HouseholdEntries{}, err
 	}
+	members, err := s.tagMembers(ctx, householdID)
+	if err != nil {
+		return HouseholdEntries{}, err
+	}
+	none := func(status string) HouseholdEntries {
+		return HouseholdEntries{Status: status, Entries: []FamilyEntry{}, Members: members}
+	}
 	if s.gc == nil {
-		return HouseholdEntries{Status: FamilyCalendarUnavailable, Entries: []GoogleEntry{}}, nil
+		return none(FamilyCalendarUnavailable), nil
 	}
 	row, err := s.q.GetHouseholdCalendar(ctx, householdID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return HouseholdEntries{Status: FamilyCalendarNotConfigured, Entries: []GoogleEntry{}}, nil
+			return none(FamilyCalendarNotConfigured), nil
 		}
 		return HouseholdEntries{}, fmt.Errorf("get household calendar: %w", err)
 	}
-	token, err := s.gc.validAccessToken(ctx, row.SetBy)
+	token, access, err := s.gc.validConnection(ctx, row.SetBy)
 	switch {
 	case errors.Is(err, errCalendarBroken):
-		return HouseholdEntries{Status: FamilyCalendarBroken, Entries: []GoogleEntry{}}, nil
+		return none(FamilyCalendarBroken), nil
 	case errors.Is(err, errCalendarNotConnected):
-		return HouseholdEntries{Status: FamilyCalendarNotConfigured, Entries: []GoogleEntry{}}, nil
+		return none(FamilyCalendarNotConfigured), nil
 	case err != nil:
 		return HouseholdEntries{}, err
 	}
@@ -259,9 +302,109 @@ func (s *FamilyCalendar) ListEntries(ctx context.Context, userID, householdID uu
 		if refusedByGoogle(err) {
 			// The token or the calendar no longer works: only the setter
 			// can fix it by reconnecting or choosing again.
-			return HouseholdEntries{Status: FamilyCalendarBroken, Entries: []GoogleEntry{}}, nil
+			return none(FamilyCalendarBroken), nil
 		}
 		return HouseholdEntries{}, err
 	}
-	return HouseholdEntries{Status: FamilyCalendarOK, Entries: entries}, nil
+	out := make([]FamilyEntry, 0, len(entries))
+	for _, e := range entries {
+		_, tags, _ := parseTagTitle(e.Title, members)
+		out = append(out, FamilyEntry{GoogleEntry: e, Tags: tags, CanTag: access == CalendarReadWrite && e.Editable})
+	}
+	return HouseholdEntries{Status: FamilyCalendarOK, Entries: out, Members: members}, nil
+}
+
+func (s *FamilyCalendar) tagMembers(ctx context.Context, householdID uuid.UUID) ([]TagMember, error) {
+	rows, err := s.q.ListHouseholdMembers(ctx, householdID)
+	if err != nil {
+		return nil, fmt.Errorf("list household members: %w", err)
+	}
+	return tagMembers(rows), nil
+}
+
+// SetEntryTags makes tags (member user ids; empty untags) the tag group of
+// one entry of the household's family calendar. Any member may tag; the
+// change is sent with the setter's token. The title is rebuilt from Google's
+// current title, and only the summary is sent, in a PATCH. It returns the
+// title Google stored.
+//
+// Before any request to Google: a non-member gets ErrNotFound, a tag that is
+// not a taggable current member is a ValidationError, and a connection
+// without read_write access is ErrForbidden. An entry Google reports as not
+// editable is ErrForbidden with no PATCH. Google refusing the PATCH is
+// ErrEntryGone (404/410), ErrEntryNotEditable (403) or ErrGoogleRejected.
+func (s *FamilyCalendar) SetEntryTags(ctx context.Context, userID, householdID uuid.UUID, eventID string, tags []uuid.UUID) (TaggedEntry, error) {
+	if _, err := getHousehold(ctx, s.q, userID, householdID); err != nil {
+		return TaggedEntry{}, err
+	}
+	var v validator
+	eventID = v.text("event_id", eventID, 1, 1024, false)
+	members, err := s.tagMembers(ctx, householdID)
+	if err != nil {
+		return TaggedEntry{}, err
+	}
+	names, bad := tagNames(members, tags)
+	if len(bad) > 0 {
+		v.fail("tags", "must be household members who can be tagged")
+	}
+	if err := v.err(); err != nil {
+		return TaggedEntry{}, err
+	}
+	if s.gc == nil {
+		return TaggedEntry{}, ErrNotFound
+	}
+	row, err := s.q.GetHouseholdCalendar(ctx, householdID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// No family calendar: there is no entry to tag.
+			return TaggedEntry{}, ErrNotFound
+		}
+		return TaggedEntry{}, fmt.Errorf("get household calendar: %w", err)
+	}
+	token, access, err := s.gc.validConnection(ctx, row.SetBy)
+	switch {
+	case errors.Is(err, errCalendarNotConnected):
+		return TaggedEntry{}, ErrNotFound
+	case errors.Is(err, errCalendarBroken):
+		return TaggedEntry{}, ErrForbidden
+	case err != nil:
+		return TaggedEntry{}, err
+	}
+	if access != CalendarReadWrite {
+		return TaggedEntry{}, ErrForbidden
+	}
+	current, err := s.gc.getEvent(ctx, token, row.CalendarID, eventID)
+	if err != nil {
+		return TaggedEntry{}, tagGoogleError(err, ErrForbidden)
+	}
+	if !current.Editable {
+		return TaggedEntry{}, ErrForbidden
+	}
+	base, _, kept := parseTagTitle(current.Title, members)
+	stored, err := s.gc.patchEventSummary(ctx, token, row.CalendarID, eventID, composeTagTitle(base, names, kept))
+	if err != nil {
+		return TaggedEntry{}, tagGoogleError(err, ErrEntryNotEditable)
+	}
+	_, storedTags, _ := parseTagTitle(stored, members)
+	return TaggedEntry{ID: eventID, Title: stored, Tags: storedTags, CanTag: true}, nil
+}
+
+// tagGoogleError maps Google's answer to a tag request to the caller's
+// outcome: 404/410 entry gone, 401/403 forbidden (as given), anything else
+// rejected. Transient failures pass through as ErrGoogleUnavailable. The
+// status is logged; Google's answer never reaches the caller.
+func tagGoogleError(err error, forbidden error) error {
+	var apiErr *googleAPIError
+	if !errors.As(err, &apiErr) {
+		return err
+	}
+	switch apiErr.status {
+	case http.StatusNotFound, http.StatusGone:
+		return ErrEntryGone
+	case http.StatusForbidden:
+		return forbidden
+	default:
+		slog.Warn("google calendar: tag change refused", "status", apiErr.status)
+		return ErrGoogleRejected
+	}
 }

@@ -85,6 +85,7 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	_, checks["family calendar entries"] = family.ListEntries(ctx, mallory, h.ID, from, to)
 	_, checks["set family calendar"] = family.Set(ctx, mallory, h.ID, "family-y@group.calendar.google.com")
 	checks["clear family calendar"] = family.Clear(ctx, mallory, h.ID)
+	_, checks["tag family calendar entry"] = family.SetEntryTags(ctx, mallory, h.ID, "y1", []uuid.UUID{alice})
 	// Cross-household ID smuggling: Mallory's household ID + Alice's chore ID.
 	_, checks["get chore via own household"] = chores.Get(ctx, mallory, mh.ID, chore.ID)
 	checks["delete chore via own household"] = chores.Delete(ctx, mallory, mh.ID, chore.ID)
@@ -141,6 +142,24 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	}
 	if st, err := family.Status(ctx, alice, h.ID); err != nil || st.CalendarID != "family-y@group.calendar.google.com" || st.SetByID != alice {
 		t.Errorf("alice's family calendar was modified: %+v, %v", st, err)
+	}
+
+	// Positive control for the tag check: once Mallory joins, her tag call
+	// PATCHes the entry with Alice's token.
+	inv, err = households.CreateInvite(ctx, alice, h.ID)
+	if err != nil {
+		t.Fatalf("CreateInvite: %v", err)
+	}
+	if _, err := households.AcceptInvite(ctx, mallory, inv.Code); err != nil {
+		t.Fatalf("mallory joins: %v", err)
+	}
+	requestsBefore = len(google.recorded())
+	tagged, err := family.SetEntryTags(ctx, mallory, h.ID, "y1", []uuid.UUID{alice})
+	if err != nil || tagged.Title != "Y soccer [alice]" {
+		t.Fatalf("member mallory tags y1: %+v, %v; want title 'Y soccer [alice]'", tagged, err)
+	}
+	if reqs := google.recorded()[requestsBefore:]; patches(reqs) != 1 || reqs[len(reqs)-1].Auth != aliceAccess {
+		t.Errorf("member's tag requests = %+v, want one PATCH with alice's token", reqs)
 	}
 }
 

@@ -133,12 +133,14 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("DELETE /api/v1/households/{householdID}/chores/{choreID}/completion", verified(choreH.Complete))
 
 	// ── Family calendar ────────────────────────────────────────────────────
-	// Read-only: entries come from the household's chosen Google calendar.
-	// Chorus has no route that creates, edits or deletes an entry.
+	// Entries come from the household's chosen Google calendar. Chorus has no
+	// route that creates, moves or deletes an entry; its one change is an
+	// entry's tags, written into the entry's Google title.
 	api.Handle("GET /api/v1/households/{householdID}/calendar", verified(familyH.Status))
 	api.Handle("PUT /api/v1/households/{householdID}/calendar", verified(familyH.Set))
 	api.Handle("DELETE /api/v1/households/{householdID}/calendar", verified(familyH.Clear))
 	api.Handle("GET /api/v1/households/{householdID}/events", verified(familyH.Events))
+	api.Handle("PUT /api/v1/households/{householdID}/calendar/entries/{eventID}/tags", verified(familyH.SetTags))
 
 	// Unknown API paths get a JSON 404 rather than falling through to the web client.
 	api.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {

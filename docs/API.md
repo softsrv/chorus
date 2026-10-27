@@ -105,7 +105,7 @@ Chore: `id, household_id, title, description, assignee_id, due_on, completed, co
 
 ### Family calendar 🔒 — `/households/{id}/calendar`, `/households/{id}/events`
 
-One member who has connected Google Calendar picks one of their own calendars as the household's family calendar. Every member then sees its entries, which the server fetches with that member's Google token. Chorus only reads from Google: it has no route that creates, edits or deletes an entry. The family calendar is cleared when its member disconnects Google, leaves or is removed, or deletes their account.
+One member who has connected Google Calendar picks one of their own calendars as the household's family calendar. Every member then sees its entries, which the server fetches with that member's Google token. Chorus has no route that creates, moves or deletes an entry. Its one write to Google is an entry's title, when a member tags it: the tagged members' display names go in one trailing group, e.g. `Dentist [Mom, Sam]`. Chorus stores no title of its own. The family calendar is cleared when its member disconnects Google, leaves or is removed, or deletes their account.
 
 `status` is `ok`, `not_configured` (none chosen), `broken` (the connecting member must reconnect) or `unavailable` (Google Calendar not configured on this server).
 
@@ -115,7 +115,8 @@ One member who has connected Google Calendar picks one of their own calendars as
 | `GET /households/{id}/calendar` | none | `{status, calendar_id?, calendar_name?, set_by?: {id, display_name}}` |
 | `PUT /households/{id}/calendar` | `calendar_id` | Must be on the caller's own calendar list (else 422). Only the member who set it may change it (else 403) |
 | `DELETE /households/{id}/calendar` | none | 204. Only the member who set it (else 403) |
-| `GET /households/{id}/events` | `?from=&to=` (RFC 3339, required, ≤ 100 days) | `{status, items: [{id, title, start, end, all_day, location}]}`. `start`/`end` are RFC 3339, or `YYYY-MM-DD` when `all_day`. Recurring entries come back as occurrences. 503 `google_unavailable` if Google fails temporarily |
+| `GET /households/{id}/events` | `?from=&to=` (RFC 3339, required, ≤ 100 days) | `{status, items: [{id, title, start, end, all_day, location, tags, can_tag}], members: [{user_id, display_name, taggable, reason?}]}`. `start`/`end` are RFC 3339, or `YYYY-MM-DD` when `all_day`. `title` is Google's; `tags` are the member ids read from its trailing `[..]` group. `can_tag` needs a read/write connection and an entry Google reports editable. A member is not taggable (`reason` `duplicate_name` or `reserved_character`) when their name matches another member's case-insensitively or contains `,`, `[` or `]`. Recurring entries come back as occurrences. 503 `google_unavailable` if Google fails temporarily |
+| `PUT /households/{id}/calendar/entries/{eventID}/tags` | `tags` (member user ids; `[]` untags) | Any member. Sends Google only the new title, with the connecting member's token, and answers `{id, title, tags, can_tag}` with the title Google stored. Names in the group that aren't members are kept after the tagged ones. 422 for a tag that isn't a taggable member, 403 when the entry can't be tagged (`can_tag` false), 404 `not_found` with no family calendar. If Google refuses: 404 `entry_gone`, 403 `not_editable`, 502 `google_rejected` |
 
 ### Operational
 

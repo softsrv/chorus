@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,8 +25,9 @@ import (
 
 const (
 	googleRevokeURL = "https://oauth2.googleapis.com/revoke"
-	// googleCalendarAPIURL is the Calendar API v3 base. Chorus only ever sends
-	// it GET requests: it reads calendar lists and entries, never writes.
+	// googleCalendarAPIURL is the Calendar API v3 base. Chorus reads calendar
+	// lists and entries from it; its only write is a PATCH of an entry's
+	// title (summary) when a member tags the entry.
 	googleCalendarAPIURL = "https://www.googleapis.com/calendar/v3"
 )
 
@@ -437,11 +439,13 @@ func expiryTimestamp(t time.Time) pgtype.Timestamptz {
 	return pgtype.Timestamptz{Time: t, Valid: true}
 }
 
-// ── Read-only Calendar API access ─────────────────────────────────────────────
+// ── Calendar API access ───────────────────────────────────────────────────────
 //
-// Chorus only reads from the Calendar API: the calendar list (to pick a family
-// calendar) and events.list (to show its entries). There is deliberately no
-// insert, delete, move, quickAdd or any request with a body.
+// Chorus reads the calendar list (to pick a family calendar), events.list and
+// events.get (to show and tag entries). Its one write is patchEventSummary: a
+// PATCH whose body carries only the entry's summary, so start, end, location,
+// description and attendees are never sent. There is deliberately no insert,
+// delete, move, quickAdd or full-body update.
 
 var (
 	// errCalendarNotConnected means the user has no stored connection.
@@ -468,7 +472,9 @@ type GoogleCalendarInfo struct {
 }
 
 // GoogleEntry is one entry (event occurrence) of a Google calendar. Start and
-// End are RFC 3339 for timed entries and YYYY-MM-DD when AllDay.
+// End are RFC 3339 for timed entries and YYYY-MM-DD when AllDay. Editable is
+// what Google reports for the token's owner: the calendar's accessRole is
+// writer or owner and the entry is not locked.
 type GoogleEntry struct {
 	ID       string
 	Title    string
@@ -476,6 +482,12 @@ type GoogleEntry struct {
 	End      string
 	AllDay   bool
 	Location string
+	Editable bool
+}
+
+// canEditEntry is Google's editability rule for one entry of a calendar.
+func canEditEntry(accessRole string, locked bool) bool {
+	return (accessRole == "writer" || accessRole == "owner") && !locked
 }
 
 // validAccessToken returns a usable, decrypted access token for userID,
@@ -483,32 +495,39 @@ type GoogleEntry struct {
 // errCalendarBroken (the row is, or has just been, marked broken) or
 // errGoogleUnavailable (a transient refresh failure).
 func (g *GoogleCalendar) validAccessToken(ctx context.Context, userID uuid.UUID) (string, error) {
+	token, _, err := g.validConnection(ctx, userID)
+	return token, err
+}
+
+// validConnection is validAccessToken that also returns the connection's
+// access level (CalendarReadWrite or CalendarReadOnly).
+func (g *GoogleCalendar) validConnection(ctx context.Context, userID uuid.UUID) (string, string, error) {
 	conn, err := g.q.GetGoogleCalendarConnectionByUser(ctx, userID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", errCalendarNotConnected
+			return "", "", errCalendarNotConnected
 		}
-		return "", fmt.Errorf("get connection: %w", err)
+		return "", "", fmt.Errorf("get connection: %w", err)
 	}
 	if conn.Broken {
-		return "", errCalendarBroken
+		return "", conn.AccessLevel, errCalendarBroken
 	}
 	if !accessTokenExpired(conn) {
 		if token, err := g.cipher.Decrypt(conn.AccessTokenEnc); err == nil && token != "" {
-			return token, nil
+			return token, conn.AccessLevel, nil
 		}
 		// An unreadable access token is replaced by refreshing.
 	}
 	token, broken, err := g.refresh(ctx, conn)
 	switch {
 	case errors.Is(err, errRefreshTransient):
-		return "", errGoogleUnavailable
+		return "", conn.AccessLevel, errGoogleUnavailable
 	case err != nil:
-		return "", err
+		return "", conn.AccessLevel, err
 	case broken:
-		return "", errCalendarBroken
+		return "", conn.AccessLevel, errCalendarBroken
 	}
-	return token, nil
+	return token, conn.AccessLevel, nil
 }
 
 // googleAPIError is a non-2xx answer from the Calendar API.
@@ -533,31 +552,106 @@ func refusedByGoogle(err error) bool {
 }
 
 // apiGet sends one authorized GET to the Calendar API and decodes the JSON
-// answer into out. GET is the only method this client has.
+// answer into out.
 func (g *GoogleCalendar) apiGet(ctx context.Context, token, path string, query url.Values, out any) error {
+	return g.apiDo(ctx, http.MethodGet, token, path, query, nil, out)
+}
+
+// apiDo sends one authorized request to the Calendar API, with body (when
+// non-nil) as its JSON payload, and decodes a 2xx JSON answer into out. A
+// non-2xx answer is a *googleAPIError carrying only the status; Google's body
+// is never read into an error.
+func (g *GoogleCalendar) apiDo(ctx context.Context, method, token, path string, query url.Values, body, out any) error {
 	target := g.apiURL + path
 	if len(query) > 0 {
 		target += "?" + query.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	var payload io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("encode calendar request: %w", err)
+		}
+		payload = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, target, payload)
 	if err != nil {
 		return fmt.Errorf("build calendar request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	resp, err := g.client.Do(req)
 	if err != nil {
 		slog.WarnContext(ctx, "google calendar: api request failed", "error", err)
 		return errGoogleUnavailable
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return &googleAPIError{status: resp.StatusCode}
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(out); err != nil {
 		return fmt.Errorf("decode calendar response: %w", err)
 	}
 	return nil
+}
+
+// eventPath is the Calendar API path of one entry of calendarID.
+func eventPath(calendarID, eventID string) string {
+	return "/calendars/" + url.PathEscape(calendarID) + "/events/" + url.PathEscape(eventID)
+}
+
+// calendarAccessRole returns the token owner's accessRole on calendarID
+// (owner, writer, reader or freeBusyReader), from their calendar list.
+func (g *GoogleCalendar) calendarAccessRole(ctx context.Context, token, calendarID string) (string, error) {
+	var out struct {
+		AccessRole string `json:"accessRole"`
+	}
+	if err := g.apiGet(ctx, token, "/users/me/calendarList/"+url.PathEscape(calendarID), nil, &out); err != nil {
+		return "", err
+	}
+	return out.AccessRole, nil
+}
+
+// getEvent reads one entry of calendarID: its current title and whether the
+// token's owner may edit it.
+func (g *GoogleCalendar) getEvent(ctx context.Context, token, calendarID, eventID string) (GoogleEntry, error) {
+	role, err := g.calendarAccessRole(ctx, token, calendarID)
+	if err != nil {
+		return GoogleEntry{}, err
+	}
+	var it struct {
+		ID      string `json:"id"`
+		Status  string `json:"status"`
+		Summary string `json:"summary"`
+		Locked  bool   `json:"locked"`
+	}
+	if err := g.apiGet(ctx, token, eventPath(calendarID, eventID), nil, &it); err != nil {
+		return GoogleEntry{}, err
+	}
+	if it.Status == "cancelled" {
+		return GoogleEntry{}, &googleAPIError{status: http.StatusGone}
+	}
+	return GoogleEntry{ID: it.ID, Title: it.Summary, Editable: canEditEntry(role, it.Locked)}, nil
+}
+
+// eventSummaryPatch is the whole body of a tag change: only the summary.
+type eventSummaryPatch struct {
+	Summary string `json:"summary"`
+}
+
+// patchEventSummary changes only the title of one entry and returns the title
+// Google stored.
+func (g *GoogleCalendar) patchEventSummary(ctx context.Context, token, calendarID, eventID, summary string) (string, error) {
+	var out struct {
+		Summary string `json:"summary"`
+	}
+	if err := g.apiDo(ctx, http.MethodPatch, token, eventPath(calendarID, eventID), nil, eventSummaryPatch{Summary: summary}, &out); err != nil {
+		return "", err
+	}
+	return out.Summary, nil
 }
 
 // listCalendars returns the calendars on the token owner's calendar list.
@@ -618,11 +712,13 @@ func (g *GoogleCalendar) listEvents(ctx context.Context, token, calendarID strin
 			q.Set("pageToken", pageToken)
 		}
 		var page struct {
-			Items []struct {
+			AccessRole string `json:"accessRole"`
+			Items      []struct {
 				ID       string     `json:"id"`
 				Status   string     `json:"status"`
 				Summary  string     `json:"summary"`
 				Location string     `json:"location"`
+				Locked   bool       `json:"locked"`
 				Start    googleWhen `json:"start"`
 				End      googleWhen `json:"end"`
 			} `json:"items"`
@@ -635,7 +731,7 @@ func (g *GoogleCalendar) listEvents(ctx context.Context, token, calendarID strin
 			if it.Status == "cancelled" {
 				continue
 			}
-			e := GoogleEntry{ID: it.ID, Title: it.Summary, Location: it.Location}
+			e := GoogleEntry{ID: it.ID, Title: it.Summary, Location: it.Location, Editable: canEditEntry(page.AccessRole, it.Locked)}
 			if it.Start.Date != "" {
 				e.AllDay = true
 				e.Start, e.End = it.Start.Date, it.End.Date

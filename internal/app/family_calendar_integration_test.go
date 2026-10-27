@@ -22,8 +22,9 @@ import (
 	"github.com/softsrv/chorus/internal/db"
 )
 
-// calendarStandIn answers the Calendar API reads (calendarList and events)
-// for one connected user and records every request with its bearer token.
+// calendarStandIn answers the Calendar API (calendarList, events, a single
+// event and a PATCH of it) for one connected user and records every request
+// with its bearer token.
 type calendarStandIn struct {
 	srv *httptest.Server
 
@@ -58,19 +59,49 @@ func newCalendarStandIn(t *testing.T, access string) *calendarStandIn {
 				items = append(items, map[string]any{"id": id, "summary": name})
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": items})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/users/me/calendarList/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"accessRole": "owner"})
+		case strings.HasPrefix(r.URL.Path, "/calendars/") && strings.Contains(r.URL.Path, "/events/"):
+			id, eventID, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/calendars/"), "/events/")
+			for _, it := range f.events[id] {
+				if it["id"] != eventID {
+					continue
+				}
+				if r.Method == http.MethodPatch {
+					var patch map[string]any
+					_ = json.NewDecoder(r.Body).Decode(&patch)
+					for k, v := range patch {
+						it[k] = v
+					}
+				}
+				_ = json.NewEncoder(w).Encode(it)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/calendars/") && strings.HasSuffix(r.URL.Path, "/events"):
 			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/calendars/"), "/events")
 			items := f.events[id]
 			if items == nil {
 				items = []map[string]any{}
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"items": items})
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "accessRole": "owner"})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+// patches counts the PATCH requests among reqs.
+func patches(reqs []standInRequest) int {
+	n := 0
+	for _, r := range reqs {
+		if r.Method == http.MethodPatch {
+			n++
+		}
+	}
+	return n
 }
 
 func (f *calendarStandIn) recorded() []standInRequest {

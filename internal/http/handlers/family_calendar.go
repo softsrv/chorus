@@ -18,6 +18,7 @@ type familyCalendarServicer interface {
 	Clear(ctx context.Context, userID, householdID uuid.UUID) error
 	Status(ctx context.Context, userID, householdID uuid.UUID) (app.HouseholdCalendarStatus, error)
 	ListEntries(ctx context.Context, userID, householdID uuid.UUID, from, to time.Time) (app.HouseholdEntries, error)
+	SetEntryTags(ctx context.Context, userID, householdID uuid.UUID, eventID string, tags []uuid.UUID) (app.TaggedEntry, error)
 }
 
 // FamilyCalendarHandler serves the caller's Google calendar list and each
@@ -56,17 +57,45 @@ type householdCalendarJSON struct {
 }
 
 type familyEntryJSON struct {
-	ID       string `json:"id"`
-	Title    string `json:"title"`
-	Start    string `json:"start"`
-	End      string `json:"end"`
-	AllDay   bool   `json:"all_day"`
-	Location string `json:"location"`
+	ID       string      `json:"id"`
+	Title    string      `json:"title"`
+	Start    string      `json:"start"`
+	End      string      `json:"end"`
+	AllDay   bool        `json:"all_day"`
+	Location string      `json:"location"`
+	Tags     []uuid.UUID `json:"tags"`
+	CanTag   bool        `json:"can_tag"`
+}
+
+type tagMemberJSON struct {
+	UserID      uuid.UUID `json:"user_id"`
+	DisplayName string    `json:"display_name"`
+	Taggable    bool      `json:"taggable"`
+	Reason      string    `json:"reason,omitempty"`
 }
 
 type householdEntriesResponse struct {
-	Status string            `json:"status"`
-	Items  []familyEntryJSON `json:"items"`
+	Status  string            `json:"status"`
+	Items   []familyEntryJSON `json:"items"`
+	Members []tagMemberJSON   `json:"members"`
+}
+
+type setTagsRequest struct {
+	Tags []uuid.UUID `json:"tags"`
+}
+
+type taggedEntryJSON struct {
+	ID     string      `json:"id"`
+	Title  string      `json:"title"`
+	Tags   []uuid.UUID `json:"tags"`
+	CanTag bool        `json:"can_tag"`
+}
+
+func nonNilIDs(ids []uuid.UUID) []uuid.UUID {
+	if ids == nil {
+		return []uuid.UUID{}
+	}
+	return ids
 }
 
 type setCalendarRequest struct {
@@ -167,8 +196,32 @@ func (h *FamilyCalendarHandler) Events(w http.ResponseWriter, r *http.Request) {
 	}
 	respond.JSON(w, http.StatusOK, householdEntriesResponse{
 		Status: res.Status,
-		Items: mapSlice(res.Entries, func(e app.GoogleEntry) familyEntryJSON {
-			return familyEntryJSON{ID: e.ID, Title: e.Title, Start: e.Start, End: e.End, AllDay: e.AllDay, Location: e.Location}
+		Items: mapSlice(res.Entries, func(e app.FamilyEntry) familyEntryJSON {
+			return familyEntryJSON{ID: e.ID, Title: e.Title, Start: e.Start, End: e.End, AllDay: e.AllDay, Location: e.Location,
+				Tags: nonNilIDs(e.Tags), CanTag: e.CanTag}
+		}),
+		Members: mapSlice(res.Members, func(m app.TagMember) tagMemberJSON {
+			return tagMemberJSON{UserID: m.UserID, DisplayName: m.Name, Taggable: m.Taggable, Reason: m.Reason}
 		}),
 	})
+}
+
+// SetTags replaces the tag group of one family calendar entry with the given
+// members ({"tags": [user ids]}; empty untags) and answers with the title
+// Google stored.
+func (h *FamilyCalendarHandler) SetTags(w http.ResponseWriter, r *http.Request) {
+	hid, ok := pathUUID(w, r, "householdID")
+	if !ok {
+		return
+	}
+	var req setTagsRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	res, err := h.svc.SetEntryTags(r.Context(), currentUser(r), hid, r.PathValue("eventID"), req.Tags)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, taggedEntryJSON{ID: res.ID, Title: res.Title, Tags: nonNilIDs(res.Tags), CanTag: res.CanTag})
 }
