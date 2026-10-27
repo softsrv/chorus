@@ -77,6 +77,16 @@ type Household struct {
 	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
 }
 
+type HouseholdCalendar struct {
+	ID           uuid.UUID          `json:"id"`
+	HouseholdID  uuid.UUID          `json:"household_id"`
+	SetBy        uuid.UUID          `json:"set_by"`
+	CalendarID   string             `json:"calendar_id"`
+	CalendarName string             `json:"calendar_name"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+}
+
 type HouseholdInvite struct {
 	ID          uuid.UUID          `json:"id"`
 	HouseholdID uuid.UUID          `json:"household_id"`

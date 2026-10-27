@@ -35,6 +35,8 @@ type Querier interface {
 	// Returns the deleted row so its token can be revoked at Google afterwards.
 	DeleteGoogleCalendarConnectionByUser(ctx context.Context, userID uuid.UUID) (GoogleCalendarConnection, error)
 	DeleteHousehold(ctx context.Context, id uuid.UUID) error
+	// Only the member who set it can clear it.
+	DeleteHouseholdCalendar(ctx context.Context, arg DeleteHouseholdCalendarParams) (int64, error)
 	// Deletes every household where the user is the only member.
 	DeleteSoleMemberHouseholds(ctx context.Context, userID uuid.UUID) error
 	DeleteStaleHouseholdInvites(ctx context.Context) (int64, error)
@@ -46,6 +48,9 @@ type Querier interface {
 	GetChore(ctx context.Context, arg GetChoreParams) (Chore, error)
 	GetEvent(ctx context.Context, arg GetEventParams) (Event, error)
 	GetGoogleCalendarConnectionByUser(ctx context.Context, userID uuid.UUID) (GoogleCalendarConnection, error)
+	// Every family-calendar query is scoped by household_id; callers check
+	// membership with getHousehold first.
+	GetHouseholdCalendar(ctx context.Context, householdID uuid.UUID) (GetHouseholdCalendarRow, error)
 	// Returns the household together with the caller's role. No row means either
 	// the household doesn't exist or the user isn't a member; callers treat both
 	// as "not found" so household IDs can't be probed.
@@ -113,6 +118,10 @@ type Querier interface {
 	// One connection per user: a reconnect replaces the tokens and access level
 	// and clears the broken flag.
 	UpsertGoogleCalendarConnection(ctx context.Context, arg UpsertGoogleCalendarConnectionParams) (GoogleCalendarConnection, error)
+	// Sets the household's family calendar. An existing one is only replaced when
+	// it was set by the same member: for anyone else the guarded DO UPDATE
+	// matches nothing and no row is returned.
+	UpsertHouseholdCalendar(ctx context.Context, arg UpsertHouseholdCalendarParams) (HouseholdCalendar, error)
 }
 
 var _ Querier = (*Queries)(nil)

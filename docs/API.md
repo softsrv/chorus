@@ -74,7 +74,7 @@ Native apps: store the refresh token in Keychain / Android Keystore, and send `d
 
 ### Households 🔒
 
-Roles: `admin` (manage household, members, invites) and `member`. Every member can manage chores and events.
+Roles: `admin` (manage household, members, invites) and `member`. Every member can manage chores and sees the household's family calendar.
 
 | Method & path | Body | Notes |
 |---|---|---|
@@ -103,17 +103,19 @@ Chore: `id, household_id, title, description, assignee_id, due_on, completed, co
 | `PUT /{choreId}/completion` | none | Mark done |
 | `DELETE /{choreId}/completion` | none | Reopen |
 
-### Events 🔒 — `/households/{id}/events`
+### Family calendar 🔒 — `/households/{id}/calendar`, `/households/{id}/events`
 
-Event: `id, household_id, title, description, location, starts_at, ends_at, all_day, created_by, created_at, updated_at`
+One member who has connected Google Calendar picks one of their own calendars as the household's family calendar. Every member then sees its entries, which the server fetches with that member's Google token. Chorus only reads from Google: it has no route that creates, edits or deletes an entry. The family calendar is cleared when its member disconnects Google, leaves or is removed, or deletes their account.
+
+`status` is `ok`, `not_configured` (none chosen), `broken` (the connecting member must reconnect) or `unavailable` (Google Calendar not configured on this server).
 
 | Method & path | Body / query | Notes |
 |---|---|---|
-| `GET /` | `?from=&to=` (RFC 3339, required, ≤ 100 days) | Events overlapping the range, max 1000 |
-| `POST /` | `title, starts_at, ends_at, description?, location?, all_day?` | `ends_at ≥ starts_at`; ≤ 366 days long |
-| `GET /{eventId}` | none | |
-| `PUT /{eventId}` | same as POST | Full replacement |
-| `DELETE /{eventId}` | none | |
+| `GET /me/google-calendar/calendars` | none | Caller's own calendars: `{status, items: [{id, name, primary}]}` |
+| `GET /households/{id}/calendar` | none | `{status, calendar_id?, calendar_name?, set_by?: {id, display_name}}` |
+| `PUT /households/{id}/calendar` | `calendar_id` | Must be on the caller's own calendar list (else 422). Only the member who set it may change it (else 403) |
+| `DELETE /households/{id}/calendar` | none | 204. Only the member who set it (else 403) |
+| `GET /households/{id}/events` | `?from=&to=` (RFC 3339, required, ≤ 100 days) | `{status, items: [{id, title, start, end, all_day, location}]}`. `start`/`end` are RFC 3339, or `YYYY-MM-DD` when `all_day`. Recurring entries come back as occurrences. 503 `google_unavailable` if Google fails temporarily |
 
 ### Operational
 

@@ -508,61 +508,50 @@ async function eventsTab(h, $root) {
   const from = new Date(now.getFullYear(), now.getMonth() + monthOffset, 1);
   const to = new Date(now.getFullYear(), now.getMonth() + monthOffset + 1, 1);
   const qs = new URLSearchParams({ from: from.toISOString(), to: to.toISOString() });
-  const { items } = await api('GET', `/households/${h.id}/events?${qs}`);
+  const { status, items } = await api('GET', `/households/${h.id}/events?${qs}`);
   const rerender = () => { $root.replaceChildren(); eventsTab(h, $root).catch((err) => showError($root, err)); };
+  const toAccount = (e) => { e.preventDefault(); accountView(); };
 
-  // datetime-local inputs are in the browser's local zone.
-  const localInput = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-  const eventFields = (e = {}) => [
-    { name: 'title', label: 'Title', required: true, value: e.title },
-    { name: 'starts_at', label: 'Starts', type: 'datetime-local', required: true, value: e.starts_at ? localInput(new Date(e.starts_at)) : '' },
-    { name: 'ends_at', label: 'Ends', type: 'datetime-local', value: e.ends_at ? localInput(new Date(e.ends_at)) : '' },
-    { name: 'location', label: 'Location', value: e.location },
-    { name: 'all_day', label: 'All day', type: 'checkbox', value: e.all_day },
-  ];
-  const toBody = (v) => {
-    let start = new Date(v.starts_at);
-    let end = v.ends_at ? new Date(v.ends_at) : new Date(start.getTime() + 60 * 60000);
-    if (v.all_day) {
-      start = new Date(start.getFullYear(), start.getMonth(), start.getDate());
-      end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1);
-    }
-    return { title: v.title, location: v.location, all_day: v.all_day, starts_at: start.toISOString(), ends_at: end.toISOString() };
-  };
+  if (status === 'not_configured') {
+    $root.replaceChildren(card(null,
+      el('h3', { class: 'font-semibold', text: 'Calendar' }),
+      el('p', { class: 'text-sm opacity-70', text: 'No family calendar is connected for this household yet. A member can connect Google Calendar and pick one on their Account page.' }),
+      el('a', { class: 'link link-primary text-sm', href: '/account', text: 'Go to Account', onclick: toAccount })));
+    return;
+  }
+  if (status === 'broken') {
+    $root.replaceChildren(card(null,
+      el('h3', { class: 'font-semibold', text: 'Calendar' }),
+      alertBox('error', 'The Google Calendar connection behind this family calendar is broken. The member who connected it needs to Reconnect on their Account page.'),
+      el('a', { class: 'link link-primary text-sm', href: '/account', text: 'Go to Account', onclick: toAccount })));
+    return;
+  }
+  if (status !== 'ok') {
+    $root.replaceChildren(card(null,
+      el('h3', { class: 'font-semibold', text: 'Calendar' }),
+      el('p', { class: 'text-sm opacity-70', text: 'Google Calendar is not available on this server.' })));
+    return;
+  }
 
   const nav = el('div', { class: 'join' },
     el('button', { class: 'btn btn-sm join-item', text: '‹', onclick: () => { monthOffset--; rerender(); } }),
     el('button', { class: 'btn btn-sm join-item', text: from.toLocaleDateString(undefined, { month: 'long', year: 'numeric' }), onclick: () => { monthOffset = 0; rerender(); } }),
     el('button', { class: 'btn btn-sm join-item', text: '›', onclick: () => { monthOffset++; rerender(); } }));
 
+  // All-day entries carry a YYYY-MM-DD date; parse it as a local date.
+  const localDate = (d) => { const [y, m, day] = d.split('-').map(Number); return new Date(y, m - 1, day); };
+  // Entries come from Google and are read-only here: no add, edit or delete.
   const rows = items.map((e) => {
-    const when = e.all_day ? new Date(e.starts_at).toLocaleDateString() + ' (all day)' : `${fmtDate(e.starts_at)} – ${fmtDate(e.ends_at)}`;
-    const $row = el('li', { class: 'flex items-center gap-3 py-2 border-b border-base-300' },
+    const when = e.all_day ? localDate(e.start).toLocaleDateString() + ' (all day)' : `${fmtDate(e.start)} – ${fmtDate(e.end)}`;
+    return el('li', { class: 'flex items-center gap-3 py-2 border-b border-base-300' },
       el('div', { class: 'flex-1 min-w-0' },
-        el('div', { text: e.title }),
-        el('div', { class: 'text-xs opacity-60', text: when + (e.location ? ` · ${e.location}` : '') })),
-      el('button', {
-        class: 'btn btn-ghost btn-xs', text: 'Edit',
-        onclick: () => $row.replaceWith(el('li', { class: 'py-2' }, form({
-          fields: eventFields(e), submit: 'Save', inline: true,
-          onSubmit: async (v) => { await api('PUT', `/households/${h.id}/events/${e.id}`, { ...toBody(v), description: e.description }); rerender(); },
-        }))),
-      }),
-      el('button', {
-        class: 'btn btn-ghost btn-xs text-error', text: 'Delete',
-        onclick: confirmClick('Sure?', async () => { await api('DELETE', `/households/${h.id}/events/${e.id}`); rerender(); }),
-      }));
-    return $row;
+        el('div', { text: e.title || '(no title)' }),
+        el('div', { class: 'text-xs opacity-60', text: when + (e.location ? ` · ${e.location}` : '') })));
   });
 
   $root.replaceChildren(card(null,
     el('div', { class: 'flex items-center justify-between' }, el('h3', { class: 'font-semibold', text: 'Calendar' }), nav),
-    el('ul', {}, rows.length ? rows : el('li', { class: 'opacity-60 py-2', text: 'No events this month.' })),
-    el('div', { class: 'divider my-0' }),
-    form({
-      fields: eventFields(), submit: 'Add event', inline: true,
-      onSubmit: async (v) => { await api('POST', `/households/${h.id}/events`, toBody(v)); rerender(); },
-    })));
+    el('ul', {}, rows.length ? rows : el('li', { class: 'opacity-60 py-2', text: 'No events this month.' }))));
 }
 
 // ── Members ───────────────────────────────────────────────────────────────────

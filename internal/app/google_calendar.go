@@ -2,11 +2,14 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,7 +22,12 @@ import (
 	"github.com/softsrv/chorus/internal/db"
 )
 
-const googleRevokeURL = "https://oauth2.googleapis.com/revoke"
+const (
+	googleRevokeURL = "https://oauth2.googleapis.com/revoke"
+	// googleCalendarAPIURL is the Calendar API v3 base. Chorus only ever sends
+	// it GET requests: it reads calendar lists and entries, never writes.
+	googleCalendarAPIURL = "https://www.googleapis.com/calendar/v3"
+)
 
 // Google Calendar scopes. Connect asks for exactly these two: the calendar
 // list (to pick a calendar) and read/write access to events.
@@ -69,6 +77,7 @@ type GoogleCalendarConfig struct {
 	AuthURL      string
 	TokenURL     string
 	RevokeURL    string
+	APIBaseURL   string // Calendar API v3 base; default googleCalendarAPIURL
 	HTTPClient   *http.Client
 }
 
@@ -87,6 +96,7 @@ type GoogleCalendar struct {
 	cipher    *TokenCipher
 	oauth     oauth2.Config
 	revokeURL string
+	apiURL    string
 	client    *http.Client
 }
 
@@ -103,6 +113,10 @@ func NewGoogleCalendar(q *db.Queries, cipher *TokenCipher, cfg GoogleCalendarCon
 	revokeURL := cfg.RevokeURL
 	if revokeURL == "" {
 		revokeURL = googleRevokeURL
+	}
+	apiURL := strings.TrimRight(cfg.APIBaseURL, "/")
+	if apiURL == "" {
+		apiURL = googleCalendarAPIURL
 	}
 	client := cfg.HTTPClient
 	if client == nil {
@@ -123,6 +137,7 @@ func NewGoogleCalendar(q *db.Queries, cipher *TokenCipher, cfg GoogleCalendarCon
 			},
 		},
 		revokeURL: revokeURL,
+		apiURL:    apiURL,
 		client:    client,
 	}
 }
@@ -306,9 +321,9 @@ func (g *GoogleCalendar) Status(ctx context.Context, userID uuid.UUID) (Calendar
 	if conn.Broken {
 		return CalendarStatus{Status: CalendarBroken, Access: conn.AccessLevel}, nil
 	}
-	if conn.TokenExpiry.Valid && time.Now().Add(accessTokenSkew).After(conn.TokenExpiry.Time) {
-		broken, err := g.refresh(ctx, conn)
-		if err != nil {
+	if accessTokenExpired(conn) {
+		_, broken, err := g.refresh(ctx, conn)
+		if err != nil && !errors.Is(err, errRefreshTransient) {
 			return CalendarStatus{}, err
 		}
 		if broken {
@@ -318,15 +333,25 @@ func (g *GoogleCalendar) Status(ctx context.Context, userID uuid.UUID) (Calendar
 	return CalendarStatus{Status: CalendarConnected, Access: conn.AccessLevel}, nil
 }
 
-// refresh trades the stored refresh token for a new access token. It reports
-// broken=true once the connection has been marked broken. Transient failures
-// are logged and leave the row untouched.
-func (g *GoogleCalendar) refresh(ctx context.Context, conn db.GoogleCalendarConnection) (bool, error) {
+func accessTokenExpired(conn db.GoogleCalendarConnection) bool {
+	return conn.TokenExpiry.Valid && time.Now().Add(accessTokenSkew).After(conn.TokenExpiry.Time)
+}
+
+// errRefreshTransient means Google could not be reached or answered with a
+// temporary failure; the connection is left as it was.
+var errRefreshTransient = errors.New("google calendar: token refresh failed transiently")
+
+// refresh trades the stored refresh token for a new access token and returns
+// it. It reports broken=true once the connection has been marked broken.
+// Transient failures are logged, leave the row untouched and return
+// errRefreshTransient.
+func (g *GoogleCalendar) refresh(ctx context.Context, conn db.GoogleCalendarConnection) (string, bool, error) {
 	refreshToken, err := g.cipher.Decrypt(conn.RefreshTokenEnc)
 	if err != nil {
 		// Unreadable under the current key: only a reconnect can fix it.
 		slog.WarnContext(ctx, "google calendar: stored refresh token unreadable", "error", err)
-		return g.markBroken(ctx, conn.UserID)
+		broken, err := g.markBroken(ctx, conn.UserID)
+		return "", broken, err
 	}
 	httpCtx := context.WithValue(ctx, oauth2.HTTPClient, g.client)
 	tok, err := g.oauth.TokenSource(httpCtx, &oauth2.Token{RefreshToken: refreshToken}).Token()
@@ -335,23 +360,24 @@ func (g *GoogleCalendar) refresh(ctx context.Context, conn db.GoogleCalendarConn
 		if errors.As(err, &re) && re.ErrorCode == "invalid_grant" &&
 			(re.Response == nil || re.Response.StatusCode < http.StatusInternalServerError) {
 			slog.InfoContext(ctx, "google calendar: refresh rejected, marking broken")
-			return g.markBroken(ctx, conn.UserID)
+			broken, err := g.markBroken(ctx, conn.UserID)
+			return "", broken, err
 		}
 		slog.WarnContext(ctx, "google calendar: refresh failed, will retry later", "error", err)
-		return false, nil
+		return "", false, errRefreshTransient
 	}
 	accessEnc, err := g.cipher.Encrypt(tok.AccessToken)
 	if err != nil {
-		return false, fmt.Errorf("encrypt access token: %w", err)
+		return "", false, fmt.Errorf("encrypt access token: %w", err)
 	}
 	if _, err := g.q.UpdateGoogleCalendarAccessToken(ctx, db.UpdateGoogleCalendarAccessTokenParams{
 		UserID:         conn.UserID,
 		AccessTokenEnc: accessEnc,
 		TokenExpiry:    expiryTimestamp(tok.Expiry),
 	}); err != nil {
-		return false, fmt.Errorf("update access token: %w", err)
+		return "", false, fmt.Errorf("update access token: %w", err)
 	}
-	return false, nil
+	return tok.AccessToken, false, nil
 }
 
 func (g *GoogleCalendar) markBroken(ctx context.Context, userID uuid.UUID) (bool, error) {
@@ -409,4 +435,226 @@ func expiryTimestamp(t time.Time) pgtype.Timestamptz {
 		return pgtype.Timestamptz{}
 	}
 	return pgtype.Timestamptz{Time: t, Valid: true}
+}
+
+// ── Read-only Calendar API access ─────────────────────────────────────────────
+//
+// Chorus only reads from the Calendar API: the calendar list (to pick a family
+// calendar) and events.list (to show its entries). There is deliberately no
+// insert, delete, move, quickAdd or any request with a body.
+
+var (
+	// errCalendarNotConnected means the user has no stored connection.
+	errCalendarNotConnected = errors.New("google calendar not connected")
+	// errCalendarBroken means the stored connection can't be used until the
+	// user reconnects (refresh rejected, or Google refused the token).
+	errCalendarBroken = errors.New("google calendar connection broken")
+	// errGoogleUnavailable means Google could not be reached or failed
+	// temporarily; nothing was changed.
+	errGoogleUnavailable = errors.New("google calendar temporarily unavailable")
+)
+
+const (
+	// calendarAPIPageSize and calendarAPIMaxPages bound one listing.
+	calendarAPIPageSize = 250
+	calendarAPIMaxPages = 10
+)
+
+// GoogleCalendarInfo is one calendar from a user's Google calendar list.
+type GoogleCalendarInfo struct {
+	ID      string
+	Name    string
+	Primary bool
+}
+
+// GoogleEntry is one entry (event occurrence) of a Google calendar. Start and
+// End are RFC 3339 for timed entries and YYYY-MM-DD when AllDay.
+type GoogleEntry struct {
+	ID       string
+	Title    string
+	Start    string
+	End      string
+	AllDay   bool
+	Location string
+}
+
+// validAccessToken returns a usable, decrypted access token for userID,
+// refreshing an expired one. It returns errCalendarNotConnected,
+// errCalendarBroken (the row is, or has just been, marked broken) or
+// errGoogleUnavailable (a transient refresh failure).
+func (g *GoogleCalendar) validAccessToken(ctx context.Context, userID uuid.UUID) (string, error) {
+	conn, err := g.q.GetGoogleCalendarConnectionByUser(ctx, userID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", errCalendarNotConnected
+		}
+		return "", fmt.Errorf("get connection: %w", err)
+	}
+	if conn.Broken {
+		return "", errCalendarBroken
+	}
+	if !accessTokenExpired(conn) {
+		if token, err := g.cipher.Decrypt(conn.AccessTokenEnc); err == nil && token != "" {
+			return token, nil
+		}
+		// An unreadable access token is replaced by refreshing.
+	}
+	token, broken, err := g.refresh(ctx, conn)
+	switch {
+	case errors.Is(err, errRefreshTransient):
+		return "", errGoogleUnavailable
+	case err != nil:
+		return "", err
+	case broken:
+		return "", errCalendarBroken
+	}
+	return token, nil
+}
+
+// googleAPIError is a non-2xx answer from the Calendar API.
+type googleAPIError struct{ status int }
+
+func (e *googleAPIError) Error() string {
+	return fmt.Sprintf("google calendar api: status %d", e.status)
+}
+
+// refusedByGoogle reports whether Google refused the token or the calendar
+// (401, 403 or 404): something only the connecting member can fix.
+func refusedByGoogle(err error) bool {
+	var apiErr *googleAPIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	switch apiErr.status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+		return true
+	}
+	return false
+}
+
+// apiGet sends one authorized GET to the Calendar API and decodes the JSON
+// answer into out. GET is the only method this client has.
+func (g *GoogleCalendar) apiGet(ctx context.Context, token, path string, query url.Values, out any) error {
+	target := g.apiURL + path
+	if len(query) > 0 {
+		target += "?" + query.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return fmt.Errorf("build calendar request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	resp, err := g.client.Do(req)
+	if err != nil {
+		slog.WarnContext(ctx, "google calendar: api request failed", "error", err)
+		return errGoogleUnavailable
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return &googleAPIError{status: resp.StatusCode}
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(out); err != nil {
+		return fmt.Errorf("decode calendar response: %w", err)
+	}
+	return nil
+}
+
+// listCalendars returns the calendars on the token owner's calendar list.
+func (g *GoogleCalendar) listCalendars(ctx context.Context, token string) ([]GoogleCalendarInfo, error) {
+	out := []GoogleCalendarInfo{}
+	pageToken := ""
+	for range calendarAPIMaxPages {
+		q := url.Values{"maxResults": {strconv.Itoa(calendarAPIPageSize)}}
+		if pageToken != "" {
+			q.Set("pageToken", pageToken)
+		}
+		var page struct {
+			Items []struct {
+				ID              string `json:"id"`
+				Summary         string `json:"summary"`
+				SummaryOverride string `json:"summaryOverride"`
+				Primary         bool   `json:"primary"`
+			} `json:"items"`
+			NextPageToken string `json:"nextPageToken"`
+		}
+		if err := g.apiGet(ctx, token, "/users/me/calendarList", q, &page); err != nil {
+			return nil, err
+		}
+		for _, it := range page.Items {
+			if it.ID == "" {
+				continue
+			}
+			name := it.SummaryOverride
+			if name == "" {
+				name = it.Summary
+			}
+			out = append(out, GoogleCalendarInfo{ID: it.ID, Name: name, Primary: it.Primary})
+		}
+		if page.NextPageToken == "" {
+			break
+		}
+		pageToken = page.NextPageToken
+	}
+	return out, nil
+}
+
+// listEvents returns the entries of calendarID overlapping [from, to), with
+// recurring entries expanded into their occurrences. The calendar id always
+// comes from the caller; there is no default calendar.
+func (g *GoogleCalendar) listEvents(ctx context.Context, token, calendarID string, from, to time.Time) ([]GoogleEntry, error) {
+	out := []GoogleEntry{}
+	path := "/calendars/" + url.PathEscape(calendarID) + "/events"
+	pageToken := ""
+	for range calendarAPIMaxPages {
+		q := url.Values{
+			"timeMin":      {from.UTC().Format(time.RFC3339)},
+			"timeMax":      {to.UTC().Format(time.RFC3339)},
+			"singleEvents": {"true"},
+			"orderBy":      {"startTime"},
+			"maxResults":   {strconv.Itoa(calendarAPIPageSize)},
+		}
+		if pageToken != "" {
+			q.Set("pageToken", pageToken)
+		}
+		var page struct {
+			Items []struct {
+				ID       string     `json:"id"`
+				Status   string     `json:"status"`
+				Summary  string     `json:"summary"`
+				Location string     `json:"location"`
+				Start    googleWhen `json:"start"`
+				End      googleWhen `json:"end"`
+			} `json:"items"`
+			NextPageToken string `json:"nextPageToken"`
+		}
+		if err := g.apiGet(ctx, token, path, q, &page); err != nil {
+			return nil, err
+		}
+		for _, it := range page.Items {
+			if it.Status == "cancelled" {
+				continue
+			}
+			e := GoogleEntry{ID: it.ID, Title: it.Summary, Location: it.Location}
+			if it.Start.Date != "" {
+				e.AllDay = true
+				e.Start, e.End = it.Start.Date, it.End.Date
+			} else {
+				e.Start, e.End = it.Start.DateTime, it.End.DateTime
+			}
+			out = append(out, e)
+		}
+		if page.NextPageToken == "" {
+			break
+		}
+		pageToken = page.NextPageToken
+	}
+	return out, nil
+}
+
+// googleWhen is an event start or end: date for all-day entries, dateTime
+// otherwise.
+type googleWhen struct {
+	Date     string `json:"date"`
+	DateTime string `json:"dateTime"`
 }

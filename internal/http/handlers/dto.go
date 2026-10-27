@@ -150,36 +150,6 @@ func toChore(c db.Chore) choreJSON {
 	}
 }
 
-type eventJSON struct {
-	ID          uuid.UUID  `json:"id"`
-	HouseholdID uuid.UUID  `json:"household_id"`
-	Title       string     `json:"title"`
-	Description string     `json:"description"`
-	Location    string     `json:"location"`
-	StartsAt    time.Time  `json:"starts_at"`
-	EndsAt      time.Time  `json:"ends_at"`
-	AllDay      bool       `json:"all_day"`
-	CreatedBy   *uuid.UUID `json:"created_by"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
-}
-
-func toEvent(e db.Event) eventJSON {
-	return eventJSON{
-		ID:          e.ID,
-		HouseholdID: e.HouseholdID,
-		Title:       e.Title,
-		Description: e.Description,
-		Location:    e.Location,
-		StartsAt:    e.StartsAt.Time.UTC(),
-		EndsAt:      e.EndsAt.Time.UTC(),
-		AllDay:      e.AllDay,
-		CreatedBy:   e.CreatedBy,
-		CreatedAt:   e.CreatedAt.Time.UTC(),
-		UpdatedAt:   e.UpdatedAt.Time.UTC(),
-	}
-}
-
 func mapSlice[T, U any](in []T, f func(T) U) []U {
 	out := make([]U, len(in))
 	for i, v := range in {

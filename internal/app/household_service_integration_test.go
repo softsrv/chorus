@@ -4,6 +4,7 @@ package app_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -25,11 +26,22 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
 	chores := app.NewChoreService(q)
-	events := app.NewEventService(q)
 	ctx := context.Background()
 
 	alice := registerVerified(t, pool, authSvc, mailer, "alice").User.ID
 	mallory := registerVerified(t, pool, authSvc, mailer, "mallory").User.ID
+	bob := registerVerified(t, pool, authSvc, mailer, "bob").User.ID // member, no Google connection
+
+	// Alice connects Google; the stand-in knows only her access token.
+	const aliceAccess, aliceRefresh = "alice-google-access-secret", "alice-google-refresh-secret"
+	google := newCalendarStandIn(t, aliceAccess)
+	google.cals["primary-alice@example.com"] = "Alice private"
+	google.cals["family-y@group.calendar.google.com"] = "Family Y"
+	google.events["family-y@group.calendar.google.com"] = []map[string]any{{"id": "y1", "summary": "Y soccer",
+		"start": map[string]any{"dateTime": "2026-11-05T18:00:00Z"}, "end": map[string]any{"dateTime": "2026-11-05T19:00:00Z"}}}
+	google.events["primary-alice@example.com"] = []map[string]any{{"id": "x1", "summary": "Alice private appt",
+		"start": map[string]any{"dateTime": "2026-11-06T18:00:00Z"}, "end": map[string]any{"dateTime": "2026-11-06T19:00:00Z"}}}
+	family := connectCalendar(t, pool, alice, aliceAccess, aliceRefresh, google)
 
 	h, err := households.Create(ctx, alice, app.HouseholdInput{Name: "Alice Family", Timezone: "America/Chicago"})
 	if err != nil {
@@ -39,11 +51,17 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create chore: %v", err)
 	}
-	now := time.Now()
-	event, err := events.Create(ctx, alice, h.ID, app.EventInput{Title: "Dinner", StartsAt: now, EndsAt: now.Add(time.Hour)})
+	inv, err := households.CreateInvite(ctx, alice, h.ID)
 	if err != nil {
-		t.Fatalf("Create event: %v", err)
+		t.Fatalf("CreateInvite: %v", err)
 	}
+	if _, err := households.AcceptInvite(ctx, bob, inv.Code); err != nil {
+		t.Fatalf("bob joins: %v", err)
+	}
+	if _, err := family.Set(ctx, alice, h.ID, "family-y@group.calendar.google.com"); err != nil {
+		t.Fatalf("Set family calendar: %v", err)
+	}
+	from, to := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
 
 	// Mallory has her own household; IDs from it must not unlock Alice's data.
 	mh, err := households.Create(ctx, mallory, app.HouseholdInput{Name: "Mallory"})
@@ -62,18 +80,52 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	_, checks["update chore"] = chores.Update(ctx, mallory, h.ID, chore.ID, app.ChoreInput{Title: "x"})
 	_, checks["complete chore"] = chores.SetCompleted(ctx, mallory, h.ID, chore.ID, true)
 	checks["delete chore"] = chores.Delete(ctx, mallory, h.ID, chore.ID)
-	_, checks["list events"] = events.ListRange(ctx, mallory, h.ID, now.Add(-time.Hour), now.Add(time.Hour))
-	_, checks["get event"] = events.Get(ctx, mallory, h.ID, event.ID)
-	checks["delete event"] = events.Delete(ctx, mallory, h.ID, event.ID)
+	requestsBefore := len(google.recorded())
+	_, checks["family calendar status"] = family.Status(ctx, mallory, h.ID)
+	_, checks["family calendar entries"] = family.ListEntries(ctx, mallory, h.ID, from, to)
+	_, checks["set family calendar"] = family.Set(ctx, mallory, h.ID, "family-y@group.calendar.google.com")
+	checks["clear family calendar"] = family.Clear(ctx, mallory, h.ID)
 	// Cross-household ID smuggling: Mallory's household ID + Alice's chore ID.
 	_, checks["get chore via own household"] = chores.Get(ctx, mallory, mh.ID, chore.ID)
 	checks["delete chore via own household"] = chores.Delete(ctx, mallory, mh.ID, chore.ID)
-	_, checks["get event via own household"] = events.Get(ctx, mallory, mh.ID, event.ID)
 
 	for name, err := range checks {
 		if !errors.Is(err, app.ErrNotFound) {
 			t.Errorf("%s: expected ErrNotFound, got %v", name, err)
 		}
+	}
+	// The outsider's attempts never reach Google.
+	if reqs := google.recorded()[requestsBefore:]; len(reqs) != 0 {
+		t.Errorf("outsider's family calendar calls reached Google: %+v", reqs)
+	}
+
+	// Member Bob, with no Google connection, sees the family calendar's
+	// entries, fetched server-side with Alice's token from calendar Y only.
+	requestsBefore = len(google.recorded())
+	entries, err := family.ListEntries(ctx, bob, h.ID, from, to)
+	if err != nil || entries.Status != app.FamilyCalendarOK || len(entries.Entries) != 1 || entries.Entries[0].ID != "y1" {
+		t.Fatalf("bob's entries = %+v, %v; want only y1", entries, err)
+	}
+	reqs := google.recorded()[requestsBefore:]
+	if len(reqs) != 1 || reqs[0].Auth != aliceAccess || reqs[0].Path != "/calendars/family-y@group.calendar.google.com/events" {
+		t.Errorf("bob's fetch requests = %+v, want one events request to Y with alice's token", reqs)
+	}
+	status, err := family.Status(ctx, bob, h.ID)
+	if err != nil || status.Status != app.FamilyCalendarOK || status.SetByID != alice {
+		t.Fatalf("bob's status = %+v, %v", status, err)
+	}
+	// Nothing Bob receives carries Alice's tokens, her calendar list or
+	// another calendar's entries.
+	bodies, _ := json.Marshal(map[string]any{"status": status, "entries": entries})
+	for _, leak := range []string{aliceAccess, aliceRefresh, "primary-alice@example.com", "Alice private", "x1"} {
+		if strings.Contains(string(bodies), leak) {
+			t.Errorf("bob's results contain %q: %s", leak, bodies)
+		}
+	}
+	// Bob may not list Alice's calendars: his own list is "not connected".
+	mine, err := family.ListMyCalendars(ctx, bob)
+	if err != nil || mine.Status != app.CalendarNotConnected || len(mine.Calendars) != 0 {
+		t.Errorf("bob's calendar list = %+v, %v; want not_connected and empty", mine, err)
 	}
 
 	// Assigning a chore to a non-member is rejected.
@@ -87,8 +139,8 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	if got, err := chores.Get(ctx, alice, h.ID, chore.ID); err != nil || got.Title != "Dishes" || got.CompletedAt.Valid {
 		t.Errorf("alice's chore was modified: %+v, %v", got, err)
 	}
-	if _, err := events.Get(ctx, alice, h.ID, event.ID); err != nil {
-		t.Errorf("alice's event: %v", err)
+	if st, err := family.Status(ctx, alice, h.ID); err != nil || st.CalendarID != "family-y@group.calendar.google.com" || st.SetByID != alice {
+		t.Errorf("alice's family calendar was modified: %+v, %v", st, err)
 	}
 }
 

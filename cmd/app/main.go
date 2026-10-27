@@ -75,7 +75,6 @@ func main() {
 	userSvc := app.NewUserService(queries)
 	householdSvc := app.NewHouseholdService(queries, pool)
 	choreSvc := app.NewChoreService(queries)
-	eventSvc := app.NewEventService(queries)
 
 	// Google sign-in is optional: it is enabled only when both the client id
 	// and secret are set, and the app runs normally without them.
@@ -107,6 +106,10 @@ func main() {
 		slog.Warn("Google Calendar is disabled: GOOGLE_TOKEN_KEY is not set")
 	}
 
+	// The family calendar reads a household's chosen Google calendar; with
+	// Google Calendar unavailable it reports "unavailable".
+	familyCalendar := app.NewFamilyCalendar(queries, googleCalendar)
+
 	// ── Background context (token cleanup + rate-limiter sweepers) ────────────
 	// cleanupCtx is cancelled after the HTTP server drains, giving background
 	// goroutines a clean signal to stop without racing active requests.
@@ -120,7 +123,7 @@ func main() {
 		UserSvc:           userSvc,
 		HouseholdSvc:      householdSvc,
 		ChoreSvc:          choreSvc,
-		EventSvc:          eventSvc,
+		FamilyCalendar:    familyCalendar,
 		GoogleSignIn:      googleSignIn,
 		GoogleCalendar:    googleCalendar,
 		JWTSecret:         cfg.JWTSecret,

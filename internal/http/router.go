@@ -21,7 +21,7 @@ type RouterConfig struct {
 	UserSvc           *app.UserService
 	HouseholdSvc      *app.HouseholdService
 	ChoreSvc          *app.ChoreService
-	EventSvc          *app.EventService
+	FamilyCalendar    *app.FamilyCalendar // nil = built from Queries + GoogleCalendar
 	GoogleSignIn      *app.GoogleSignIn   // nil = Google sign-in disabled
 	GoogleCalendar    *app.GoogleCalendar // nil = Google Calendar unavailable
 	JWTSecret         string
@@ -40,7 +40,12 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	meH := handlers.NewMeHandler(cfg.AuthSvc, cfg.UserSvc)
 	householdH := handlers.NewHouseholdHandler(cfg.HouseholdSvc)
 	choreH := handlers.NewChoreHandler(cfg.ChoreSvc)
-	eventH := handlers.NewEventHandler(cfg.EventSvc)
+	familyCal := cfg.FamilyCalendar
+	if familyCal == nil {
+		// Same service main builds: it reports "unavailable" without Google.
+		familyCal = app.NewFamilyCalendar(cfg.Queries, cfg.GoogleCalendar)
+	}
+	familyH := handlers.NewFamilyCalendarHandler(familyCal)
 	googleH := handlers.NewGoogleHandler(cfg.GoogleSignIn, cfg.TrustedProxyCount)
 	calendarH := handlers.NewGoogleCalendarHandler(cfg.GoogleCalendar)
 
@@ -103,6 +108,7 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("POST /api/v1/me/google-calendar/connect", verified(calendarH.Connect))
 	api.Handle("DELETE /api/v1/me/google-calendar", verified(calendarH.Disconnect))
 	api.Handle("GET /api/v1/me/google-calendar/callback", limit(calendarCallbackRL, calendarH.Callback))
+	api.Handle("GET /api/v1/me/google-calendar/calendars", verified(familyH.MyCalendars))
 
 	// ── Households ────────────────────────────────────────────────────────────
 	api.Handle("GET /api/v1/households", verified(householdH.List))
@@ -126,12 +132,13 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("PUT /api/v1/households/{householdID}/chores/{choreID}/completion", verified(choreH.Complete))
 	api.Handle("DELETE /api/v1/households/{householdID}/chores/{choreID}/completion", verified(choreH.Complete))
 
-	// ── Events ────────────────────────────────────────────────────────────────
-	api.Handle("GET /api/v1/households/{householdID}/events", verified(eventH.List))
-	api.Handle("POST /api/v1/households/{householdID}/events", verified(eventH.Create))
-	api.Handle("GET /api/v1/households/{householdID}/events/{eventID}", verified(eventH.Get))
-	api.Handle("PUT /api/v1/households/{householdID}/events/{eventID}", verified(eventH.Update))
-	api.Handle("DELETE /api/v1/households/{householdID}/events/{eventID}", verified(eventH.Delete))
+	// ── Family calendar ────────────────────────────────────────────────────
+	// Read-only: entries come from the household's chosen Google calendar.
+	// Chorus has no route that creates, edits or deletes an entry.
+	api.Handle("GET /api/v1/households/{householdID}/calendar", verified(familyH.Status))
+	api.Handle("PUT /api/v1/households/{householdID}/calendar", verified(familyH.Set))
+	api.Handle("DELETE /api/v1/households/{householdID}/calendar", verified(familyH.Clear))
+	api.Handle("GET /api/v1/households/{householdID}/events", verified(familyH.Events))
 
 	// Unknown API paths get a JSON 404 rather than falling through to the web client.
 	api.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {

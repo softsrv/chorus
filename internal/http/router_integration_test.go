@@ -95,7 +95,6 @@ func newTestServer(t *testing.T) *testServer {
 		UserSvc:      app.NewUserService(q),
 		HouseholdSvc: app.NewHouseholdService(q, pool),
 		ChoreSvc:     app.NewChoreService(q),
-		EventSvc:     app.NewEventService(q),
 		JWTSecret:    secret,
 	})
 	srv := httptest.NewServer(handler)
@@ -263,30 +262,10 @@ func TestAPI_EndToEnd(t *testing.T) {
 	s.expect(http.StatusNoContent, "DELETE", cp, kid.AccessToken, nil, nil)
 	s.expect(http.StatusNotFound, "GET", cp, kid.AccessToken, nil, nil)
 
-	// Events.
-	start := time.Date(2026, 11, 5, 18, 0, 0, 0, time.UTC)
-	var ev struct{ ID uuid.UUID }
-	s.expect(http.StatusCreated, "POST", hp+"/events", kid.AccessToken, map[string]any{
-		"title": "Soccer", "starts_at": start, "ends_at": start.Add(90 * time.Minute), "location": "Park",
-	}, &ev)
-	var evs struct{ Items []map[string]any }
-	q := url.Values{"from": {"2026-11-01T00:00:00Z"}, "to": {"2026-12-01T00:00:00Z"}}
-	s.expect(http.StatusOK, "GET", hp+"/events?"+q.Encode(), parent.AccessToken, nil, &evs)
-	if len(evs.Items) != 1 {
-		t.Errorf("events in November: got %d", len(evs.Items))
-	}
-	var bad apiError
-	s.expect(http.StatusUnprocessableEntity, "POST", hp+"/events", kid.AccessToken, map[string]any{
-		"title": "Backwards", "starts_at": start, "ends_at": start.Add(-time.Hour),
-	}, &bad)
-	if bad.Error.Fields["ends_at"] == "" {
-		t.Errorf("expected ends_at field error, got %+v", bad)
-	}
-
 	// Outsiders see nothing.
 	outsider := s.signUp("outsider")
 	s.expect(http.StatusNotFound, "GET", hp, outsider.AccessToken, nil, nil)
-	s.expect(http.StatusNotFound, "GET", hp+"/events/"+ev.ID.String(), outsider.AccessToken, nil, nil)
+	s.expect(http.StatusNotFound, "GET", hp+"/calendar", outsider.AccessToken, nil, nil)
 }
 
 func TestAPI_SessionsAndLogout(t *testing.T) {

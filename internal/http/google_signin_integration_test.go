@@ -146,7 +146,6 @@ func newGoogleTestServer(t *testing.T, fake *fakeGoogle) *testServer {
 		UserSvc:      app.NewUserService(q),
 		HouseholdSvc: app.NewHouseholdService(q, pool),
 		ChoreSvc:     app.NewChoreService(q),
-		EventSvc:     app.NewEventService(q),
 		GoogleSignIn: google,
 		JWTSecret:    secret,
 	})
