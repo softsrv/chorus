@@ -396,6 +396,7 @@ func TestGoogleCalendar_Status(t *testing.T) {
 		t.Errorf("unverified disconnect: %d %q, want 403 email_not_verified", status, e.Error.Code)
 	}
 
+	fakeDisabled := newFakeCalendarGoogle(t)
 	off := newCalendarTestServer(t, nil)
 	offUser := off.signUp("caloff")
 	if st := off.status(offUser.AccessToken); st.Status != "unavailable" {
@@ -406,6 +407,15 @@ func TestGoogleCalendar_Status(t *testing.T) {
 	}
 	if status, _, _ := off.get("/api/v1/me/google-calendar/callback?state=x&code=y"); status != http.StatusNotFound {
 		t.Errorf("unconfigured callback: %d, want 404", status)
+	}
+	if hits := fakeDisabled.codeHits.Load(); hits != 0 {
+		t.Errorf("fake codeHits = %d, want 0", hits)
+	}
+	if hits := fakeDisabled.refreshHits.Load(); hits != 0 {
+		t.Errorf("fake refreshHits = %d, want 0", hits)
+	}
+	if hits := fakeDisabled.revokeHits.Load(); hits != 0 {
+		t.Errorf("fake revokeHits = %d, want 0", hits)
 	}
 }
 

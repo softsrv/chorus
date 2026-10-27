@@ -92,16 +92,19 @@ func main() {
 	// GOOGLE_TOKEN_KEY (standard base64 of 32 bytes) to encrypt stored tokens.
 	// Without either the calendar status reports "unavailable".
 	var googleCalendar *app.GoogleCalendar
-	if cfg.Google.Enabled {
-		if cipher, err := googleTokenCipher(cfg.Google.TokenKey); err != nil {
-			slog.Warn("Google Calendar is disabled", "reason", err.Error())
-		} else {
-			googleCalendar = app.NewGoogleCalendar(queries, cipher, app.GoogleCalendarConfig{
-				ClientID:     cfg.Google.ClientID,
-				ClientSecret: cfg.Google.ClientSecret,
-				RedirectURL:  strings.TrimRight(cfg.AppBaseURL, "/") + "/api/v1/me/google-calendar/callback",
-			})
+	if cfg.Google.CalendarEnabled {
+		cipher, err := app.NewTokenCipher(cfg.Google.TokenKeyBytes)
+		if err != nil {
+			slog.Error("failed to initialize token cipher", "error", err)
+			os.Exit(1)
 		}
+		googleCalendar = app.NewGoogleCalendar(queries, cipher, app.GoogleCalendarConfig{
+			ClientID:     cfg.Google.ClientID,
+			ClientSecret: cfg.Google.ClientSecret,
+			RedirectURL:  strings.TrimRight(cfg.AppBaseURL, "/") + "/api/v1/me/google-calendar/callback",
+		})
+	} else if cfg.Google.Enabled && cfg.Google.TokenKey == "" {
+		slog.Warn("Google Calendar is disabled: GOOGLE_TOKEN_KEY is not set")
 	}
 
 	// ── Background context (token cleanup + rate-limiter sweepers) ────────────
@@ -169,25 +172,15 @@ func main() {
 	slog.Info("shutdown complete")
 }
 
-// googleTokenCipher builds the token cipher from GOOGLE_TOKEN_KEY.
-func googleTokenCipher(key string) (*app.TokenCipher, error) {
-	if key == "" {
-		return nil, errors.New("GOOGLE_TOKEN_KEY is not set")
-	}
-	raw, err := base64.StdEncoding.DecodeString(key)
-	if err != nil || len(raw) != 32 {
-		return nil, errors.New("GOOGLE_TOKEN_KEY must be standard base64 of 32 bytes")
-	}
-	return app.NewTokenCipher(raw)
-}
-
 // ── Config ────────────────────────────────────────────────────────────────────
 
 type GoogleConfig struct {
-	ClientID     string
-	ClientSecret string
-	TokenKey     string
-	Enabled      bool
+	ClientID        string
+	ClientSecret    string
+	TokenKey        string
+	TokenKeyBytes   []byte
+	Enabled         bool
+	CalendarEnabled bool
 }
 
 type config struct {
@@ -298,6 +291,18 @@ func loadConfig(getenv func(string) string, logger *slog.Logger) (config, error)
 		cfg.Google.Enabled = true
 	} else if hasID || hasSecret {
 		logger.Warn("Google sign-in is disabled: both GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be set")
+	}
+
+	if cfg.Google.TokenKey != "" {
+		raw, err := base64.StdEncoding.DecodeString(cfg.Google.TokenKey)
+		if err != nil || len(raw) != 32 {
+			return config{}, errors.New("GOOGLE_TOKEN_KEY must be standard base64 of 32 bytes")
+		}
+		cfg.Google.TokenKeyBytes = raw
+	}
+
+	if cfg.Google.Enabled && len(cfg.Google.TokenKeyBytes) == 32 {
+		cfg.Google.CalendarEnabled = true
 	}
 
 	cfg.DBMaxConns, err = strconv.Atoi(getEnvOrDefault("DB_MAX_CONNS", "25"))

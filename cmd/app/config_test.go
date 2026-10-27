@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"log/slog"
 	"strings"
 	"testing"
@@ -33,6 +34,9 @@ func TestLoadConfig_GoogleUnsetIsDisabled(t *testing.T) {
 	}
 	if cfg.Google.Enabled {
 		t.Fatal("Google enabled with no GOOGLE_* set")
+	}
+	if cfg.Google.CalendarEnabled {
+		t.Fatal("Google Calendar enabled with no GOOGLE_* set")
 	}
 	if logs != "" {
 		t.Fatalf("unexpected log output: %s", logs)
@@ -82,5 +86,58 @@ func TestLoadConfig_RequiredVarsStillRequired(t *testing.T) {
 	env["JWT_SECRET"] = "short"
 	if _, err, _ := load(t, env); err == nil {
 		t.Fatal("expected error for short JWT_SECRET")
+	}
+}
+
+func TestLoadConfig_GoogleTokenKeyValidation(t *testing.T) {
+	// Wrong decoded length (16 bytes base64)
+	env := requiredEnv()
+	env["GOOGLE_TOKEN_KEY"] = base64.StdEncoding.EncodeToString(make([]byte, 16))
+	if _, err, _ := load(t, env); err == nil || !strings.Contains(err.Error(), "GOOGLE_TOKEN_KEY must be standard base64 of 32 bytes") {
+		t.Fatalf("expected 32-byte error for 16-byte key, got %v", err)
+	}
+
+	// Undecodable base64
+	env = requiredEnv()
+	env["GOOGLE_TOKEN_KEY"] = "not base64!!"
+	if _, err, _ := load(t, env); err == nil || !strings.Contains(err.Error(), "GOOGLE_TOKEN_KEY must be standard base64 of 32 bytes") {
+		t.Fatalf("expected base64 error for invalid key, got %v", err)
+	}
+
+	// Valid 32-byte key with id + secret -> CalendarEnabled true
+	env = requiredEnv()
+	key32 := base64.StdEncoding.EncodeToString([]byte("01234567890123456789012345678901"))
+	env["GOOGLE_CLIENT_ID"] = "id"
+	env["GOOGLE_CLIENT_SECRET"] = "secret"
+	env["GOOGLE_TOKEN_KEY"] = key32
+	cfg, err, logs := load(t, env)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if !cfg.Google.CalendarEnabled {
+		t.Fatal("expected Google.CalendarEnabled to be true")
+	}
+	if len(cfg.Google.TokenKeyBytes) != 32 {
+		t.Fatalf("expected 32 TokenKeyBytes, got %d", len(cfg.Google.TokenKeyBytes))
+	}
+	if logs != "" {
+		t.Fatalf("unexpected log output: %s", logs)
+	}
+
+	// Valid 32-byte key without id / secret -> CalendarDisabled, no error
+	env = requiredEnv()
+	env["GOOGLE_TOKEN_KEY"] = key32
+	cfg, err, logs = load(t, env)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.Google.CalendarEnabled {
+		t.Fatal("expected Google.CalendarEnabled to be false when client id/secret unset")
+	}
+	if len(cfg.Google.TokenKeyBytes) != 32 {
+		t.Fatalf("expected 32 TokenKeyBytes, got %d", len(cfg.Google.TokenKeyBytes))
+	}
+	if logs != "" {
+		t.Fatalf("unexpected log output: %s", logs)
 	}
 }
