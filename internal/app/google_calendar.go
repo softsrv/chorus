@@ -154,63 +154,90 @@ func (g *GoogleCalendar) AuthCodeURL(state, verifier string) string {
 	)
 }
 
-// Connect mints a single-use state bound to userID (stored hashed, purpose
-// calendar, with its PKCE verifier and a short expiry) and returns the URL to
-// send the person to.
-func (g *GoogleCalendar) Connect(ctx context.Context, userID uuid.UUID) (string, error) {
+// CalendarStateTTL is how long a connect stays completable. The browser
+// binding cookie should not outlive it.
+const CalendarStateTTL = calendarStateTTL
+
+// calendarStateHash is the stored hash of a calendar state. It covers both
+// the state Google echoes back and the browser nonce held only in the
+// initiating browser's cookie, so a callback completes only when the browser
+// returning from Google is the one that started the connect.
+func calendarStateHash(state, nonce string) string {
+	return auth.HashToken(state + ":" + nonce)
+}
+
+// RedirectURL is the configured callback URL.
+func (g *GoogleCalendar) RedirectURL() string { return g.oauth.RedirectURL }
+
+// Connect mints a single-use state bound to userID and to a fresh browser
+// nonce (stored hashed together, purpose calendar, with its PKCE verifier and
+// a short expiry). It returns the URL to send the person to and the nonce,
+// which the caller must hand only to the initiating browser (an HttpOnly
+// cookie); the callback refuses without it.
+func (g *GoogleCalendar) Connect(ctx context.Context, userID uuid.UUID) (string, string, error) {
 	state, err := randomURLToken()
 	if err != nil {
-		return "", err
+		return "", "", err
+	}
+	nonce, err := randomURLToken()
+	if err != nil {
+		return "", "", err
 	}
 	verifier := oauth2.GenerateVerifier()
 	id, err := uuid.NewV7()
 	if err != nil {
-		return "", fmt.Errorf("generate state id: %w", err)
+		return "", "", fmt.Errorf("generate state id: %w", err)
 	}
 	uid := userID
 	if _, err := g.q.InsertOAuthState(ctx, db.InsertOAuthStateParams{
 		ID:           id,
-		StateHash:    auth.HashToken(state),
+		StateHash:    calendarStateHash(state, nonce),
 		Purpose:      oauthPurposeCalendar,
 		UserID:       &uid,
 		PkceVerifier: verifier,
 		ExpiresAt:    pgtype.Timestamptz{Time: time.Now().Add(calendarStateTTL), Valid: true},
 	}); err != nil {
-		return "", fmt.Errorf("insert oauth state: %w", err)
+		return "", "", fmt.Errorf("insert oauth state: %w", err)
 	}
-	return g.AuthCodeURL(state, verifier), nil
+	return g.AuthCodeURL(state, verifier), nonce, nil
 }
 
 // Callback completes the Google side of a calendar connect for the user the
-// state was minted for. It returns ErrGoogleCalendarCancelled when Google
-// reports an error, and ErrGoogleCalendarFailed for anything else that goes
-// wrong; the cause is only logged.
-func (g *GoogleCalendar) Callback(ctx context.Context, state, code, errParam string) error {
+// state was minted for, provided nonce is the browser nonce Connect issued
+// with that state. It returns ErrGoogleCalendarCancelled when Google reports
+// an error, and ErrGoogleCalendarFailed for anything else that goes wrong
+// (including a missing or mismatched nonce, which never reaches Google); the
+// cause is only logged.
+func (g *GoogleCalendar) Callback(ctx context.Context, state, code, errParam, nonce string) error {
 	if errParam != "" {
 		slog.InfoContext(ctx, "google calendar: provider returned error", "error_param", truncate(errParam, 64))
 		return ErrGoogleCalendarCancelled
 	}
-	if err := g.callback(ctx, state, code); err != nil {
+	if err := g.callback(ctx, state, code, nonce); err != nil {
 		slog.WarnContext(ctx, "google calendar: callback refused", "error", err)
 		return ErrGoogleCalendarFailed
 	}
 	return nil
 }
 
-func (g *GoogleCalendar) callback(ctx context.Context, state, code string) error {
+func (g *GoogleCalendar) callback(ctx context.Context, state, code, nonce string) error {
 	if state == "" {
 		return errors.New("missing state")
 	}
 	if code == "" {
 		return errors.New("missing code")
 	}
+	if nonce == "" {
+		// The browser finishing consent is not the one that started it.
+		return errors.New("missing browser binding")
+	}
 	st, err := g.q.ConsumeOAuthState(ctx, db.ConsumeOAuthStateParams{
-		StateHash: auth.HashToken(state),
+		StateHash: calendarStateHash(state, nonce),
 		Purpose:   oauthPurposeCalendar,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return errors.New("state unknown, used, expired or for another flow")
+			return errors.New("state unknown, used, expired, for another flow or another browser")
 		}
 		return fmt.Errorf("consume state: %w", err)
 	}
@@ -530,23 +557,62 @@ func (g *GoogleCalendar) validConnection(ctx context.Context, userID uuid.UUID) 
 	return token, conn.AccessLevel, nil
 }
 
-// googleAPIError is a non-2xx answer from the Calendar API.
-type googleAPIError struct{ status int }
+// googleAPIError is a non-2xx answer from the Calendar API. rateLimited is
+// set when Google's error reason says the request was rate limited (Google
+// reports some rate limits as 403). Nothing else of Google's body is kept.
+type googleAPIError struct {
+	status      int
+	rateLimited bool
+}
 
 func (e *googleAPIError) Error() string {
 	return fmt.Sprintf("google calendar api: status %d", e.status)
 }
 
-// refusedByGoogle reports whether Google refused the token or the calendar
-// (401, 403 or 404): something only the connecting member can fix.
-func refusedByGoogle(err error) bool {
+// transientByGoogle reports whether Google's answer is a temporary failure
+// (429, any 5xx, or a 403 whose reason is a rate limit): nothing is wrong
+// with the token or the calendar, and a retry may succeed.
+func transientByGoogle(err error) bool {
 	var apiErr *googleAPIError
 	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.rateLimited || apiErr.status == http.StatusTooManyRequests || apiErr.status >= 500
+}
+
+// refusedByGoogle reports whether Google refused the token or the calendar
+// (401, 403 or 404, but not a rate-limit 403): something only the connecting
+// member can fix.
+func refusedByGoogle(err error) bool {
+	var apiErr *googleAPIError
+	if !errors.As(err, &apiErr) || apiErr.rateLimited {
 		return false
 	}
 	switch apiErr.status {
 	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
 		return true
+	}
+	return false
+}
+
+// googleRateLimited reports whether a Calendar API error body names a rate
+// limit reason. Only the reason codes are read; the body is never passed on.
+func googleRateLimited(body io.Reader) bool {
+	var out struct {
+		Error struct {
+			Errors []struct {
+				Reason string `json:"reason"`
+			} `json:"errors"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(io.LimitReader(body, 64<<10)).Decode(&out); err != nil {
+		return false
+	}
+	for _, e := range out.Error.Errors {
+		switch e.Reason {
+		case "rateLimitExceeded", "userRateLimitExceeded":
+			return true
+		}
 	}
 	return false
 }
@@ -559,8 +625,9 @@ func (g *GoogleCalendar) apiGet(ctx context.Context, token, path string, query u
 
 // apiDo sends one authorized request to the Calendar API, with body (when
 // non-nil) as its JSON payload, and decodes a 2xx JSON answer into out. A
-// non-2xx answer is a *googleAPIError carrying only the status; Google's body
-// is never read into an error.
+// non-2xx answer is a *googleAPIError carrying only the status and, for a
+// 403, whether Google's reason was a rate limit; Google's text is never read
+// into an error.
 func (g *GoogleCalendar) apiDo(ctx context.Context, method, token, path string, query url.Values, body, out any) error {
 	target := g.apiURL + path
 	if len(query) > 0 {
@@ -590,7 +657,11 @@ func (g *GoogleCalendar) apiDo(ctx context.Context, method, token, path string, 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return &googleAPIError{status: resp.StatusCode}
+		apiErr := &googleAPIError{status: resp.StatusCode}
+		if resp.StatusCode == http.StatusForbidden {
+			apiErr.rateLimited = googleRateLimited(resp.Body)
+		}
+		return apiErr
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(out); err != nil {
 		return fmt.Errorf("decode calendar response: %w", err)

@@ -3,6 +3,7 @@
 package http_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -57,6 +58,8 @@ type fakeFamilyGoogle struct {
 	refreshError string            // "" = refresh succeeds
 	patchStatus  int               // non-zero: PATCH answers this status
 	patchBody    string            // ... with this body
+	listStatus   int               // non-zero: events.list answers this status
+	listBody     string            // ... with this body
 }
 
 func newFakeFamilyGoogle(t *testing.T) *fakeFamilyGoogle {
@@ -147,6 +150,11 @@ func (f *fakeFamilyGoogle) serve(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"items": items})
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/calendar/v3/calendars/") && strings.HasSuffix(r.URL.Path, "/events"):
 		calID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/calendar/v3/calendars/"), "/events")
+		if f.listStatus != 0 {
+			w.WriteHeader(f.listStatus)
+			_, _ = io.WriteString(w, f.listBody)
+			return
+		}
 		owned := false
 		for _, c := range f.calendars[auth] {
 			owned = owned || c.ID == calID
@@ -791,6 +799,61 @@ func TestFamilyCalendar_ClearedWithSetter(t *testing.T) {
 	}
 }
 
+// A rate-limit 403, a 429 or a 5xx on the events listing is temporary: 503
+// with Retry-After, not broken, and the connection is not marked broken. A
+// plain 403 (Google refused the calendar) still reports broken.
+func TestFamilyCalendar_ListingRateLimitNotBroken(t *testing.T) {
+	fake := newFakeFamilyGoogle(t)
+	s := newFamilyTestServer(t, fake)
+	a := s.member(fake, "famratea", calY)
+	b := s.member(fake, "famrateb")
+	hp := s.household(a, b)
+	if code, _ := s.setFamily(hp, a.AccessToken, calY.ID); code != http.StatusOK {
+		t.Fatalf("set Y: %d", code)
+	}
+	for _, tc := range []struct {
+		name         string
+		status       int
+		body         string
+		want         int
+		code, family string
+	}{
+		{"403 rateLimitExceeded", http.StatusForbidden, `{"error":{"code":403,"message":"INTERNAL-SENTINEL","errors":[{"domain":"usageLimits","reason":"rateLimitExceeded"}]}}`, http.StatusServiceUnavailable, "google_unavailable", ""},
+		{"403 userRateLimitExceeded", http.StatusForbidden, `{"error":{"code":403,"errors":[{"domain":"usageLimits","reason":"userRateLimitExceeded"}]}}`, http.StatusServiceUnavailable, "google_unavailable", ""},
+		{"429", http.StatusTooManyRequests, "INTERNAL-SENTINEL", http.StatusServiceUnavailable, "google_unavailable", ""},
+		{"503", http.StatusServiceUnavailable, "INTERNAL-SENTINEL", http.StatusServiceUnavailable, "google_unavailable", ""},
+		{"403 forbidden", http.StatusForbidden, `{"error":{"code":403,"errors":[{"domain":"global","reason":"forbidden"}]}}`, http.StatusOK, "", "broken"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake.set(func(f *fakeFamilyGoogle) { f.listStatus, f.listBody = tc.status, tc.body })
+			defer fake.set(func(f *fakeFamilyGoogle) { f.listStatus, f.listBody = 0, "" })
+			resp := s.doResp("GET", hp+"/events?"+rangeQuery(novFrom, novTo), b.AccessToken, nil)
+			if resp.status != tc.want {
+				t.Fatalf("events: %d %s, want %d", resp.status, resp.body, tc.want)
+			}
+			if strings.Contains(resp.body, "INTERNAL-SENTINEL") || strings.Contains(resp.body, "usageLimits") {
+				t.Errorf("events response leaks Google's body: %s", resp.body)
+			}
+			if tc.code != "" {
+				var e apiError
+				_ = json.Unmarshal([]byte(resp.body), &e)
+				if e.Error.Code != tc.code || resp.retryAfter == "" {
+					t.Errorf("events: code %q Retry-After %q, want %q with Retry-After", e.Error.Code, resp.retryAfter, tc.code)
+				}
+			} else {
+				var got familyEntries
+				_ = json.Unmarshal([]byte(resp.body), &got)
+				if got.Status != tc.family {
+					t.Errorf("events status %q, want %q", got.Status, tc.family)
+				}
+			}
+			if c := s.connection(a.User.ID); c.Broken {
+				t.Error("connection marked broken")
+			}
+		})
+	}
+}
+
 // CLM-11: with the setter's token expired and the refresh rejected
 // (invalid_grant), status and events report broken, with no /events request
 // and no 5xx.
@@ -851,6 +914,40 @@ func tagRoute(hp, eventID string) string {
 func (s *calendarServer) tag(hp, token, eventID string, ids ...uuid.UUID) (int, string) {
 	s.t.Helper()
 	return s.doRaw("PUT", tagRoute(hp, eventID), token, map[string]any{"tags": append([]uuid.UUID{}, ids...)})
+}
+
+type rawResponse struct {
+	status     int
+	body       string
+	retryAfter string
+}
+
+// tagResp is tag that also returns the Retry-After header.
+func (s *calendarServer) tagResp(hp, token, eventID string, ids ...uuid.UUID) rawResponse {
+	s.t.Helper()
+	return s.doResp("PUT", tagRoute(hp, eventID), token, map[string]any{"tags": append([]uuid.UUID{}, ids...)})
+}
+
+// doResp is doRaw that also returns the Retry-After header.
+func (s *calendarServer) doResp(method, path, token string, body any) rawResponse {
+	s.t.Helper()
+	var rdr io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		rdr = bytes.NewReader(b)
+	}
+	req, _ := http.NewRequest(method, s.srv.URL+path, rdr)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		s.t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return rawResponse{status: resp.StatusCode, body: string(b), retryAfter: resp.Header.Get("Retry-After")}
 }
 
 // rename sets a display name directly (names with ',' can't go through the
@@ -1059,25 +1156,42 @@ func TestFamilyCalendar_TagCheckCatchesFullUpdate(t *testing.T) {
 }
 
 // CLM-5: Google refusing the PATCH maps to 404 / 403 / 502 with a fixed body
-// and none of Google's text; the title at Google and in the listing stays.
+// and none of Google's text; a rate limit or a Google outage is a temporary
+// 503 with Retry-After, and a 401 is a 403 like the listing's broken. The
+// title at Google and in the listing stays.
 func TestFamilyCalendar_TagGoogleRefusal(t *testing.T) {
 	s, fake, mom, sam, hp := tagFixture(t)
+	const rateLimit403 = `{"error":{"code":403,"message":"INTERNAL-SENTINEL","errors":[{"domain":"usageLimits","reason":"rateLimitExceeded"}]}}`
 	for _, tc := range []struct {
 		googleStatus, want int
 		code               string
+		body               string
 	}{
-		{http.StatusNotFound, http.StatusNotFound, "entry_gone"},
-		{http.StatusGone, http.StatusNotFound, "entry_gone"},
-		{http.StatusForbidden, http.StatusForbidden, "not_editable"},
-		{http.StatusInternalServerError, http.StatusBadGateway, "google_rejected"},
+		{http.StatusNotFound, http.StatusNotFound, "entry_gone", ""},
+		{http.StatusGone, http.StatusNotFound, "entry_gone", ""},
+		{http.StatusForbidden, http.StatusForbidden, "not_editable", ""},
+		{http.StatusForbidden, http.StatusServiceUnavailable, "google_unavailable", rateLimit403},
+		{http.StatusUnauthorized, http.StatusForbidden, "forbidden", ""},
+		{http.StatusTooManyRequests, http.StatusServiceUnavailable, "google_unavailable", ""},
+		{http.StatusInternalServerError, http.StatusServiceUnavailable, "google_unavailable", ""},
+		{http.StatusServiceUnavailable, http.StatusServiceUnavailable, "google_unavailable", ""},
+		{http.StatusBadRequest, http.StatusBadGateway, "google_rejected", ""},
 	} {
-		fake.set(func(f *fakeFamilyGoogle) { f.patchStatus, f.patchBody = tc.googleStatus, "INTERNAL-SENTINEL" })
+		body := tc.body
+		if body == "" {
+			body = "INTERNAL-SENTINEL"
+		}
+		fake.set(func(f *fakeFamilyGoogle) { f.patchStatus, f.patchBody = tc.googleStatus, body })
 		n := len(fake.recorded())
-		status, raw := s.tag(hp, sam.AccessToken, "E", mom.User.ID)
+		resp := s.tagResp(hp, sam.AccessToken, "E", mom.User.ID)
+		status, raw := resp.status, resp.body
 		var e apiError
 		_ = json.Unmarshal([]byte(raw), &e)
 		if status != tc.want || e.Error.Code != tc.code {
 			t.Errorf("Google %d: %d %s, want %d %s", tc.googleStatus, status, raw, tc.want, tc.code)
+		}
+		if (tc.want == http.StatusServiceUnavailable) != (resp.retryAfter != "") {
+			t.Errorf("Google %d: Retry-After %q on %d", tc.googleStatus, resp.retryAfter, status)
 		}
 		for _, leak := range []string{"INTERNAL-SENTINEL", "google calendar api", "status " + strconv.Itoa(tc.googleStatus), "Dentist [Mom]"} {
 			if strings.Contains(raw, leak) {

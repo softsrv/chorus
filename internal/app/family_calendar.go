@@ -117,6 +117,8 @@ func (s *FamilyCalendar) ListMyCalendars(ctx context.Context, userID uuid.UUID) 
 		return MyCalendars{Status: CalendarNotConnected, Calendars: []GoogleCalendarInfo{}}, nil
 	case errors.Is(err, errCalendarBroken) || refusedByGoogle(err):
 		return MyCalendars{Status: CalendarBroken, Calendars: []GoogleCalendarInfo{}}, nil
+	case transientByGoogle(err):
+		return MyCalendars{}, ErrGoogleUnavailable
 	case err != nil:
 		return MyCalendars{}, err
 	}
@@ -159,6 +161,8 @@ func (s *FamilyCalendar) Set(ctx context.Context, userID, householdID uuid.UUID,
 		return HouseholdCalendarStatus{}, &ValidationError{Fields: map[string]string{"calendar_id": "connect Google Calendar on your Account page first"}}
 	case errors.Is(err, errCalendarBroken) || refusedByGoogle(err):
 		return HouseholdCalendarStatus{}, &ValidationError{Fields: map[string]string{"calendar_id": "reconnect Google Calendar on your Account page first"}}
+	case transientByGoogle(err):
+		return HouseholdCalendarStatus{}, ErrGoogleUnavailable
 	case err != nil:
 		return HouseholdCalendarStatus{}, err
 	}
@@ -299,6 +303,12 @@ func (s *FamilyCalendar) ListEntries(ctx context.Context, userID, householdID uu
 	}
 	entries, err := s.gc.listEvents(ctx, token, row.CalendarID, from, to)
 	if err != nil {
+		if transientByGoogle(err) {
+			// Rate limited or a Google outage: the connection is fine, so
+			// report it as temporary (503 + Retry-After), never as broken.
+			slog.WarnContext(ctx, "google calendar: listing temporarily refused", "error", err)
+			return HouseholdEntries{}, ErrGoogleUnavailable
+		}
 		if refusedByGoogle(err) {
 			// The token or the calendar no longer works: only the setter
 			// can fix it by reconnecting or choosing again.
@@ -332,7 +342,9 @@ func (s *FamilyCalendar) tagMembers(ctx context.Context, householdID uuid.UUID) 
 // not a taggable current member is a ValidationError, and a connection
 // without read_write access is ErrForbidden. An entry Google reports as not
 // editable is ErrForbidden with no PATCH. Google refusing the PATCH is
-// ErrEntryGone (404/410), ErrEntryNotEditable (403) or ErrGoogleRejected.
+// ErrGoogleUnavailable (429, 5xx or a rate-limit 403), ErrEntryGone
+// (404/410), ErrForbidden (401), ErrEntryNotEditable (403) or
+// ErrGoogleRejected.
 func (s *FamilyCalendar) SetEntryTags(ctx context.Context, userID, householdID uuid.UUID, eventID string, tags []uuid.UUID) (TaggedEntry, error) {
 	if _, err := getHousehold(ctx, s.q, userID, householdID); err != nil {
 		return TaggedEntry{}, err
@@ -390,18 +402,26 @@ func (s *FamilyCalendar) SetEntryTags(ctx context.Context, userID, householdID u
 }
 
 // tagGoogleError maps Google's answer to a tag request to the caller's
-// outcome: 404/410 entry gone, 401/403 forbidden (as given), anything else
-// rejected. Transient failures pass through as ErrGoogleUnavailable. The
-// status is logged; Google's answer never reaches the caller.
+// outcome: a rate limit (429 or a rate-limit 403) or a 5xx is
+// ErrGoogleUnavailable; 404/410 entry gone; 401 (Google refused the token, as
+// the listing reports broken) ErrForbidden; another 403 forbidden (as given);
+// anything else rejected. The status is logged; Google's answer never reaches
+// the caller.
 func tagGoogleError(err error, forbidden error) error {
 	var apiErr *googleAPIError
 	if !errors.As(err, &apiErr) {
 		return err
 	}
-	switch apiErr.status {
-	case http.StatusNotFound, http.StatusGone:
+	switch {
+	case transientByGoogle(err):
+		slog.Warn("google calendar: tag change temporarily refused", "status", apiErr.status)
+		return ErrGoogleUnavailable
+	case apiErr.status == http.StatusNotFound, apiErr.status == http.StatusGone:
 		return ErrEntryGone
-	case http.StatusForbidden:
+	case apiErr.status == http.StatusUnauthorized:
+		slog.Warn("google calendar: tag change refused the token", "status", apiErr.status)
+		return ErrForbidden
+	case apiErr.status == http.StatusForbidden:
 		return forbidden
 	default:
 		slog.Warn("google calendar: tag change refused", "status", apiErr.status)

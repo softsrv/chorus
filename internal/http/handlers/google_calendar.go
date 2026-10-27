@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -25,24 +27,69 @@ const calendarStatusUnavailable = "unavailable"
 // googleCalendarServicer is the subset of app.GoogleCalendar the handler needs.
 type googleCalendarServicer interface {
 	Status(ctx context.Context, userID uuid.UUID) (app.CalendarStatus, error)
-	Connect(ctx context.Context, userID uuid.UUID) (string, error)
-	Callback(ctx context.Context, state, code, errParam string) error
+	Connect(ctx context.Context, userID uuid.UUID) (string, string, error)
+	Callback(ctx context.Context, state, code, errParam, nonce string) error
 	Disconnect(ctx context.Context, userID uuid.UUID) error
 }
+
+// calendarBindingCookie holds the browser nonce that ties a calendar connect
+// to the browser that started it. The API is otherwise header-only; this
+// cookie is scoped to the callback path and read nowhere else.
+const calendarBindingCookie = "chorus_gcal_bind"
+
+// calendarCallbackPath is the default callback path (the cookie's scope) when
+// no redirect URL is configured.
+const calendarCallbackPath = "/api/v1/me/google-calendar/callback"
 
 // GoogleCalendarHandler serves /api/v1/me/google-calendar. A nil service means
 // Google Calendar is not configured on this deployment.
 type GoogleCalendarHandler struct {
-	svc googleCalendarServicer
+	svc          googleCalendarServicer
+	cookiePath   string
+	cookieSecure bool
 }
 
 // NewGoogleCalendarHandler constructs a GoogleCalendarHandler. svc may be nil.
+// The binding cookie is scoped to the configured callback path and marked
+// Secure when that callback is https.
 func NewGoogleCalendarHandler(svc *app.GoogleCalendar) *GoogleCalendarHandler {
-	h := &GoogleCalendarHandler{}
+	h := &GoogleCalendarHandler{cookiePath: calendarCallbackPath}
 	if svc != nil {
 		h.svc = svc
+		if u, err := url.Parse(svc.RedirectURL()); err == nil && u.Path != "" {
+			h.cookiePath = u.Path
+			h.cookieSecure = u.Scheme == "https"
+		}
 	}
 	return h
+}
+
+// setBindingCookie hands the browser nonce to the browser that called
+// connect: HttpOnly, SameSite=Lax (sent on Google's top-level redirect back),
+// Secure when the callback is https, and only for the callback path.
+func (h *GoogleCalendarHandler) setBindingCookie(w http.ResponseWriter, nonce string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     calendarBindingCookie,
+		Value:    nonce,
+		Path:     h.cookiePath,
+		MaxAge:   int(app.CalendarStateTTL / time.Second),
+		HttpOnly: true,
+		Secure:   h.cookieSecure,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// clearBindingCookie removes the binding cookie; every callback does this.
+func (h *GoogleCalendarHandler) clearBindingCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     calendarBindingCookie,
+		Value:    "",
+		Path:     h.cookiePath,
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   h.cookieSecure,
+		SameSite: http.SameSiteLaxMode,
+	})
 }
 
 // Enabled reports whether Google Calendar is configured.
@@ -78,11 +125,12 @@ func (h *GoogleCalendarHandler) Connect(w http.ResponseWriter, r *http.Request) 
 		notFound(w)
 		return
 	}
-	target, err := h.svc.Connect(r.Context(), currentUser(r))
+	target, nonce, err := h.svc.Connect(r.Context(), currentUser(r))
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
+	h.setBindingCookie(w, nonce)
 	respond.JSON(w, http.StatusOK, map[string]string{"url": target})
 }
 
@@ -100,16 +148,24 @@ func (h *GoogleCalendarHandler) Disconnect(w http.ResponseWriter, r *http.Reques
 	respond.JSON(w, http.StatusOK, calendarStatusResponse{Status: app.CalendarNotConnected})
 }
 
-// Callback is where Google sends the browser back. It is public: the state
-// carries the user. It always redirects to the Account page with only a fixed
-// outcome; no internal or Google error text is passed on.
+// Callback is where Google sends the browser back. It carries no bearer
+// token: the state names the user, and the binding cookie set by connect
+// proves this is the browser that started it. A missing or mismatched cookie
+// fails before any code exchange. It always clears the cookie and redirects
+// to the Account page with only a fixed outcome; no internal or Google error
+// text is passed on.
 func (h *GoogleCalendarHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	if !h.Enabled() {
 		notFound(w)
 		return
 	}
+	var nonce string
+	if c, err := r.Cookie(calendarBindingCookie); err == nil {
+		nonce = c.Value
+	}
+	h.clearBindingCookie(w)
 	q := r.URL.Query()
-	err := h.svc.Callback(r.Context(), q.Get("state"), q.Get("code"), q.Get("error"))
+	err := h.svc.Callback(r.Context(), q.Get("state"), q.Get("code"), q.Get("error"), nonce)
 	switch {
 	case err == nil:
 		http.Redirect(w, r, calendarReturnConnected, http.StatusSeeOther)

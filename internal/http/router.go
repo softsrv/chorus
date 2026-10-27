@@ -102,8 +102,9 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 
 	// ── Google Calendar connection. Status reports "unavailable" when Google
 	// isn't configured; connect, disconnect and callback then answer the JSON
-	// 404 without contacting Google. The callback is public: Google redirects
-	// the browser there without a bearer token, and the state names the user.
+	// 404 without contacting Google. The callback carries no bearer token:
+	// Google redirects the browser there; the state names the user and the
+	// HttpOnly binding cookie set by connect proves it is the same browser.
 	api.Handle("GET /api/v1/me/google-calendar", verified(calendarH.Status))
 	api.Handle("POST /api/v1/me/google-calendar/connect", verified(calendarH.Connect))
 	api.Handle("DELETE /api/v1/me/google-calendar", verified(calendarH.Disconnect))
