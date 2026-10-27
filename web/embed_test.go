@@ -52,4 +52,16 @@ func TestAppJS_NoEventEditing(t *testing.T) {
 	if match := re.FindString(content); match != "" {
 		t.Errorf("expected js/app.js not to match event mutation regex, but found match: %s", match)
 	}
+
+	// 4. Assert PUT to /calendar/entries/.../tags is present
+	tagPutPattern := `api\(\s*'PUT'\s*,\s*` + "`" + `/households/\$\{h\.id\}/calendar/entries/\$\{[^}]+\}/tags` + "`"
+	tagPutRe := regexp.MustCompile(tagPutPattern)
+	if !tagPutRe.MatchString(content) {
+		t.Errorf("expected js/app.js to call PUT /households/${h.id}/calendar/entries/${...}/tags, but pattern did not match")
+	}
+
+	// 5. Assert can_tag is referenced
+	if !strings.Contains(content, "can_tag") {
+		t.Errorf("expected js/app.js to reference can_tag, but it did not")
+	}
 }

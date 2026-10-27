@@ -508,7 +508,7 @@ async function eventsTab(h, $root) {
   const from = new Date(now.getFullYear(), now.getMonth() + monthOffset, 1);
   const to = new Date(now.getFullYear(), now.getMonth() + monthOffset + 1, 1);
   const qs = new URLSearchParams({ from: from.toISOString(), to: to.toISOString() });
-  const { status, items } = await api('GET', `/households/${h.id}/events?${qs}`);
+  const { status, items, members = [] } = await api('GET', `/households/${h.id}/events?${qs}`);
   const rerender = () => { $root.replaceChildren(); eventsTab(h, $root).catch((err) => showError($root, err)); };
   const toAccount = (e) => { e.preventDefault(); accountView(); };
 
@@ -542,11 +542,119 @@ async function eventsTab(h, $root) {
   const localDate = (d) => { const [y, m, day] = d.split('-').map(Number); return new Date(y, m - 1, day); };
   // Entries come from Google and are read-only here: no add, edit or delete.
   const rows = items.map((e) => {
+    let currentTitle = e.title;
+    let currentTags = e.tags || [];
+
     const when = e.all_day ? localDate(e.start).toLocaleDateString() + ' (all day)' : `${fmtDate(e.start)} – ${fmtDate(e.end)}`;
-    return el('li', { class: 'flex items-center gap-3 py-2 border-b border-base-300' },
-      el('div', { class: 'flex-1 min-w-0' },
-        el('div', { text: e.title || '(no title)' }),
-        el('div', { class: 'text-xs opacity-60', text: when + (e.location ? ` · ${e.location}` : '') })));
+    const $title = el('div', { text: currentTitle || '(no title)' });
+    const $meta = el('div', { class: 'text-xs opacity-60', text: when + (e.location ? ` · ${e.location}` : '') });
+    const $error = el('div');
+    const $picker = el('div', { class: 'mt-2 p-2 bg-base-200 rounded text-sm space-y-2' });
+    $picker.style.display = 'none';
+
+    let $tagBtn = null;
+    if (e.can_tag) {
+      let isOpen = false;
+      const tagCheckboxes = [];
+
+      const renderPicker = () => {
+        $picker.replaceChildren();
+        tagCheckboxes.length = 0;
+
+        const tagSet = new Set(currentTags);
+        const memberRows = members.map((m) => {
+          const isTaggable = !!m.taggable;
+          const isChecked = tagSet.has(m.user_id);
+          const cb = el('input', {
+            type: 'checkbox',
+            class: 'checkbox checkbox-xs',
+            checked: isChecked,
+            disabled: !isTaggable,
+          });
+          if (isTaggable) {
+            tagCheckboxes.push({ id: m.user_id, input: cb });
+          }
+
+          let labelText = m.display_name;
+          if (!isTaggable) {
+            let reasonText = m.reason;
+            if (m.reason === 'duplicate_name') reasonText = 'duplicate name';
+            else if (m.reason === 'reserved_character') reasonText = 'name contains , [ or ]';
+            else if (m.reason === 'empty_name') reasonText = 'empty name';
+            labelText += ` (${reasonText})`;
+          }
+
+          return el('label', { class: `label cursor-pointer justify-start gap-2 py-0.5 ${!isTaggable ? 'opacity-50' : ''}` },
+            cb,
+            el('span', { class: 'text-xs', text: labelText }));
+        });
+
+        const $saveBtn = el('button', {
+          class: 'btn btn-primary btn-xs',
+          text: 'Save',
+          onclick: async (evt) => {
+            evt.preventDefault();
+            $error.replaceChildren();
+            const selected = tagCheckboxes.filter((item) => item.input.checked).map((item) => item.id);
+            $saveBtn.disabled = true;
+            try {
+              const res = await api('PUT', `/households/${h.id}/calendar/entries/${encodeURIComponent(e.id)}/tags`, { tags: selected });
+              currentTitle = res.title;
+              currentTags = res.tags || [];
+              $title.textContent = currentTitle || '(no title)';
+              isOpen = false;
+              $picker.style.display = 'none';
+            } catch (err) {
+              showError($error, err);
+            } finally {
+              $saveBtn.disabled = false;
+            }
+          },
+        });
+
+        const $cancelBtn = el('button', {
+          class: 'btn btn-ghost btn-xs',
+          text: 'Cancel',
+          onclick: (evt) => {
+            evt.preventDefault();
+            $error.replaceChildren();
+            isOpen = false;
+            $picker.style.display = 'none';
+          },
+        });
+
+        $picker.append(
+          el('div', { class: 'font-semibold text-xs', text: 'Tag household members' }),
+          el('div', { class: 'space-y-0.5' }, memberRows),
+          el('div', { class: 'flex gap-2 mt-2' }, $saveBtn, $cancelBtn));
+      };
+
+      $tagBtn = el('button', {
+        class: 'btn btn-ghost btn-xs',
+        text: 'Tag',
+        onclick: (evt) => {
+          evt.preventDefault();
+          $error.replaceChildren();
+          isOpen = !isOpen;
+          if (isOpen) {
+            renderPicker();
+            $picker.style.display = 'block';
+          } else {
+            $picker.style.display = 'none';
+          }
+        },
+      });
+    }
+
+    const rowContent = el('div', { class: 'flex-1 min-w-0' },
+      $title,
+      $meta,
+      $error,
+      e.can_tag ? $picker : null);
+
+    return el('li', { class: 'flex items-start gap-3 py-2 border-b border-base-300' },
+      rowContent,
+      $tagBtn);
   });
 
   $root.replaceChildren(card(null,
