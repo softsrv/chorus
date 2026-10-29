@@ -88,4 +88,4 @@ Copy `.env.example` → `.env`. Required: `DATABASE_URL`, `JWT_SECRET` (≥32 by
 - Parameterized SQL only (sqlc enforces this).
 - bcrypt cost 12 (config clamps to 10–15); passwords 8–72 bytes.
 - UUIDv7 via `github.com/google/uuid`.
-- `go.mod` pins `toolchain go1.26.10` for stdlib security fixes. Bump it when govulncheck flags the stdlib.
+- `go.mod` declares `go 1.27` (major/minor only) and pins no toolchain; stdlib fixes come from the newest 1.27.x that setup-go and the golang:1.27 image resolve.
