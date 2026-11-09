@@ -61,8 +61,8 @@ func TestIntegration_ChoresMigrateToQuests(t *testing.T) {
 	userID := uuid.Must(uuid.NewV7())
 	email := "migration-test-" + userID.String()[:8] + "@example.com"
 	if _, err := pool.Exec(ctx, `
-		INSERT INTO users (id, email, password_hash, display_name, email_verified_at)
-		VALUES ($1, $2, 'hash', 'Migration User', NOW())
+		INSERT INTO users (id, email, password_hash, display_name, email_verified)
+		VALUES ($1, $2, 'hash', 'Migration User', true)
 	`, userID, email); err != nil {
 		t.Fatalf("create test user: %v", err)
 	}
