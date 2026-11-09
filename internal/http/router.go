@@ -20,7 +20,6 @@ type RouterConfig struct {
 	AuthSvc           *app.AuthService
 	UserSvc           *app.UserService
 	HouseholdSvc      *app.HouseholdService
-	ChoreSvc          *app.ChoreService
 	FamilyCalendar    *app.FamilyCalendar // nil = built from Queries + GoogleCalendar
 	FamilySvc         *app.FamilyService  // nil = built from Queries
 	QuestSvc          *app.QuestService   // nil = built from Queries
@@ -42,7 +41,6 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	authH := handlers.NewAuthHandler(cfg.AuthSvc, cfg.TrustedProxyCount)
 	meH := handlers.NewMeHandler(cfg.AuthSvc, cfg.UserSvc)
 	householdH := handlers.NewHouseholdHandler(cfg.HouseholdSvc)
-	choreH := handlers.NewChoreHandler(cfg.ChoreSvc)
 	familyCal := cfg.FamilyCalendar
 	if familyCal == nil {
 		// Same service main builds: it reports "unavailable" without Google.

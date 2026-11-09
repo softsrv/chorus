@@ -74,7 +74,6 @@ func main() {
 	})
 	userSvc := app.NewUserService(queries)
 	householdSvc := app.NewHouseholdService(queries, pool)
-	choreSvc := app.NewChoreService(queries)
 	familySvc := app.NewFamilyService(queries, cfg.BCryptCost)
 	questSvc := app.NewQuestService(queries)
 
@@ -124,7 +123,6 @@ func main() {
 		AuthSvc:           authSvc,
 		UserSvc:           userSvc,
 		HouseholdSvc:      householdSvc,
-		ChoreSvc:          choreSvc,
 		FamilySvc:         familySvc,
 		QuestSvc:          questSvc,
 		FamilyCalendar:    familyCalendar,
