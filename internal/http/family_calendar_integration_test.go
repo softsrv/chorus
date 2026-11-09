@@ -963,10 +963,25 @@ func (s *calendarServer) rename(id uuid.UUID, name string) {
 }
 
 type tagMemberOut struct {
-	UserID      uuid.UUID `json:"user_id"`
-	DisplayName string    `json:"display_name"`
-	Taggable    bool      `json:"taggable"`
-	Reason      string    `json:"reason"`
+	MemberID uuid.UUID `json:"member_id"`
+	Name     string    `json:"name"`
+	Taggable bool      `json:"taggable"`
+	Reason   string    `json:"reason"`
+}
+
+func (s *calendarServer) addFamilyMember(householdID uuid.UUID, name string) uuid.UUID {
+	s.t.Helper()
+	id, err := uuid.NewV7()
+	if err != nil {
+		s.t.Fatalf("uuid: %v", err)
+	}
+	_, err = s.pool.Exec(context.Background(),
+		"INSERT INTO family_members (id, household_id, name) VALUES ($1, $2, $3)",
+		id, householdID, name)
+	if err != nil {
+		s.t.Fatalf("insert family_member: %v", err)
+	}
+	return id
 }
 
 type taggedEntries struct {
@@ -1040,7 +1055,7 @@ func tagChangeProblems(reqs []googleRequest, before, after map[string]any) []str
 
 // tagFixture is household H with connector Mom (calendar Y, read_write) and
 // member Sam, Y as the family calendar, and entry E "Dentist" on it.
-func tagFixture(t *testing.T) (*calendarServer, *fakeFamilyGoogle, familyMember, familyMember, string) {
+func tagFixture(t *testing.T) (*calendarServer, *fakeFamilyGoogle, familyMember, familyMember, string, uuid.UUID, uuid.UUID) {
 	t.Helper()
 	fake := newFakeFamilyGoogle(t)
 	s := newFamilyTestServer(t, fake)
@@ -1049,11 +1064,17 @@ func tagFixture(t *testing.T) (*calendarServer, *fakeFamilyGoogle, familyMember,
 	s.rename(mom.User.ID, "Mom")
 	s.rename(sam.User.ID, "Sam")
 	hp := s.household(mom, sam)
+	hid, err := uuid.Parse(strings.TrimPrefix(hp, "/api/v1/households/"))
+	if err != nil {
+		t.Fatalf("parse household id: %v", err)
+	}
+	momMemberID := s.addFamilyMember(hid, "Mom")
+	samMemberID := s.addFamilyMember(hid, "Sam")
 	fake.set(func(f *fakeFamilyGoogle) { f.events[calY.ID] = []map[string]any{dentist()} })
 	if code, _ := s.setFamily(hp, mom.AccessToken, calY.ID); code != http.StatusOK {
 		t.Fatalf("set Y: %d", code)
 	}
-	return s, fake, mom, sam, hp
+	return s, fake, mom, sam, hp, momMemberID, samMemberID
 }
 
 // CLM-1, CLM-2, CLM-3, CLM-4: a member tags E through the tag route; Chorus
@@ -1061,11 +1082,11 @@ func tagFixture(t *testing.T) (*calendarServer, *fakeFamilyGoogle, familyMember,
 // and answers with Google's title; the listing reads tags from Google's
 // title; untagging ends at 'Dentist'; a title changed at Google shows as is.
 func TestFamilyCalendar_TagEntry(t *testing.T) {
-	s, fake, mom, sam, hp := tagFixture(t)
+	s, fake, mom, sam, hp, momID, samID := tagFixture(t)
 	before := fake.entry(calY.ID, "E")
 
 	n := len(fake.recorded())
-	code, raw := s.tag(hp, sam.AccessToken, "E", mom.User.ID, sam.User.ID)
+	code, raw := s.tag(hp, sam.AccessToken, "E", momID, samID)
 	if code != http.StatusOK {
 		t.Fatalf("tag: %d %s", code, raw)
 	}
@@ -1089,7 +1110,7 @@ func TestFamilyCalendar_TagEntry(t *testing.T) {
 		t.Errorf("PATCH summary = %v, want 'Dentist [Mom, Sam]'", sent["summary"])
 	}
 	if res.ID != "E" || res.Title != after["summary"] || res.Title != "Dentist [Mom, Sam]" ||
-		!slices.Equal(res.Tags, []uuid.UUID{mom.User.ID, sam.User.ID}) || !res.CanTag {
+		!slices.Equal(res.Tags, []uuid.UUID{momID, samID}) || !res.CanTag {
 		t.Errorf("response = %+v, want E with Google's title 'Dentist [Mom, Sam]' and both tags", res)
 	}
 	// CLM-2: only the summary went to Google; the other fields are intact.
@@ -1100,11 +1121,15 @@ func TestFamilyCalendar_TagEntry(t *testing.T) {
 	// CLM-3: the listing shows Google's title with the parsed tags.
 	list := s.taggedEntries(hp, mom.AccessToken)
 	e := list.find("E")
-	if e.Title != "Dentist [Mom, Sam]" || !slices.Equal(e.Tags, []uuid.UUID{mom.User.ID, sam.User.ID}) || !e.CanTag {
+	if e.Title != "Dentist [Mom, Sam]" || !slices.Equal(e.Tags, []uuid.UUID{momID, samID}) || !e.CanTag {
 		t.Errorf("listed E = %+v, want Google's title, tags [Mom Sam], can_tag", e)
 	}
 	if len(list.Members) != 2 || !list.Members[0].Taggable || !list.Members[1].Taggable {
 		t.Errorf("members = %+v, want Mom and Sam taggable", list.Members)
+	}
+	if list.Members[0].MemberID != momID || list.Members[0].Name != "Mom" ||
+		list.Members[1].MemberID != samID || list.Members[1].Name != "Sam" {
+		t.Errorf("members content = %+v, want Mom(%s) and Sam(%s)", list.Members, momID, samID)
 	}
 
 	// CLM-4: untagging leaves the bare base title.
@@ -1123,7 +1148,7 @@ func TestFamilyCalendar_TagEntry(t *testing.T) {
 	// CLM-3: Chorus keeps no title of its own; a change at Google shows.
 	fake.set(func(f *fakeFamilyGoogle) { f.item(calY.ID, "E")["summary"] = "Dentist moved [sam]" })
 	e = s.taggedEntries(hp, sam.AccessToken).find("E")
-	if e.Title != "Dentist moved [sam]" || !slices.Equal(e.Tags, []uuid.UUID{sam.User.ID}) {
+	if e.Title != "Dentist moved [sam]" || !slices.Equal(e.Tags, []uuid.UUID{samID}) {
 		t.Errorf("listed E after Google-side change = %+v, want 'Dentist moved [sam]' tagged Sam", e)
 	}
 
@@ -1163,7 +1188,7 @@ func TestFamilyCalendar_TagCheckCatchesFullUpdate(t *testing.T) {
 // 503 with Retry-After, and a 401 is a 403 like the listing's broken. The
 // title at Google and in the listing stays.
 func TestFamilyCalendar_TagGoogleRefusal(t *testing.T) {
-	s, fake, mom, sam, hp := tagFixture(t)
+	s, fake, mom, sam, hp, momID, _ := tagFixture(t)
 	const rateLimit403 = `{"error":{"code":403,"message":"INTERNAL-SENTINEL","errors":[{"domain":"usageLimits","reason":"rateLimitExceeded"}]}}`
 	const dailyLimit403 = `{"error":{"code":403,"message":"INTERNAL-SENTINEL","errors":[{"domain":"usageLimits","reason":"dailyLimitExceeded"}]}}`
 	const forbidden403 = `{"error":{"code":403,"message":"INTERNAL-SENTINEL","errors":[{"domain":"global","reason":"insufficientPermissions"}]}}`
@@ -1190,7 +1215,7 @@ func TestFamilyCalendar_TagGoogleRefusal(t *testing.T) {
 		}
 		fake.set(func(f *fakeFamilyGoogle) { f.patchStatus, f.patchBody = tc.googleStatus, body })
 		n := len(fake.recorded())
-		resp := s.tagResp(hp, sam.AccessToken, "E", mom.User.ID)
+		resp := s.tagResp(hp, sam.AccessToken, "E", momID)
 		status, raw := resp.status, resp.body
 		var e apiError
 		_ = json.Unmarshal([]byte(raw), &e)
@@ -1236,6 +1261,11 @@ func TestFamilyCalendar_CanTag(t *testing.T) {
 			cal := fakeGoogleCal{ID: strings.ReplaceAll(tc.name, " ", "-") + "@group.calendar.google.com", Summary: "Family"}
 			m := s.member(fake, "cantag"+strconv.Itoa(len(tc.name)), cal)
 			hp := s.household(m)
+			hid, err := uuid.Parse(strings.TrimPrefix(hp, "/api/v1/households/"))
+			if err != nil {
+				t.Fatalf("parse hid: %v", err)
+			}
+			fID := s.addFamilyMember(hid, "FamilyMember")
 			fake.set(func(f *fakeFamilyGoogle) {
 				f.roles[cal.ID] = tc.role
 				e2 := dentist()
@@ -1257,7 +1287,7 @@ func TestFamilyCalendar_CanTag(t *testing.T) {
 				}
 			}
 			n := len(fake.recorded())
-			code, raw := s.tag(hp, m.AccessToken, "E", m.User.ID)
+			code, raw := s.tag(hp, m.AccessToken, "E", fID)
 			reqs := fake.since(n)
 			if !tc.want {
 				if code != http.StatusForbidden {
@@ -1289,30 +1319,42 @@ func TestFamilyCalendar_TagMembers(t *testing.T) {
 	s2 := newFamilyTestServer(t, fake)
 	a := s.member(fake, "tagconn", calY)
 	b := s.member(fake, "tagplain")
-	d1 := s.member(fake, "tagsam1")
-	d2 := s2.member(fake, "tagsam2")
-	e := s2.member(fake, "tagjo")
-	c := s2.member(fake, "tagoutsider")
-	for id, name := range map[uuid.UUID]string{a.User.ID: "Alex", b.User.ID: "Bea", d1.User.ID: "Sam", d2.User.ID: "sam ", e.User.ID: "Smith, Jo", c.User.ID: "Cy"} {
-		s.rename(id, name)
+	hp := s.household(a, b)
+	hid, err := uuid.Parse(strings.TrimPrefix(hp, "/api/v1/households/"))
+	if err != nil {
+		t.Fatalf("parse hid: %v", err)
 	}
-	hp := s.household(a, b, d1, d2, e)
+
+	cUser := s2.member(fake, "tagoutsider")
+	hpOutsider := s.household(cUser)
+	hidOutsider, err := uuid.Parse(strings.TrimPrefix(hpOutsider, "/api/v1/households/"))
+	if err != nil {
+		t.Fatalf("parse outsider hid: %v", err)
+	}
+
+	aMemberID := s.addFamilyMember(hid, "Alex")
+	bMemberID := s.addFamilyMember(hid, "Bea")
+	d1MemberID := s.addFamilyMember(hid, "Sam")
+	d2MemberID := s.addFamilyMember(hid, "sam ")
+	eMemberID := s.addFamilyMember(hid, "Smith, Jo")
+	cMemberID := s.addFamilyMember(hidOutsider, "Cy")
+
 	fake.set(func(f *fakeFamilyGoogle) { f.events[calY.ID] = []map[string]any{dentist()} })
 	if code, _ := s.setFamily(hp, a.AccessToken, calY.ID); code != http.StatusOK {
 		t.Fatalf("set Y: %d", code)
 	}
 
 	n := len(fake.recorded())
-	if code, raw := s.tag(hp, b.AccessToken, "E", a.User.ID); code != http.StatusOK || !strings.Contains(raw, `"title":"Dentist [Alex]"`) {
+	if code, raw := s.tag(hp, b.AccessToken, "E", aMemberID); code != http.StatusOK || !strings.Contains(raw, `"title":"Dentist [Alex]"`) {
 		t.Fatalf("B tags A: %d %s", code, raw)
 	}
 	if p := mutating(fake.since(n)); len(p) != 1 || p[0].Auth != a.googleAccess {
 		t.Errorf("B's tag PATCH = %+v, want one with A's token", p)
 	}
 
-	for name, id := range map[string]uuid.UUID{"outsider C": c.User.ID, "D1 (duplicate name)": d1.User.ID, "D2 (duplicate name)": d2.User.ID, "E (comma)": e.User.ID} {
+	for name, id := range map[string]uuid.UUID{"outsider C": cMemberID, "D1 (duplicate name)": d1MemberID, "D2 (duplicate name)": d2MemberID, "E (comma)": eMemberID} {
 		n := len(fake.recorded())
-		code, raw := s.tag(hp, b.AccessToken, "E", a.User.ID, id)
+		code, raw := s.tag(hp, b.AccessToken, "E", aMemberID, id)
 		var ae apiError
 		_ = json.Unmarshal([]byte(raw), &ae)
 		if code != http.StatusUnprocessableEntity || ae.Error.Fields["tags"] == "" {
@@ -1326,15 +1368,15 @@ func TestFamilyCalendar_TagMembers(t *testing.T) {
 		t.Errorf("summary = %v, want 'Dentist [Alex]' (no refused name written)", got)
 	}
 
-	want := map[uuid.UUID]string{a.User.ID: "", b.User.ID: "", d1.User.ID: "duplicate_name", d2.User.ID: "duplicate_name", e.User.ID: "reserved_character"}
+	want := map[uuid.UUID]string{aMemberID: "", bMemberID: "", d1MemberID: "duplicate_name", d2MemberID: "duplicate_name", eMemberID: "reserved_character"}
 	list := s.taggedEntries(hp, b.AccessToken)
 	if len(list.Members) != len(want) {
 		t.Fatalf("members = %+v, want %d", list.Members, len(want))
 	}
 	for _, m := range list.Members {
-		r, ok := want[m.UserID]
+		r, ok := want[m.MemberID]
 		if !ok || m.Reason != r || m.Taggable != (r == "") {
-			t.Errorf("member %q: taggable=%v reason=%q, want reason %q", m.DisplayName, m.Taggable, m.Reason, r)
+			t.Errorf("member %q: taggable=%v reason=%q, want reason %q", m.Name, m.Taggable, m.Reason, r)
 		}
 	}
 }

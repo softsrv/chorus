@@ -68,10 +68,10 @@ type familyEntryJSON struct {
 }
 
 type tagMemberJSON struct {
-	UserID      uuid.UUID `json:"user_id"`
-	DisplayName string    `json:"display_name"`
-	Taggable    bool      `json:"taggable"`
-	Reason      string    `json:"reason,omitempty"`
+	MemberID uuid.UUID `json:"member_id"`
+	Name     string    `json:"name"`
+	Taggable bool      `json:"taggable"`
+	Reason   string    `json:"reason,omitempty"`
 }
 
 type householdEntriesResponse struct {
@@ -201,13 +201,13 @@ func (h *FamilyCalendarHandler) Events(w http.ResponseWriter, r *http.Request) {
 				Tags: nonNilIDs(e.Tags), CanTag: e.CanTag}
 		}),
 		Members: mapSlice(res.Members, func(m app.TagMember) tagMemberJSON {
-			return tagMemberJSON{UserID: m.UserID, DisplayName: m.Name, Taggable: m.Taggable, Reason: m.Reason}
+			return tagMemberJSON{MemberID: m.MemberID, Name: m.Name, Taggable: m.Taggable, Reason: m.Reason}
 		}),
 	})
 }
 
 // SetTags replaces the tag group of one family calendar entry with the given
-// members ({"tags": [user ids]}; empty untags) and answers with the title
+// members ({"tags": [family member ids]}; empty untags) and answers with the title
 // Google stored.
 func (h *FamilyCalendarHandler) SetTags(w http.ResponseWriter, r *http.Request) {
 	hid, ok := pathUUID(w, r, "householdID")
