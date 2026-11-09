@@ -31,17 +31,9 @@ type FamilyMemberHandler struct {
 	svc familyServicer
 }
 
-// FamilyHandler is an alias for FamilyMemberHandler.
-type FamilyHandler = FamilyMemberHandler
-
 // NewFamilyMemberHandler constructs a FamilyMemberHandler.
 func NewFamilyMemberHandler(svc familyServicer) *FamilyMemberHandler {
 	return &FamilyMemberHandler{svc: svc}
-}
-
-// NewFamilyHandler constructs a FamilyHandler.
-func NewFamilyHandler(svc familyServicer) *FamilyMemberHandler {
-	return NewFamilyMemberHandler(svc)
 }
 
 type memberResponse struct {
