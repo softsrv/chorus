@@ -280,6 +280,14 @@ func TestAPI_EndToEnd(t *testing.T) {
 	if string(rawList["items"]) != "[]" {
 		t.Errorf("empty quest list: items = %s, want []", rawList["items"])
 	}
+	// CLM-5: fresh household GET /quests returns 200 with items [] (not null) — and the library still lists.
+	var freshLib struct {
+		Items []questBody `json:"items"`
+	}
+	s.expect(http.StatusOK, "GET", "/api/v1/quest-library", parent.AccessToken, nil, &freshLib)
+	if len(freshLib.Items) == 0 {
+		t.Errorf("fresh household cannot list quest library: 0 items")
+	}
 	var quest questBody
 	s.expect(http.StatusCreated, "POST", hp+"/quests", parent.AccessToken, map[string]any{
 		"name": "Walk the dog", "points": 15, "repeat_days": 2, "notes": "Around the block",
@@ -311,6 +319,43 @@ func TestAPI_EndToEnd(t *testing.T) {
 	}, &qerr); got != http.StatusUnprocessableEntity ||
 		qerr.Error.Fields["name"] == "" || qerr.Error.Fields["points"] == "" || qerr.Error.Fields["repeat_days"] == "" {
 		t.Errorf("invalid quest: status %d, %+v", got, qerr)
+	}
+	// Non-numeric points value (e.g. "abc") is rejected with 422 and saves nothing.
+	if got := s.do("POST", hp+"/quests", parent.AccessToken, map[string]any{
+		"name": "Bad Points Quest", "points": "abc",
+	}, &qerr); got != http.StatusUnprocessableEntity || qerr.Error.Fields["points"] == "" {
+		t.Errorf("non-numeric points quest: status %d, %+v", got, qerr)
+	}
+	// notes > 2000 chars rejected
+	if got := s.do("POST", hp+"/quests", parent.AccessToken, map[string]any{
+		"name": "Long Notes", "notes": strings.Repeat("x", 2001),
+	}, &qerr); got != http.StatusUnprocessableEntity || qerr.Error.Fields["notes"] == "" {
+		t.Errorf("too long notes quest: status %d, %+v", got, qerr)
+	}
+	// Rejected creates saved nothing: list count is still 1.
+	s.expect(http.StatusOK, "GET", hp+"/quests", parent.AccessToken, nil, &quests)
+	if len(quests.Items) != 1 {
+		t.Errorf("rejected creates saved rows: %d quests", len(quests.Items))
+	}
+	// PUT with invalid fields rejected with 422, row unchanged.
+	if got := s.do("PUT", qp, parent.AccessToken, map[string]any{
+		"name": "", "points": -1, "repeat_days": 0,
+	}, &qerr); got != http.StatusUnprocessableEntity ||
+		qerr.Error.Fields["name"] == "" || qerr.Error.Fields["points"] == "" || qerr.Error.Fields["repeat_days"] == "" {
+		t.Errorf("invalid quest update: status %d, %+v", got, qerr)
+	}
+	var unchangedAfterPut questBody
+	s.expect(http.StatusOK, "GET", qp, parent.AccessToken, nil, &unchangedAfterPut)
+	if unchangedAfterPut != gotQuest {
+		t.Errorf("quest row changed after rejected update: %+v vs %+v", unchangedAfterPut, gotQuest)
+	}
+
+	// CLM-4: POST/PUT/DELETE on /api/v1/quest-library return 404 or 405.
+	for _, m := range []string{"POST", "PUT", "DELETE"} {
+		st := s.do(m, "/api/v1/quest-library", parent.AccessToken, map[string]any{"name": "test"}, nil)
+		if st != http.StatusNotFound && st != http.StatusMethodNotAllowed {
+			t.Errorf("%s /api/v1/quest-library returned %d, want 404 or 405", m, st)
+		}
 	}
 
 	// Library copy keeps the library's values and its id.
