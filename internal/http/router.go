@@ -22,11 +22,13 @@ type RouterConfig struct {
 	HouseholdSvc      *app.HouseholdService
 	ChoreSvc          *app.ChoreService
 	FamilyCalendar    *app.FamilyCalendar // nil = built from Queries + GoogleCalendar
+	FamilySvc         *app.FamilyService  // nil = built from Queries
 	GoogleSignIn      *app.GoogleSignIn   // nil = Google sign-in disabled
 	GoogleCalendar    *app.GoogleCalendar // nil = Google Calendar unavailable
 	JWTSecret         string
 	Secure            bool // true in production
 	TrustedProxyCount int
+	PINRateLimit      int // requests per 10min window (0 = default 120)
 }
 
 // NewRouter builds and returns the main http.Handler with all routes and middleware.
@@ -46,6 +48,11 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 		familyCal = app.NewFamilyCalendar(cfg.Queries, cfg.GoogleCalendar)
 	}
 	familyH := handlers.NewFamilyCalendarHandler(familyCal)
+	familySvc := cfg.FamilySvc
+	if familySvc == nil {
+		familySvc = app.NewFamilyService(cfg.Queries, 12)
+	}
+	familyMemberH := handlers.NewFamilyMemberHandler(familySvc)
 	googleH := handlers.NewGoogleHandler(cfg.GoogleSignIn, cfg.TrustedProxyCount)
 	calendarH := handlers.NewGoogleCalendarHandler(cfg.GoogleCalendar)
 
@@ -61,7 +68,11 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	forgotRL := middleware.NewRateLimiter(ctx, 5, time.Hour, ipKey)
 	resetRL := middleware.NewRateLimiter(ctx, 10, time.Hour, ipKey)
 	verifyRL := middleware.NewRateLimiter(ctx, 10, time.Hour, ipKey)
-	inviteRL := middleware.NewRateLimiter(ctx, 10, time.Hour, userKey)
+	pinLimit := cfg.PINRateLimit
+	if pinLimit <= 0 {
+		pinLimit = 120
+	}
+	pinRL := middleware.NewRateLimiter(ctx, pinLimit, 10*time.Minute, userKey)
 	googleStartRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
 	googleCallbackRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
 	googleRedeemRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
@@ -117,12 +128,20 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("GET /api/v1/households/{householdID}", verified(householdH.Get))
 	api.Handle("PUT /api/v1/households/{householdID}", verified(householdH.Update))
 	api.Handle("DELETE /api/v1/households/{householdID}", verified(householdH.Delete))
-	api.Handle("GET /api/v1/households/{householdID}/members", verified(householdH.ListMembers))
-	api.Handle("PUT /api/v1/households/{householdID}/members/{userID}", verified(householdH.UpdateMember))
-	api.Handle("DELETE /api/v1/households/{householdID}/members/{userID}", verified(householdH.RemoveMember))
-	api.Handle("POST /api/v1/households/{householdID}/invites", verified(householdH.CreateInvite))
-	// Rate limiter sits inside auth so it can key on the user.
-	api.Handle("POST /api/v1/invites/accept", authMW(middleware.RequireEmailVerified(limit(inviteRL, householdH.AcceptInvite))))
+
+	// ── Family members & Admin PIN ───────────────────────────────────────────
+	api.Handle("GET /api/v1/households/{householdID}/family-members", verified(familyMemberH.List))
+	api.Handle("POST /api/v1/households/{householdID}/family-members", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.Create))))
+	api.Handle("GET /api/v1/households/{householdID}/family-members/{memberID}", verified(familyMemberH.Get))
+	api.Handle("PUT /api/v1/households/{householdID}/family-members/{memberID}", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.Rename))))
+	api.Handle("DELETE /api/v1/households/{householdID}/family-members/{memberID}", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.Delete))))
+	api.Handle("PUT /api/v1/households/{householdID}/family-members/{memberID}/pin", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.SetPin))))
+	api.Handle("DELETE /api/v1/households/{householdID}/family-members/{memberID}/pin", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.ClearPin))))
+	api.Handle("POST /api/v1/households/{householdID}/family-members/{memberID}/verify", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.Verify))))
+	api.Handle("GET /api/v1/households/{householdID}/admin-pin", verified(familyMemberH.AdminPinStatus))
+	api.Handle("PUT /api/v1/households/{householdID}/admin-pin", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.SetAdminPin))))
+	api.Handle("DELETE /api/v1/households/{householdID}/admin-pin", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.ClearAdminPin))))
+	api.Handle("POST /api/v1/households/{householdID}/admin-pin/verify", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.VerifyAdminPin))))
 
 	// ── Chores ────────────────────────────────────────────────────────────────
 	api.Handle("GET /api/v1/households/{householdID}/chores", verified(choreH.List))

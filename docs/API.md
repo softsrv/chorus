@@ -8,7 +8,7 @@ The contract the iOS/Android apps and the web test client build against. Base pa
 - **IDs** are UUIDv7 strings. **Timestamps** are RFC 3339 in UTC (`2026-11-05T18:00:00Z`). **Dates** (chore due dates) are `YYYY-MM-DD`.
 - **PUT is full replacement.** An omitted optional field is cleared. Send the whole object.
 - **Lists** return `{"items": [...]}`. Paginated lists also return `next_offset` (`null` on the last page).
-- **Not found vs. forbidden.** Resources in a household you don't belong to return `404`, the same as nonexistent ones. `403 forbidden` means you're a member but lack the role (e.g. non-admin creating an invite).
+- **Not found vs. forbidden.** Resources in a household you don't belong to return `404`, the same as nonexistent ones. Each household has one login, its admin; a `403` means a PIN check failed (see below).
 - **Errors** always use this shape. Branch on `code`. `message` is for humans and may change.
 
 ```json
@@ -17,11 +17,11 @@ The contract the iOS/Android apps and the web test client build against. Base pa
 
 | Status | `code` | Meaning |
 |---|---|---|
-| 400 | `invalid_json`, `invalid_token`, `invalid_invite` | Malformed request, bad emailed token, or bad invite code |
+| 400 | `invalid_json`, `invalid_token` | Malformed request or bad emailed token |
 | 401 | `unauthenticated`, `token_expired`, `invalid_credentials`, `invalid_refresh_token` | See auth flow below |
-| 403 | `email_not_verified`, `forbidden` | |
+| 403 | `email_not_verified`, `forbidden`, `wrong_pin`, `admin_pin_required` | `wrong_pin`: a member or admin PIN did not match. `admin_pin_required`: an admin PIN is set and the `X-Admin-PIN` header was missing. Neither signs you out. |
 | 404 | `not_found` | |
-| 409 | `last_admin`, `sole_admin`, `already_member`, `already_verified` | Conflicts with household rules |
+| 409 | `already_verified` | Email is already verified |
 | 413 / 415 | `body_too_large` / `unsupported_media_type` | |
 | 422 | `validation_failed` | `fields` maps field → message |
 | 423 | `account_locked` | 10 failed logins locks for 1 hour |
@@ -67,27 +67,34 @@ Native apps: store the refresh token in Keychain / Android Keystore, and send `d
 | `GET /me` | none | user |
 | `PUT /me` | `display_name` | user |
 | `POST /me/password` | `current_password, new_password` | `204`; signs out other sessions |
-| `DELETE /me` | `password` | `204`. `409 sole_admin` if you're the only admin of a household with other members. Households where you're the only member are deleted. |
+| `DELETE /me` | `password` | `204`. Deletes your account and the household it runs, with its family members. |
 | `POST /me/resend-verification` | none | `202` (max 3/hour) |
 | `GET /me/sessions` | none | `{items: [session]}`, `current: true` marks this device |
 | `DELETE /me/sessions/{id}` | none | `204` |
 
 ### Households 🔒
 
-Roles: `admin` (manage household, members, invites) and `member`. Every member can manage chores and sees the household's family calendar.
+Each household has exactly one login account (its administrator); invites and login members no longer exist. Family members are household-scoped profiles with a name, an optional 4-digit PIN and points. A member is `{id, household_id, name, has_pin, points, created_at, updated_at}`; PINs are stored only as bcrypt hashes and never returned. While an admin PIN is set, every member-management write needs it in the `X-Admin-PIN` header (`403 admin_pin_required` if missing, `403 wrong_pin` if wrong, nothing changes). PIN routes are rate limited per login (120 per 10 minutes, then `429`). The first verified sign-in of an account with no household creates one, named "<display name>'s household", with that account as admin.
 
 | Method & path | Body | Notes |
 |---|---|---|
-| `GET /households` | none | Yours, with your `role` |
+| `GET /households` | none | Yours, with your `role` (`admin`) |
 | `POST /households` | `name, timezone?` | Creator becomes admin. `timezone` is IANA (default `UTC`). |
 | `GET /households/{id}` | none | |
 | `PUT /households/{id}` | `name, timezone` | admin |
-| `DELETE /households/{id}` | none | admin; deletes all chores/events |
-| `GET /households/{id}/members` | none | `{user_id, display_name, role, joined_at}` |
-| `PUT /households/{id}/members/{userId}` | `role` | admin; `409 last_admin` if demoting the last admin |
-| `DELETE /households/{id}/members/{userId}` | none | admin, or yourself to leave. The last admin can't leave while others remain. The last member leaving deletes the household. |
-| `POST /households/{id}/invites` | none | admin. `{code: "XXXX-XXXX-XXXX", expires_at}`, single use, 7 days |
-| `POST /invites/accept` | `code` | Case and dashes don't matter. 10 attempts/hour per user. |
+| `DELETE /households/{id}` | none | admin; deletes all chores and family members |
+| `GET /households/{id}/family-members` | none | `{items: [member]}`; `{items: []}` when there are none |
+| `POST /households/{id}/family-members` | `name, pin?` | admin; optional `X-Admin-PIN` header if set |
+| `GET /households/{id}/family-members/{memberId}` | none | member |
+| `PUT /households/{id}/family-members/{memberId}` | `name` | admin; optional `X-Admin-PIN` header if set |
+| `DELETE /households/{id}/family-members/{memberId}` | none | admin; optional `X-Admin-PIN` header if set |
+| `PUT /households/{id}/family-members/{memberId}/pin` | `pin` | admin; 4-digit PIN; optional `X-Admin-PIN` header if set |
+| `DELETE /households/{id}/family-members/{memberId}/pin` | none | admin; optional `X-Admin-PIN` header if set |
+| `POST /households/{id}/family-members/{memberId}/verify` | `pin` (empty for a member with no PIN) | `200` member, or `403 wrong_pin`. Sets no cookie or token: each later member action carries `member_id` and `pin` |
+| `GET /households/{id}/admin-pin` | none | `{set: bool}` |
+| `PUT /households/{id}/admin-pin` | `pin` | admin; 4-digit PIN; `X-Admin-PIN` header (current PIN) required if already set; `{set: true}` |
+| `DELETE /households/{id}/admin-pin` | none | admin; `X-Admin-PIN` header required; `204` |
+| `POST /households/{id}/admin-pin/verify` | `pin` | `200 {}`, or `403 wrong_pin` |
 
 ### Chores 🔒 — `/households/{id}/chores`
 
@@ -96,7 +103,7 @@ Chore: `id, household_id, title, description, assignee_id, due_on, completed, co
 | Method & path | Body / query | Notes |
 |---|---|---|
 | `GET /` | `?status=open\|done\|all` (default `open`), `?assignee=me\|<userId>`, `?limit=1..100` (default 50), `?offset=` | Ordered by due date (undated last) |
-| `POST /` | `title, description?, assignee_id?, due_on?` | Assignee must be a member (`422`). If the assignee leaves, the chore becomes unassigned. |
+| `POST /` | `title, description?, assignee_id?, due_on?` | Assignee must be the household's login (`422`). |
 | `GET /{choreId}` | none | |
 | `PUT /{choreId}` | same as POST | Full replacement |
 | `DELETE /{choreId}` | none | |
@@ -105,7 +112,7 @@ Chore: `id, household_id, title, description, assignee_id, due_on, completed, co
 
 ### Family calendar 🔒 — `/households/{id}/calendar`, `/households/{id}/events`
 
-One member who has connected Google Calendar picks one of their own calendars as the household's family calendar. Every member then sees its entries, which the server fetches with that member's Google token. Chorus has no route that creates, moves or deletes an entry. Its one write to Google is an entry's title, when a member tags it: the tagged members' display names go in one trailing group, e.g. `Dentist [Mom, Sam]`. Chorus stores no title of its own. The family calendar is cleared when its member disconnects Google, leaves or is removed, or deletes their account.
+One member who has connected Google Calendar picks one of their own calendars as the household's family calendar. Every member then sees its entries, which the server fetches with that member's Google token. Chorus has no route that creates, moves or deletes an entry. Its one write to Google is an entry's title, when a member tags it: the tagged members' display names go in one trailing group, e.g. `Dentist [Mom, Sam]`. Chorus stores no title of its own. The family calendar is cleared when its member disconnects Google or deletes their account.
 
 `status` is `ok`, `not_configured` (none chosen), `broken` (the connecting member must reconnect) or `unavailable` (Google Calendar not configured on this server).
 
@@ -115,8 +122,8 @@ One member who has connected Google Calendar picks one of their own calendars as
 | `GET /households/{id}/calendar` | none | `{status, calendar_id?, calendar_name?, set_by?: {id, display_name}}` |
 | `PUT /households/{id}/calendar` | `calendar_id` | Must be on the caller's own calendar list (else 422). Only the member who set it may change it (else 403) |
 | `DELETE /households/{id}/calendar` | none | 204. Only the member who set it (else 403) |
-| `GET /households/{id}/events` | `?from=&to=` (RFC 3339, required, ≤ 100 days) | `{status, items: [{id, title, start, end, all_day, location, tags, can_tag}], members: [{user_id, display_name, taggable, reason?}]}`. `start`/`end` are RFC 3339, or `YYYY-MM-DD` when `all_day`. `title` is Google's; `tags` are the member ids read from its trailing `[..]` group. `can_tag` needs a read/write connection and an entry Google reports editable. A member is not taggable (`reason` `duplicate_name` or `reserved_character`) when their name matches another member's case-insensitively or contains `,`, `[` or `]`. Recurring entries come back as occurrences. 503 `google_unavailable` if Google fails temporarily |
-| `PUT /households/{id}/calendar/entries/{eventID}/tags` | `tags` (member user ids; `[]` untags) | Any member. Sends Google only the new title, with the connecting member's token, and answers `{id, title, tags, can_tag}` with the title Google stored. Names in the group that aren't members are kept after the tagged ones. 422 for a tag that isn't a taggable member, 403 when the entry can't be tagged (`can_tag` false), 404 `not_found` with no family calendar. If Google refuses: 404 `entry_gone`, 403 `not_editable`, 502 `google_rejected` |
+| `GET /households/{id}/events` | `?from=&to=` (RFC 3339, required, ≤ 100 days) | `{status, items: [{id, title, start, end, all_day, location, tags, can_tag}], members: [{member_id, name, taggable, reason?}]}`. `start`/`end` are RFC 3339, or `YYYY-MM-DD` when `all_day`. `title` is Google's; `tags` are the member ids read from its trailing `[..]` group. `can_tag` needs a read/write connection and an entry Google reports editable. A family member is not taggable (`reason` `duplicate_name` or `reserved_character`) when their name matches another member's case-insensitively or contains `,`, `[` or `]`. Recurring entries come back as occurrences. 503 `google_unavailable` if Google fails temporarily |
+| `PUT /households/{id}/calendar/entries/{eventID}/tags` | `tags` (family member ids; `[]` untags) | Any member. Sends Google only the new title, with the connecting member's token, and answers `{id, title, tags, can_tag}` with the title Google stored. Names in the group that aren't members are kept after the tagged ones. 422 for a tag that isn't a taggable member, 403 when the entry can't be tagged (`can_tag` false), 404 `not_found` with no family calendar. If Google refuses: 404 `entry_gone`, 403 `not_editable`, 502 `google_rejected` |
 
 ### Operational
 

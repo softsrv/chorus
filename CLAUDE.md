@@ -64,7 +64,7 @@ docs/API.md                     API contract for client developers
 
 ### Households
 
-Roles `admin`/`member`. Last-admin invariants (`ErrLastAdmin`) are enforced under row locks (`withAdminLock`). Invites are single-use Crockford-base32 codes (hash stored), 7-day expiry, redeemed under `FOR UPDATE`. The `chores → household_members` composite FK unassigns chores when the assignee leaves.
+A household has exactly one login account, its administrator. Family members belong to the household as names and optional 4-digit PINs. Multi-login members and invites are retired.
 
 ### Middleware chain (outermost → innermost)
 
@@ -72,7 +72,7 @@ Roles `admin`/`member`. Last-admin invariants (`ErrLastAdmin`) are enforced unde
 
 ## Database
 
-Migrations run manually (`make migrate-up`), never on startup. After editing `db/queries/*.sql`, run `make sqlc-generate` (CI fails if `internal/db` is stale). Daily 03:00 job (`app.RunTokenCleanup`) purges stale tokens and invites.
+Migrations run manually (`make migrate-up`), never on startup. After editing `db/queries/*.sql`, run `make sqlc-generate` (CI fails if `internal/db` is stale). Daily 03:00 job (`app.RunTokenCleanup`) purges stale tokens.
 
 ## Environment
 

@@ -8,19 +8,15 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
+	"golang.org/x/crypto/bcrypt"
 
-	"github.com/softsrv/chorus/internal/auth"
 	"github.com/softsrv/chorus/internal/db"
 )
 
 // Household roles.
 const (
-	RoleAdmin  = "admin"
-	RoleMember = "member"
+	RoleAdmin = "admin"
 )
-
-const inviteLifetime = 7 * 24 * time.Hour
 
 // Household is a household as seen by one of its members.
 type Household struct {
@@ -34,14 +30,7 @@ type HouseholdInput struct {
 	Timezone string
 }
 
-// Invite is a newly created invite. Code is only available at creation time;
-// the database stores just its hash.
-type Invite struct {
-	Code      string
-	ExpiresAt time.Time
-}
-
-// HouseholdService manages households, their membership, and invites.
+// HouseholdService manages households and their single admin login.
 type HouseholdService struct {
 	q    *db.Queries
 	pool pgxBeginner
@@ -79,10 +68,6 @@ func (s *HouseholdService) Create(ctx context.Context, userID uuid.UUID, in Hous
 	if err != nil {
 		return Household{}, err
 	}
-	id, err := uuid.NewV7()
-	if err != nil {
-		return Household{}, fmt.Errorf("generate household id: %w", err)
-	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -91,17 +76,70 @@ func (s *HouseholdService) Create(ctx context.Context, userID uuid.UUID, in Hous
 	defer tx.Rollback(ctx) //nolint:errcheck
 
 	qtx := s.q.WithTx(tx)
-	h, err := qtx.CreateHousehold(ctx, db.CreateHouseholdParams{ID: id, Name: in.Name, Timezone: in.Timezone})
+	h, err := createHouseholdTx(ctx, qtx, userID, in.Name, in.Timezone)
 	if err != nil {
-		return Household{}, fmt.Errorf("create household: %w", err)
-	}
-	if err := qtx.AddHouseholdMember(ctx, db.AddHouseholdMemberParams{HouseholdID: id, UserID: userID, Role: RoleAdmin}); err != nil {
-		return Household{}, fmt.Errorf("add creator as admin: %w", err)
+		return Household{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Household{}, fmt.Errorf("commit: %w", err)
 	}
 	return Household{Household: h, Role: RoleAdmin}, nil
+}
+
+func createHouseholdTx(ctx context.Context, qtx *db.Queries, userID uuid.UUID, name, timezone string) (db.Household, error) {
+	id, err := uuid.NewV7()
+	if err != nil {
+		return db.Household{}, fmt.Errorf("generate household id: %w", err)
+	}
+	h, err := qtx.CreateHousehold(ctx, db.CreateHouseholdParams{ID: id, Name: name, Timezone: timezone})
+	if err != nil {
+		return db.Household{}, fmt.Errorf("create household: %w", err)
+	}
+	if err := qtx.AddHouseholdMember(ctx, db.AddHouseholdMemberParams{HouseholdID: id, UserID: userID, Role: RoleAdmin}); err != nil {
+		return db.Household{}, fmt.Errorf("add creator as admin: %w", err)
+	}
+	return h, nil
+}
+
+func provisionFirstHousehold(ctx context.Context, pool pgxBeginner, q *db.Queries, user db.User) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	qtx := q.WithTx(tx)
+	rows, err := qtx.ClaimHouseholdProvisioning(ctx, user.ID)
+	if err != nil {
+		return fmt.Errorf("claim household provisioning: %w", err)
+	}
+	if rows == 0 {
+		return nil
+	}
+
+	name := defaultHouseholdName(user.DisplayName)
+
+	if _, err := createHouseholdTx(ctx, qtx, user.ID, name, "UTC"); err != nil {
+		return fmt.Errorf("create default household: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
+	}
+	return nil
+}
+
+// maxHouseholdNameRunes is the households.name limit (validateHousehold).
+const maxHouseholdNameRunes = 100
+
+// defaultHouseholdName is the name of a household created at first sign-in:
+// "<display name>'s household", cut to the household name limit in runes.
+func defaultHouseholdName(displayName string) string {
+	runes := []rune(displayName + "'s household")
+	if len(runes) > maxHouseholdNameRunes {
+		runes = runes[:maxHouseholdNameRunes]
+	}
+	return string(runes)
 }
 
 // Update replaces a household's editable fields. Admins only.
@@ -127,167 +165,6 @@ func (s *HouseholdService) Delete(ctx context.Context, userID, householdID uuid.
 	}
 	if err := s.q.DeleteHousehold(ctx, householdID); err != nil {
 		return fmt.Errorf("delete household: %w", err)
-	}
-	return nil
-}
-
-// Members lists a household's members. Any member may call it.
-func (s *HouseholdService) Members(ctx context.Context, userID, householdID uuid.UUID) ([]db.ListHouseholdMembersRow, error) {
-	if _, err := getHousehold(ctx, s.q, userID, householdID); err != nil {
-		return nil, err
-	}
-	members, err := s.q.ListHouseholdMembers(ctx, householdID)
-	if err != nil {
-		return nil, fmt.Errorf("list members: %w", err)
-	}
-	return members, nil
-}
-
-// SetMemberRole changes a member's role. Admins only; refuses to demote the
-// last admin.
-func (s *HouseholdService) SetMemberRole(ctx context.Context, userID, householdID, memberID uuid.UUID, role string) error {
-	if role != RoleAdmin && role != RoleMember {
-		return &ValidationError{Fields: map[string]string{"role": "must be \"admin\" or \"member\""}}
-	}
-	if _, err := requireAdmin(ctx, s.q, userID, householdID); err != nil {
-		return err
-	}
-	return s.withAdminLock(ctx, householdID, func(qtx *db.Queries, admins []uuid.UUID) error {
-		if role == RoleMember && len(admins) == 1 && admins[0] == memberID {
-			return ErrLastAdmin
-		}
-		n, err := qtx.UpdateHouseholdMemberRole(ctx, db.UpdateHouseholdMemberRoleParams{
-			HouseholdID: householdID, UserID: memberID, Role: role,
-		})
-		if err != nil {
-			return fmt.Errorf("update role: %w", err)
-		}
-		if n == 0 {
-			return ErrNotFound
-		}
-		return nil
-	})
-}
-
-// RemoveMember removes memberID from the household. Admins may remove anyone;
-// any member may remove themselves (leave). The last admin can't leave while
-// other members remain; if they're the last member, the household is deleted.
-func (s *HouseholdService) RemoveMember(ctx context.Context, userID, householdID, memberID uuid.UUID) error {
-	h, err := getHousehold(ctx, s.q, userID, householdID)
-	if err != nil {
-		return err
-	}
-	if memberID != userID && h.Role != RoleAdmin {
-		return ErrForbidden
-	}
-	return s.withAdminLock(ctx, householdID, func(qtx *db.Queries, admins []uuid.UUID) error {
-		if len(admins) == 1 && admins[0] == memberID {
-			members, err := qtx.ListHouseholdMembers(ctx, householdID)
-			if err != nil {
-				return fmt.Errorf("list members: %w", err)
-			}
-			if len(members) > 1 {
-				return ErrLastAdmin
-			}
-			// Last member leaving: the household goes with them.
-			return qtx.DeleteHousehold(ctx, householdID)
-		}
-		n, err := qtx.RemoveHouseholdMember(ctx, db.RemoveHouseholdMemberParams{HouseholdID: householdID, UserID: memberID})
-		if err != nil {
-			return fmt.Errorf("remove member: %w", err)
-		}
-		if n == 0 {
-			return ErrNotFound
-		}
-		return nil
-	})
-}
-
-// CreateInvite issues a single-use invite code. Admins only.
-func (s *HouseholdService) CreateInvite(ctx context.Context, userID, householdID uuid.UUID) (Invite, error) {
-	if _, err := requireAdmin(ctx, s.q, userID, householdID); err != nil {
-		return Invite{}, err
-	}
-	raw, hashed, err := auth.GenerateInviteCode()
-	if err != nil {
-		return Invite{}, err
-	}
-	id, err := uuid.NewV7()
-	if err != nil {
-		return Invite{}, fmt.Errorf("generate invite id: %w", err)
-	}
-	expiresAt := time.Now().Add(inviteLifetime)
-	if _, err := s.q.InsertHouseholdInvite(ctx, db.InsertHouseholdInviteParams{
-		ID:          id,
-		HouseholdID: householdID,
-		TokenHash:   hashed,
-		CreatedBy:   &userID,
-		ExpiresAt:   pgtype.Timestamptz{Time: expiresAt, Valid: true},
-	}); err != nil {
-		return Invite{}, fmt.Errorf("insert invite: %w", err)
-	}
-	return Invite{Code: raw, ExpiresAt: expiresAt}, nil
-}
-
-// AcceptInvite redeems an invite code, adding the user as a member.
-func (s *HouseholdService) AcceptInvite(ctx context.Context, userID uuid.UUID, code string) (Household, error) {
-	hash := auth.HashToken(auth.NormalizeInviteCode(code))
-
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return Household{}, fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck
-
-	qtx := s.q.WithTx(tx)
-	// Row lock serializes concurrent redemptions of the same code.
-	inv, err := qtx.GetHouseholdInviteByHashForUpdate(ctx, hash)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return Household{}, ErrInviteInvalid
-		}
-		return Household{}, fmt.Errorf("get invite: %w", err)
-	}
-	if inv.UsedAt.Valid || inv.ExpiresAt.Time.Before(time.Now()) {
-		return Household{}, ErrInviteInvalid
-	}
-	if err := qtx.AddHouseholdMember(ctx, db.AddHouseholdMemberParams{
-		HouseholdID: inv.HouseholdID, UserID: userID, Role: RoleMember,
-	}); err != nil {
-		if isUniqueViolation(err) {
-			return Household{}, ErrAlreadyMember
-		}
-		return Household{}, fmt.Errorf("add member: %w", err)
-	}
-	if err := qtx.MarkHouseholdInviteUsed(ctx, db.MarkHouseholdInviteUsedParams{ID: inv.ID, UsedBy: &userID}); err != nil {
-		return Household{}, fmt.Errorf("mark invite used: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return Household{}, fmt.Errorf("commit: %w", err)
-	}
-	return getHousehold(ctx, s.q, userID, inv.HouseholdID)
-}
-
-// withAdminLock runs fn in a transaction holding row locks on the household's
-// admin memberships, so two concurrent demotions/removals can't both pass the
-// "is this the last admin?" check.
-func (s *HouseholdService) withAdminLock(ctx context.Context, householdID uuid.UUID, fn func(qtx *db.Queries, admins []uuid.UUID) error) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck
-
-	qtx := s.q.WithTx(tx)
-	admins, err := qtx.LockHouseholdAdmins(ctx, householdID)
-	if err != nil {
-		return fmt.Errorf("lock admins: %w", err)
-	}
-	if err := fn(qtx, admins); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
 }
@@ -319,6 +196,37 @@ func requireAdmin(ctx context.Context, q *db.Queries, userID, householdID uuid.U
 	if h.Role != RoleAdmin {
 		return Household{}, ErrForbidden
 	}
+	return h, nil
+}
+
+// requireAdminPin validates that the user is an admin of the household, and if the household has an
+// admin PIN set, requires that adminPin matches the stored hash.
+// If an admin PIN is set and adminPin is empty, ErrAdminPinRequired is returned.
+// If adminPin does not match, ErrWrongPIN is returned.
+// Non-members receive ErrNotFound (via requireAdmin -> getHousehold).
+func requireAdminPin(ctx context.Context, q *db.Queries, userID, householdID uuid.UUID, adminPin string) (Household, error) {
+	h, err := requireAdmin(ctx, q, userID, householdID)
+	if err != nil {
+		return Household{}, err
+	}
+
+	pinRow, err := q.GetAdminPin(ctx, householdID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// No admin PIN is set on this household; requireAdmin was sufficient.
+			return h, nil
+		}
+		return Household{}, fmt.Errorf("get admin pin: %w", err)
+	}
+
+	if adminPin == "" {
+		return Household{}, ErrAdminPinRequired
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(pinRow.PinHash), []byte(adminPin)); err != nil {
+		return Household{}, ErrWrongPIN
+	}
+
 	return h, nil
 }
 

@@ -19,7 +19,7 @@ Then open http://localhost:8080. Register, then open the verification email in s
 ## What's here
 
 - **Accounts:** register, email verification, login, refresh, logout, password reset/change, per-device sessions, account deletion
-- **Households:** create, invite by code, roles (admin/member), leave/remove members
+- **Households:** create, family members with optional PINs, admin PIN protection
 - **Chores:** CRUD, assign to a member, due dates, complete/reopen, filters, pagination
 - **Events:** CRUD, date-range queries for calendar views
 

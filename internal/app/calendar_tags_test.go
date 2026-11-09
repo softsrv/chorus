@@ -27,16 +27,16 @@ func retag(t *testing.T, title string, members []TagMember, ids []uuid.UUID) str
 // gains a second group; untaggable names are never composed into a title.
 func TestTagTitle(t *testing.T) {
 	mom, sam, sam2, jo, ann := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
-	members := tagMembers([]db.ListHouseholdMembersRow{
-		{UserID: mom, DisplayName: "Mom"},
-		{UserID: sam, DisplayName: " Sam "},
+	members := tagMembers([]db.FamilyMember{
+		{ID: mom, Name: "Mom"},
+		{ID: sam, Name: " Sam "},
 	})
-	withUntaggable := tagMembers([]db.ListHouseholdMembersRow{
-		{UserID: mom, DisplayName: "Mom"},
-		{UserID: sam, DisplayName: "Sam"},
-		{UserID: sam2, DisplayName: "sam"},
-		{UserID: jo, DisplayName: "Smith, Jo"},
-		{UserID: ann, DisplayName: "Ann [twin]"},
+	withUntaggable := tagMembers([]db.FamilyMember{
+		{ID: mom, Name: "Mom"},
+		{ID: sam, Name: "Sam"},
+		{ID: sam2, Name: "sam"},
+		{ID: jo, Name: "Smith, Jo"},
+		{ID: ann, Name: "Ann [twin]"},
 	})
 
 	parses := []struct {
@@ -93,8 +93,8 @@ func TestTagTitle(t *testing.T) {
 		want := map[uuid.UUID]string{mom: "", sam: TagReasonDuplicateName, sam2: TagReasonDuplicateName,
 			jo: TagReasonReservedChar, ann: TagReasonReservedChar}
 		for _, m := range withUntaggable {
-			if m.Reason != want[m.UserID] || m.Taggable != (want[m.UserID] == "") {
-				t.Errorf("%q: taggable=%v reason=%q, want reason %q", m.Name, m.Taggable, m.Reason, want[m.UserID])
+			if m.Reason != want[m.MemberID] || m.Taggable != (want[m.MemberID] == "") {
+				t.Errorf("%q: taggable=%v reason=%q, want reason %q", m.Name, m.Taggable, m.Reason, want[m.MemberID])
 			}
 		}
 	})

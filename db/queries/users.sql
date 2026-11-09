@@ -28,6 +28,10 @@ SELECT * FROM users WHERE email = $1 LIMIT 1;
 -- name: SetEmailVerified :exec
 UPDATE users SET email_verified = true, updated_at = NOW() WHERE id = $1;
 
+-- name: ClaimHouseholdProvisioning :execrows
+UPDATE users SET household_provisioned_at = NOW(), updated_at = NOW()
+WHERE id = $1 AND household_provisioned_at IS NULL;
+
 -- name: IncrementFailedLoginAttempts :exec
 UPDATE users SET failed_login_attempts = failed_login_attempts + 1, updated_at = NOW() WHERE id = $1;
 

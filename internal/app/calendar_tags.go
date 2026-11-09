@@ -24,7 +24,7 @@ const (
 // members (case-insensitively) and contains no ',', '[' or ']', so it reads
 // back unambiguously from a title. Reason says why one is not.
 type TagMember struct {
-	UserID   uuid.UUID
+	MemberID uuid.UUID
 	Name     string
 	Taggable bool
 	Reason   string
@@ -32,15 +32,15 @@ type TagMember struct {
 
 // tagMembers classifies the household's current members as tag choices, in
 // the order given.
-func tagMembers(rows []db.ListHouseholdMembersRow) []TagMember {
+func tagMembers(rows []db.FamilyMember) []TagMember {
 	counts := map[string]int{}
 	for _, r := range rows {
-		counts[tagKey(r.DisplayName)]++
+		counts[tagKey(r.Name)]++
 	}
 	out := make([]TagMember, 0, len(rows))
 	for _, r := range rows {
-		name := strings.TrimSpace(r.DisplayName)
-		m := TagMember{UserID: r.UserID, Name: name, Taggable: true}
+		name := strings.TrimSpace(r.Name)
+		m := TagMember{MemberID: r.ID, Name: name, Taggable: true}
 		switch {
 		case name == "":
 			m.Taggable, m.Reason = false, TagReasonEmptyName
@@ -62,7 +62,7 @@ func tagKey(name string) string { return strings.ToLower(strings.TrimSpace(name)
 func tagNames(members []TagMember, ids []uuid.UUID) (names []string, bad []uuid.UUID) {
 	byID := make(map[uuid.UUID]TagMember, len(members))
 	for _, m := range members {
-		byID[m.UserID] = m
+		byID[m.MemberID] = m
 	}
 	seen := map[uuid.UUID]bool{}
 	names = []string{}
@@ -104,7 +104,7 @@ func parseTagTitle(title string, members []TagMember) (base string, tags []uuid.
 	byKey := map[string]uuid.UUID{}
 	for _, m := range members {
 		if m.Taggable {
-			byKey[tagKey(m.Name)] = m.UserID
+			byKey[tagKey(m.Name)] = m.MemberID
 		}
 	}
 	seen := map[uuid.UUID]bool{}

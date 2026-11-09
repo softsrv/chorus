@@ -75,7 +75,7 @@ type FamilyEntry struct {
 
 // HouseholdEntries is the result of listing a household's family calendar.
 // Entries is non-nil (possibly empty) when Status is FamilyCalendarOK.
-// Members are the household's current members as tag choices.
+// Members are the household's current family members as tag choices.
 type HouseholdEntries struct {
 	Status  string
 	Entries []FamilyEntry
@@ -325,14 +325,14 @@ func (s *FamilyCalendar) ListEntries(ctx context.Context, userID, householdID uu
 }
 
 func (s *FamilyCalendar) tagMembers(ctx context.Context, householdID uuid.UUID) ([]TagMember, error) {
-	rows, err := s.q.ListHouseholdMembers(ctx, householdID)
+	rows, err := s.q.ListFamilyMembers(ctx, householdID)
 	if err != nil {
-		return nil, fmt.Errorf("list household members: %w", err)
+		return nil, fmt.Errorf("list family members: %w", err)
 	}
 	return tagMembers(rows), nil
 }
 
-// SetEntryTags makes tags (member user ids; empty untags) the tag group of
+// SetEntryTags makes tags (family member ids; empty untags) the tag group of
 // one entry of the household's family calendar. Any member may tag; the
 // change is sent with the setter's token. The title is rebuilt from Google's
 // current title, and only the summary is sent, in a PATCH. It returns the

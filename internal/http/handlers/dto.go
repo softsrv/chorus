@@ -107,15 +107,20 @@ func toHousehold(h app.Household) householdJSON {
 	}
 }
 
-type memberJSON struct {
-	UserID      uuid.UUID `json:"user_id"`
-	DisplayName string    `json:"display_name"`
-	Role        string    `json:"role"`
-	JoinedAt    time.Time `json:"joined_at"`
+type familyMemberJSON struct {
+	ID     uuid.UUID `json:"id"`
+	Name   string    `json:"name"`
+	HasPIN bool      `json:"has_pin"`
+	Points int32     `json:"points"`
 }
 
-func toMember(m db.ListHouseholdMembersRow) memberJSON {
-	return memberJSON{UserID: m.UserID, DisplayName: m.DisplayName, Role: m.Role, JoinedAt: m.JoinedAt.Time.UTC()}
+func toFamilyMember(m db.FamilyMember) familyMemberJSON {
+	return familyMemberJSON{
+		ID:     m.ID,
+		Name:   m.Name,
+		HasPIN: m.PinHash.Valid && m.PinHash.String != "",
+		Points: m.Points,
+	}
 }
 
 type choreJSON struct {

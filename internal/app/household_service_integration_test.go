@@ -26,6 +26,7 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
 	chores := app.NewChoreService(q)
+	familySvc := app.NewFamilyService(q, 10)
 	ctx := context.Background()
 
 	alice := registerVerified(t, pool, authSvc, mailer, "alice").User.ID
@@ -51,15 +52,12 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create chore: %v", err)
 	}
-	inv, err := households.CreateInvite(ctx, alice, h.ID)
-	if err != nil {
-		t.Fatalf("CreateInvite: %v", err)
-	}
-	if _, err := households.AcceptInvite(ctx, bob, inv.Code); err != nil {
-		t.Fatalf("bob joins: %v", err)
-	}
 	if _, err := family.Set(ctx, alice, h.ID, "family-y@group.calendar.google.com"); err != nil {
 		t.Fatalf("Set family calendar: %v", err)
+	}
+	aliceMember, err := familySvc.Create(ctx, alice, h.ID, app.FamilyMemberInput{Name: "Alice Member", PIN: "1234"}, "")
+	if err != nil {
+		t.Fatalf("Create alice member: %v", err)
 	}
 	from, to := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
 
@@ -73,8 +71,6 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	_, checks["get household"] = households.Get(ctx, mallory, h.ID)
 	_, checks["update household"] = households.Update(ctx, mallory, h.ID, app.HouseholdInput{Name: "pwned"})
 	checks["delete household"] = households.Delete(ctx, mallory, h.ID)
-	_, checks["members"] = households.Members(ctx, mallory, h.ID)
-	_, checks["invite"] = households.CreateInvite(ctx, mallory, h.ID)
 	_, _, checks["list chores"] = chores.List(ctx, mallory, h.ID, app.ChoreFilter{Limit: 10})
 	_, checks["get chore"] = chores.Get(ctx, mallory, h.ID, chore.ID)
 	_, checks["update chore"] = chores.Update(ctx, mallory, h.ID, chore.ID, app.ChoreInput{Title: "x"})
@@ -89,6 +85,22 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	// Cross-household ID smuggling: Mallory's household ID + Alice's chore ID.
 	_, checks["get chore via own household"] = chores.Get(ctx, mallory, mh.ID, chore.ID)
 	checks["delete chore via own household"] = chores.Delete(ctx, mallory, mh.ID, chore.ID)
+	// Family member and admin-pin isolation checks
+	_, checks["list family members"] = familySvc.List(ctx, mallory, h.ID)
+	_, checks["get family member"] = familySvc.Get(ctx, mallory, h.ID, aliceMember.ID)
+	_, checks["create family member"] = familySvc.Create(ctx, mallory, h.ID, app.FamilyMemberInput{Name: "Evil"}, "")
+	_, checks["rename family member"] = familySvc.Rename(ctx, mallory, h.ID, aliceMember.ID, app.RenameMemberInput{Name: "Pwned"}, "")
+	checks["remove family member"] = familySvc.Remove(ctx, mallory, h.ID, aliceMember.ID, "")
+	_, checks["set member pin"] = familySvc.SetPin(ctx, mallory, h.ID, aliceMember.ID, "9999", "")
+	_, checks["clear member pin"] = familySvc.ClearPin(ctx, mallory, h.ID, aliceMember.ID, "")
+	_, checks["verify member pin"] = familySvc.Verify(ctx, mallory, h.ID, aliceMember.ID, "1234")
+	_, checks["admin pin set"] = familySvc.AdminPinSet(ctx, mallory, h.ID)
+	checks["set admin pin"] = familySvc.SetAdminPin(ctx, mallory, h.ID, "1111", "")
+	checks["clear admin pin"] = familySvc.ClearAdminPin(ctx, mallory, h.ID, "")
+	checks["verify admin pin"] = familySvc.VerifyAdminPin(ctx, mallory, h.ID, "1111")
+	// Cross-household ID smuggling with family members:
+	_, checks["get family member via own household"] = familySvc.Get(ctx, mallory, mh.ID, aliceMember.ID)
+	checks["remove family member via own household"] = familySvc.Remove(ctx, mallory, mh.ID, aliceMember.ID, "")
 
 	for name, err := range checks {
 		if !errors.Is(err, app.ErrNotFound) {
@@ -100,28 +112,34 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		t.Errorf("outsider's family calendar calls reached Google: %+v", reqs)
 	}
 
-	// Member Bob, with no Google connection, sees the family calendar's
-	// entries, fetched server-side with Alice's token from calendar Y only.
+	// Alice sees the family calendar's entries, fetched server-side with
+	// Alice's token from calendar Y only.
 	requestsBefore = len(google.recorded())
-	entries, err := family.ListEntries(ctx, bob, h.ID, from, to)
+	entries, err := family.ListEntries(ctx, alice, h.ID, from, to)
 	if err != nil || entries.Status != app.FamilyCalendarOK || len(entries.Entries) != 1 || entries.Entries[0].ID != "y1" {
-		t.Fatalf("bob's entries = %+v, %v; want only y1", entries, err)
+		t.Fatalf("alice's entries = %+v, %v; want only y1", entries, err)
 	}
 	reqs := google.recorded()[requestsBefore:]
 	if len(reqs) != 1 || reqs[0].Auth != aliceAccess || reqs[0].Path != "/calendars/family-y@group.calendar.google.com/events" {
-		t.Errorf("bob's fetch requests = %+v, want one events request to Y with alice's token", reqs)
+		t.Errorf("alice's fetch requests = %+v, want one events request to Y with alice's token", reqs)
 	}
-	status, err := family.Status(ctx, bob, h.ID)
+	status, err := family.Status(ctx, alice, h.ID)
 	if err != nil || status.Status != app.FamilyCalendarOK || status.SetByID != alice {
-		t.Fatalf("bob's status = %+v, %v", status, err)
+		t.Fatalf("alice's status = %+v, %v", status, err)
 	}
-	// Nothing Bob receives carries Alice's tokens, her calendar list or
-	// another calendar's entries.
+	// Nothing Alice receives carries her tokens, her calendar list or another calendar's entries.
 	bodies, _ := json.Marshal(map[string]any{"status": status, "entries": entries})
 	for _, leak := range []string{aliceAccess, aliceRefresh, "primary-alice@example.com", "Alice private", "x1"} {
 		if strings.Contains(string(bodies), leak) {
-			t.Errorf("bob's results contain %q: %s", leak, bodies)
+			t.Errorf("alice's results contain %q: %s", leak, bodies)
 		}
+	}
+	// Bob is an outsider to Alice's household and cannot list her entries.
+	if _, err := family.ListEntries(ctx, bob, h.ID, from, to); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("bob list entries: expected ErrNotFound, got %v", err)
+	}
+	if _, err := family.Status(ctx, bob, h.ID); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("bob status: expected ErrNotFound, got %v", err)
 	}
 	// Bob may not list Alice's calendars: his own list is "not connected".
 	mine, err := family.ListMyCalendars(ctx, bob)
@@ -144,101 +162,94 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		t.Errorf("alice's family calendar was modified: %+v, %v", st, err)
 	}
 
-	// Positive control for the tag check: once Mallory joins, her tag call
-	// PATCHes the entry with Alice's token.
-	inv, err = households.CreateInvite(ctx, alice, h.ID)
-	if err != nil {
-		t.Fatalf("CreateInvite: %v", err)
-	}
-	if _, err := households.AcceptInvite(ctx, mallory, inv.Code); err != nil {
-		t.Fatalf("mallory joins: %v", err)
-	}
+	// Positive control for the tag check: Alice tags the entry with her family member.
 	requestsBefore = len(google.recorded())
-	tagged, err := family.SetEntryTags(ctx, mallory, h.ID, "y1", []uuid.UUID{alice})
-	if err != nil || tagged.Title != "Y soccer [alice]" {
-		t.Fatalf("member mallory tags y1: %+v, %v; want title 'Y soccer [alice]'", tagged, err)
+	tagged, err := family.SetEntryTags(ctx, alice, h.ID, "y1", []uuid.UUID{aliceMember.ID})
+	if err != nil || tagged.Title != "Y soccer [Alice Member]" {
+		t.Fatalf("alice tags y1: %+v, %v; want title 'Y soccer [Alice Member]'", tagged, err)
 	}
 	if reqs := google.recorded()[requestsBefore:]; patches(reqs) != 1 || reqs[len(reqs)-1].Auth != aliceAccess {
-		t.Errorf("member's tag requests = %+v, want one PATCH with alice's token", reqs)
+		t.Errorf("alice's tag requests = %+v, want one PATCH with alice's token", reqs)
 	}
 }
 
-func TestIntegration_InvitesAndAdminRules(t *testing.T) {
+func TestIntegration_HouseholdMembersOneLoginConstraint(t *testing.T) {
+	pool := testDB(t)
+	ctx := context.Background()
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	households := app.NewHouseholdService(q, pool)
+
+	user1 := registerVerified(t, pool, authSvc, mailer, "user1").User.ID
+	user2 := registerVerified(t, pool, authSvc, mailer, "user2").User.ID
+
+	h, err := households.Create(ctx, user1, app.HouseholdInput{Name: "One Login Household"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Attempting to insert a second login member for the same household must fail on the unique index.
+	err = q.AddHouseholdMember(ctx, db.AddHouseholdMemberParams{
+		HouseholdID: h.ID,
+		UserID:      user2,
+		Role:        app.RoleAdmin,
+	})
+	if err == nil {
+		t.Fatal("expected error on inserting second household_members row, got nil")
+	}
+}
+
+func TestIntegration_DeleteAccountDeletesHousehold(t *testing.T) {
 	pool := testDB(t)
 	mailer := &captureMailer{}
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	chores := app.NewChoreService(q)
 	ctx := context.Background()
 
-	parent := registerVerified(t, pool, authSvc, mailer, "parent").User.ID
-	kid := registerVerified(t, pool, authSvc, mailer, "kid").User.ID
+	parent := registerVerified(t, pool, authSvc, mailer, "delparent").User.ID
 
 	h, err := households.Create(ctx, parent, app.HouseholdInput{Name: "Home"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	inv, err := households.CreateInvite(ctx, parent, h.ID)
+	familyMemberID, err := uuid.NewV7()
 	if err != nil {
-		t.Fatalf("CreateInvite: %v", err)
+		t.Fatalf("uuid: %v", err)
 	}
-	// Codes are forgiving about case and separators.
-	joined, err := households.AcceptInvite(ctx, kid, " "+strings.ToLower(inv.Code)+" ")
-	if err != nil {
-		t.Fatalf("AcceptInvite: %v", err)
-	}
-	if joined.ID != h.ID || joined.Role != app.RoleMember {
-		t.Errorf("joined: got %+v", joined)
-	}
-	if _, err := households.AcceptInvite(ctx, kid, inv.Code); !errors.Is(err, app.ErrInviteInvalid) {
-		t.Errorf("reused invite: expected ErrInviteInvalid, got %v", err)
+	if _, err := pool.Exec(ctx,
+		"INSERT INTO family_members (id, household_id, name) VALUES ($1, $2, $3)",
+		familyMemberID, h.ID, "Kid"); err != nil {
+		t.Fatalf("insert family member: %v", err)
 	}
 
-	// Members can manage chores but not the household.
-	c, err := chores.Create(ctx, kid, h.ID, app.ChoreInput{Title: "Feed cat", AssigneeID: &kid})
-	if err != nil {
-		t.Fatalf("member create chore: %v", err)
-	}
-	if _, err := households.CreateInvite(ctx, kid, h.ID); !errors.Is(err, app.ErrForbidden) {
-		t.Errorf("member invite: expected ErrForbidden, got %v", err)
-	}
-	if err := households.RemoveMember(ctx, kid, h.ID, parent); !errors.Is(err, app.ErrForbidden) {
-		t.Errorf("member removes admin: expected ErrForbidden, got %v", err)
-	}
-
-	// The only admin can't demote themselves or leave while others remain.
-	if err := households.SetMemberRole(ctx, parent, h.ID, parent, app.RoleMember); !errors.Is(err, app.ErrLastAdmin) {
-		t.Errorf("demote last admin: expected ErrLastAdmin, got %v", err)
-	}
-	if err := households.RemoveMember(ctx, parent, h.ID, parent); !errors.Is(err, app.ErrLastAdmin) {
-		t.Errorf("last admin leaves: expected ErrLastAdmin, got %v", err)
-	}
-	// Account deletion is blocked for the same reason.
-	var hbErr app.HouseholdBlockingError
-	if err := authSvc.DeleteAccount(ctx, parent, uuid.Nil, "correct-password-123", ""); !errors.As(err, &hbErr) {
-		t.Errorf("delete sole admin account: expected HouseholdBlockingError, got %v", err)
-	}
-
-	// When the kid leaves, their chore becomes unassigned.
-	if err := households.RemoveMember(ctx, kid, h.ID, kid); err != nil {
-		t.Fatalf("kid leaves: %v", err)
-	}
-	got, err := chores.Get(ctx, parent, h.ID, c.ID)
-	if err != nil {
-		t.Fatalf("get chore: %v", err)
-	}
-	if got.AssigneeID != nil {
-		t.Errorf("chore should be unassigned after assignee left, got %v", got.AssigneeID)
-	}
-
-	// Now the parent is the sole member; deleting the account deletes the household.
 	if err := authSvc.DeleteAccount(ctx, parent, uuid.Nil, "correct-password-123", ""); err != nil {
 		t.Fatalf("DeleteAccount: %v", err)
 	}
-	var n int
-	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM households WHERE id = $1", h.ID).Scan(&n); err != nil || n != 0 {
-		t.Errorf("household should be deleted with its last member (count %d, err %v)", n, err)
+
+	var householdCount int
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM households WHERE id = $1", h.ID).Scan(&householdCount); err != nil {
+		t.Fatalf("count households: %v", err)
+	}
+	if householdCount != 0 {
+		t.Errorf("household still exists: count = %d, want 0", householdCount)
+	}
+
+	var memberCount int
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM family_members WHERE household_id = $1", h.ID).Scan(&memberCount); err != nil {
+		t.Fatalf("count family members: %v", err)
+	}
+	if memberCount != 0 {
+		t.Errorf("family members still exist: count = %d, want 0", memberCount)
+	}
+
+	var userCount int
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM users WHERE id = $1", parent).Scan(&userCount); err != nil {
+		t.Fatalf("count users: %v", err)
+	}
+	if userCount != 0 {
+		t.Errorf("user still exists: count = %d, want 0", userCount)
 	}
 }

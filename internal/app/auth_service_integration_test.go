@@ -415,3 +415,301 @@ func TestIntegration_GoogleLinkedPasswordUserLoginAndLockout(t *testing.T) {
 		t.Errorf("after threshold: expected ErrAccountLocked, got %v", err)
 	}
 }
+
+func TestIntegration_FirstSignInProvisionsHousehold(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	svc := testAuthService(t, pool, mailer)
+	ctx := context.Background()
+
+	t.Run("VerifyEmail yields exactly one admin household, later login adds none", func(t *testing.T) {
+		email := uniqueEmail("provision")
+		const password = "correct-password-123"
+		if err := svc.Register(ctx, email, password, "Alice"); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		t.Cleanup(func() { _, _ = pool.Exec(ctx, "DELETE FROM users WHERE email = $1", email) })
+
+		tok := mailer.waitForToken(t, email, "Verify")
+		res, err := svc.VerifyEmail(ctx, tok, app.DeviceMeta{})
+		if err != nil {
+			t.Fatalf("VerifyEmail: %v", err)
+		}
+
+		// Check household created
+		var count int
+		var hName, hTZ, mRole string
+		err = pool.QueryRow(ctx, `
+			SELECT COUNT(*), COALESCE(MAX(h.name), ''), COALESCE(MAX(h.timezone), ''), COALESCE(MAX(m.role), '')
+			FROM household_members m
+			JOIN households h ON h.id = m.household_id
+			WHERE m.user_id = $1
+		`, res.User.ID).Scan(&count, &hName, &hTZ, &mRole)
+		if err != nil {
+			t.Fatalf("query household: %v", err)
+		}
+		if count != 1 {
+			t.Fatalf("expected 1 household, got %d", count)
+		}
+		if hName != "Alice's household" {
+			t.Errorf("household name: got %q, want %q", hName, "Alice's household")
+		}
+		if hTZ != "UTC" {
+			t.Errorf("timezone: got %q, want %q", hTZ, "UTC")
+		}
+		if mRole != app.RoleAdmin {
+			t.Errorf("role: got %q, want %q", mRole, app.RoleAdmin)
+		}
+
+		// Later Login adds none
+		if _, err := svc.Login(ctx, email, password, app.DeviceMeta{}); err != nil {
+			t.Fatalf("Login: %v", err)
+		}
+		var countAfter int
+		if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM household_members WHERE user_id = $1", res.User.ID).Scan(&countAfter); err != nil {
+			t.Fatalf("query count: %v", err)
+		}
+		if countAfter != 1 {
+			t.Errorf("expected still 1 household after login, got %d", countAfter)
+		}
+	})
+
+	t.Run("unverified Login adds none", func(t *testing.T) {
+		email := uniqueEmail("unverified")
+		const password = "correct-password-123"
+		if err := svc.Register(ctx, email, password, "Bob"); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		t.Cleanup(func() { _, _ = pool.Exec(ctx, "DELETE FROM users WHERE email = $1", email) })
+
+		res, err := svc.Login(ctx, email, password, app.DeviceMeta{})
+		if err != nil {
+			t.Fatalf("Login: %v", err)
+		}
+		var count int
+		if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM household_members WHERE user_id = $1", res.User.ID).Scan(&count); err != nil {
+			t.Fatalf("query count: %v", err)
+		}
+		if count != 0 {
+			t.Errorf("expected 0 households for unverified login, got %d", count)
+		}
+	})
+
+	t.Run("N concurrent Logins give exactly one", func(t *testing.T) {
+		email := uniqueEmail("concurrent")
+		const password = "correct-password-123"
+		if err := svc.Register(ctx, email, password, "Charlie"); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		t.Cleanup(func() { _, _ = pool.Exec(ctx, "DELETE FROM users WHERE email = $1", email) })
+
+		// Mark email verified directly in DB to simulate verified user prior to first login
+		var userID uuid.UUID
+		if err := pool.QueryRow(ctx, "UPDATE users SET email_verified = true, household_provisioned_at = NULL WHERE email = $1 RETURNING id", email).Scan(&userID); err != nil {
+			t.Fatalf("mark verified: %v", err)
+		}
+
+		const n = 10
+		var wg sync.WaitGroup
+		errs := make([]error, n)
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				_, errs[idx] = svc.Login(ctx, email, password, app.DeviceMeta{})
+			}(i)
+		}
+		wg.Wait()
+
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("concurrent login %d failed: %v", i, err)
+			}
+		}
+
+		var count int
+		if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM household_members WHERE user_id = $1", userID).Scan(&count); err != nil {
+			t.Fatalf("query count: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("expected exactly 1 household after concurrent logins, got %d", count)
+		}
+	})
+
+	t.Run("after household deleted a Login creates none", func(t *testing.T) {
+		res := registerVerified(t, pool, svc, mailer, "deleted-hh")
+		// Delete the user's household
+		if _, err := pool.Exec(ctx, `DELETE FROM households WHERE id IN (SELECT household_id FROM household_members WHERE user_id = $1)`, res.User.ID); err != nil {
+			t.Fatalf("delete household: %v", err)
+		}
+
+		if _, err := svc.Login(ctx, res.User.Email, "correct-password-123", app.DeviceMeta{}); err != nil {
+			t.Fatalf("Login: %v", err)
+		}
+
+		var count int
+		if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM household_members WHERE user_id = $1", res.User.ID).Scan(&count); err != nil {
+			t.Fatalf("query count: %v", err)
+		}
+		if count != 0 {
+			t.Errorf("expected 0 households after household deletion and login, got %d", count)
+		}
+	})
+
+	t.Run("long display name truncated to 100 runes", func(t *testing.T) {
+		email := uniqueEmail("longname")
+		// The longest display name the users CHECK allows: 50 runes, multibyte included.
+		longName := strings.Repeat("A", 24) + "🌟" + strings.Repeat("B", 25)
+		if n := len([]rune(longName)); n != 50 {
+			t.Fatalf("test setup: display name is %d runes, want 50", n)
+		}
+		const password = "correct-password-123"
+		if err := svc.Register(ctx, email, password, longName); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		t.Cleanup(func() { _, _ = pool.Exec(ctx, "DELETE FROM users WHERE email = $1", email) })
+
+		tok := mailer.waitForToken(t, email, "Verify")
+		res, err := svc.VerifyEmail(ctx, tok, app.DeviceMeta{})
+		if err != nil {
+			t.Fatalf("VerifyEmail: %v", err)
+		}
+
+		var hName string
+		err = pool.QueryRow(ctx, `
+			SELECT h.name FROM households h
+			JOIN household_members m ON m.household_id = h.id
+			WHERE m.user_id = $1
+		`, res.User.ID).Scan(&hName)
+		if err != nil {
+			t.Fatalf("query household name: %v", err)
+		}
+		// 50 + len("'s household") = 62 runes, under the limit: nothing is cut.
+		if want := longName + "'s household"; hName != want {
+			t.Errorf("household name: got %q, want %q", hName, want)
+		}
+
+		// The 100-rune cut is unreachable from a real user (display_name is
+		// capped at 50), so it is proven on the name builder itself.
+		over := strings.Repeat("é", 95) + "🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟"
+		got := app.DefaultHouseholdName(over)
+		if want := string([]rune(over + "'s household")[:100]); got != want {
+			t.Errorf("DefaultHouseholdName(105 runes): got %q (%d runes), want %q", got, len([]rune(got)), want)
+		}
+		if n := len([]rune(got)); n != 100 {
+			t.Errorf("DefaultHouseholdName: got %d runes, want 100", n)
+		}
+	})
+
+	t.Run("fault injection rolls back claim and issues no refresh token", func(t *testing.T) {
+		// Install trigger that fails insertion into households if name starts with FAULT
+		_, err := pool.Exec(ctx, `
+			CREATE OR REPLACE FUNCTION fail_fault_household() RETURNS trigger AS $$
+			BEGIN
+				IF NEW.name LIKE 'FAULT%' THEN
+					RAISE EXCEPTION 'injected fault on household creation';
+				END IF;
+				RETURN NEW;
+			END;
+			$$ LANGUAGE plpgsql;
+
+			DROP TRIGGER IF EXISTS trg_fault_household ON households;
+			CREATE TRIGGER trg_fault_household BEFORE INSERT ON households
+			FOR EACH ROW EXECUTE FUNCTION fail_fault_household();
+		`)
+		if err != nil {
+			t.Fatalf("create trigger: %v", err)
+		}
+		t.Cleanup(func() {
+			_, _ = pool.Exec(context.Background(), `
+				DROP TRIGGER IF EXISTS trg_fault_household ON households;
+				DROP FUNCTION IF EXISTS fail_fault_household();
+			`)
+		})
+
+		email := uniqueEmail("fault")
+		const password = "correct-password-123"
+		if err := svc.Register(ctx, email, password, "FAULT_USER"); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		t.Cleanup(func() { _, _ = pool.Exec(ctx, "DELETE FROM users WHERE email = $1", email) })
+
+		var userID uuid.UUID
+		if err := pool.QueryRow(ctx, "UPDATE users SET email_verified = true, household_provisioned_at = NULL WHERE email = $1 RETURNING id", email).Scan(&userID); err != nil {
+			t.Fatalf("mark verified: %v", err)
+		}
+
+		// Login should fail because provisionFirstHousehold fails
+		_, err = svc.Login(ctx, email, password, app.DeviceMeta{})
+		if err == nil {
+			t.Fatal("expected Login to fail on injected provisioning fault, but got nil")
+		}
+
+		// Verify household_provisioned_at is still NULL
+		var provAt pgtype.Timestamptz
+		if err := pool.QueryRow(ctx, "SELECT household_provisioned_at FROM users WHERE id = $1", userID).Scan(&provAt); err != nil {
+			t.Fatalf("query household_provisioned_at: %v", err)
+		}
+		if provAt.Valid {
+			t.Errorf("expected household_provisioned_at to be NULL after rollback, got %v", provAt.Time)
+		}
+
+		// Verify no refresh token was issued
+		var tokenCount int
+		if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM refresh_tokens WHERE user_id = $1", userID).Scan(&tokenCount); err != nil {
+			t.Fatalf("query refresh tokens: %v", err)
+		}
+		if tokenCount != 0 {
+			t.Errorf("expected 0 refresh tokens issued on failure, got %d", tokenCount)
+		}
+	})
+
+	t.Run("backfill prevents auto-provisioning existing members", func(t *testing.T) {
+		email := uniqueEmail("backfill")
+		const password = "correct-password-123"
+		if err := svc.Register(ctx, email, password, "BackfillUser"); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		t.Cleanup(func() { _, _ = pool.Exec(ctx, "DELETE FROM users WHERE email = $1", email) })
+
+		var userID uuid.UUID
+		if err := pool.QueryRow(ctx, "UPDATE users SET email_verified = true, household_provisioned_at = NULL WHERE email = $1 RETURNING id", email).Scan(&userID); err != nil {
+			t.Fatalf("mark verified: %v", err)
+		}
+
+		// Create an existing household directly
+		hhID, _ := uuid.NewV7()
+		if _, err := pool.Exec(ctx, "INSERT INTO households (id, name, timezone) VALUES ($1, $2, 'America/New_York')", hhID, "Original Household"); err != nil {
+			t.Fatalf("insert household: %v", err)
+		}
+		t.Cleanup(func() { _, _ = pool.Exec(context.Background(), "DELETE FROM households WHERE id = $1", hhID) })
+		if _, err := pool.Exec(ctx, "INSERT INTO household_members (household_id, user_id, role) VALUES ($1, $2, 'admin')", hhID, userID); err != nil {
+			t.Fatalf("insert member: %v", err)
+		}
+
+		// Run 000009 backfill query
+		if _, err := pool.Exec(ctx, "UPDATE users SET household_provisioned_at = NOW() WHERE id IN (SELECT user_id FROM household_members)"); err != nil {
+			t.Fatalf("run backfill: %v", err)
+		}
+
+		// Login
+		if _, err := svc.Login(ctx, email, password, app.DeviceMeta{}); err != nil {
+			t.Fatalf("Login: %v", err)
+		}
+
+		// Assert user still has exactly their 1 original household
+		var hhCount int
+		var hhName string
+		if err := pool.QueryRow(ctx, `
+			SELECT COUNT(*), COALESCE(MAX(h.name), '')
+			FROM household_members m
+			JOIN households h ON h.id = m.household_id
+			WHERE m.user_id = $1
+		`, userID).Scan(&hhCount, &hhName); err != nil {
+			t.Fatalf("query households: %v", err)
+		}
+		if hhCount != 1 || hhName != "Original Household" {
+			t.Errorf("expected 1 original household, got count=%d name=%q", hhCount, hhName)
+		}
+	})
+}

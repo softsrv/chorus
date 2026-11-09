@@ -310,6 +310,18 @@ func TestGoogle_NewUserSignIn(t *testing.T) {
 	if len(sessions.Items) != 1 || sessions.Items[0].DeviceName != "Sam's Laptop" || !sessions.Items[0].Current {
 		t.Errorf("sessions = %+v, want exactly one current session named \"Sam's Laptop\"", sessions.Items)
 	}
+
+	var households struct {
+		Items []struct {
+			ID   uuid.UUID `json:"id"`
+			Name string    `json:"name"`
+			Role string    `json:"role"`
+		} `json:"items"`
+	}
+	s.expect(http.StatusOK, "GET", "/api/v1/households", tok.AccessToken, nil, &households)
+	if len(households.Items) != 1 || households.Items[0].Role != "admin" {
+		t.Errorf("expected 1 admin household after Google sign-in, got %+v", households.Items)
+	}
 }
 
 // CLM-3: a hand-off code works once and only before it expires.
