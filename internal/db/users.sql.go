@@ -238,6 +238,17 @@ func (q *Queries) LockAccount(ctx context.Context, arg LockAccountParams) error 
 	return err
 }
 
+const lockUserProvisioning = `-- name: LockUserProvisioning :one
+SELECT household_provisioned_at FROM users WHERE id = $1 FOR UPDATE
+`
+
+func (q *Queries) LockUserProvisioning(ctx context.Context, id uuid.UUID) (pgtype.Timestamptz, error) {
+	row := q.db.QueryRow(ctx, lockUserProvisioning, id)
+	var household_provisioned_at pgtype.Timestamptz
+	err := row.Scan(&household_provisioned_at)
+	return household_provisioned_at, err
+}
+
 const releaseHouseholdProvisioning = `-- name: ReleaseHouseholdProvisioning :exec
 UPDATE users SET household_provisioned_at = NULL, updated_at = NOW()
 WHERE id = $1

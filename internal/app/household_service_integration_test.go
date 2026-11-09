@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/softsrv/chorus/internal/app"
 	"github.com/softsrv/chorus/internal/db"
@@ -32,7 +33,8 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 
 	alice := registerVerified(t, pool, authSvc, mailer, "alice").User.ID
 	mallory := registerVerified(t, pool, authSvc, mailer, "mallory").User.ID
-	bob := registerVerified(t, pool, authSvc, mailer, "bob").User.ID // member, no Google connection
+	bobRes := registerVerified(t, pool, authSvc, mailer, "bob")
+	bob := bobRes.User.ID // member, no Google connection
 
 	// Alice connects Google; the stand-in knows only her access token.
 	const aliceAccess, aliceRefresh = "alice-google-access-secret", "alice-google-refresh-secret"
@@ -249,6 +251,146 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	}
 	if reqs := google.recorded()[requestsBefore:]; patches(reqs) != 1 || reqs[len(reqs)-1].Auth != aliceAccess {
 		t.Errorf("alice's tag requests = %+v, want one PATCH with alice's token", reqs)
+	}
+
+	// CLM-3: Household A (Alice) and Household B (Bob), each with family members,
+	// quests (one claimed, one pending approval), rewards, and points.
+	// Alice also adds a claimed quest and points to Household A.
+	aliceClaimed, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "Dishes Claimed", Points: num(10), RepeatDays: num(1)}, "")
+	if err != nil {
+		t.Fatalf("Create alice claimed quest: %v", err)
+	}
+	if _, err := quests.Accept(ctx, alice, h.ID, aliceClaimed.ID, asAlice); err != nil {
+		t.Fatalf("Accept alice claimed quest: %v", err)
+	}
+	if _, err := q.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: h.ID, ID: aliceMember.ID, Delta: 10}); err != nil {
+		t.Fatalf("Add points to alice member: %v", err)
+	}
+
+	// Seed Household B for Bob
+	bh, err := households.Create(ctx, bob, app.HouseholdInput{Name: "Bob Family", Timezone: "America/New_York"})
+	if err != nil {
+		t.Fatalf("Create household B: %v", err)
+	}
+	bobMember, err := familySvc.Create(ctx, bob, bh.ID, app.FamilyMemberInput{Name: "Bob Member", PIN: "4321"}, "")
+	if err != nil {
+		t.Fatalf("Create bob member: %v", err)
+	}
+	if _, err := q.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: bh.ID, ID: bobMember.ID, Delta: 25}); err != nil {
+		t.Fatalf("Add points to bob member: %v", err)
+	}
+	bobClaimed, err := quests.Create(ctx, bob, bh.ID, app.QuestInput{Name: "Bob Claimed", Points: num(15), RepeatDays: num(1)}, "")
+	if err != nil {
+		t.Fatalf("Create bob claimed quest: %v", err)
+	}
+	asBob := app.MemberAction{MemberID: bobMember.ID, PIN: "4321"}
+	if _, err := quests.Accept(ctx, bob, bh.ID, bobClaimed.ID, asBob); err != nil {
+		t.Fatalf("Accept bob claimed quest: %v", err)
+	}
+	bobPending, err := quests.Create(ctx, bob, bh.ID, app.QuestInput{Name: "Bob Pending", Points: num(20), RepeatDays: num(1)}, "")
+	if err != nil {
+		t.Fatalf("Create bob pending quest: %v", err)
+	}
+	if _, err := quests.Accept(ctx, bob, bh.ID, bobPending.ID, asBob); err != nil {
+		t.Fatalf("Accept bob pending quest: %v", err)
+	}
+	if _, err := quests.MarkDone(ctx, bob, bh.ID, bobPending.ID, asBob); err != nil {
+		t.Fatalf("MarkDone bob pending quest: %v", err)
+	}
+	bobReward, err := rewards.Create(ctx, bob, bh.ID, app.RewardInput{Description: "Ice cream", Cost: num(100)}, "")
+	if err != nil {
+		t.Fatalf("Create bob reward: %v", err)
+	}
+
+	// Non-member (Mallory) gets ErrNotFound deleting household A, and A stays intact.
+	if err := households.Delete(ctx, mallory, h.ID); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("mallory delete household A: expected ErrNotFound, got %v", err)
+	}
+	if _, err := households.Get(ctx, alice, h.ID); err != nil {
+		t.Errorf("household A missing after mallory delete attempt: %v", err)
+	}
+
+	// Capture Bob's household_provisioned_at before
+	var bobProvBefore pgtype.Timestamptz
+	if err := pool.QueryRow(ctx, "SELECT household_provisioned_at FROM users WHERE id = $1", bob).Scan(&bobProvBefore); err != nil {
+		t.Fatalf("query bob household_provisioned_at before: %v", err)
+	}
+
+	// Lock Alice's user row in a manual tx (mirroring an in-flight delete on Alice's row),
+	// and assert Bob can sign in without blocking.
+	aliceDelTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin alice delete tx: %v", err)
+	}
+	defer aliceDelTx.Rollback(ctx) //nolint:errcheck
+	if _, err := aliceDelTx.Exec(ctx, "SELECT household_provisioned_at FROM users WHERE id = $1 FOR UPDATE", alice); err != nil {
+		t.Fatalf("lock alice row: %v", err)
+	}
+
+	bobLoginDone := make(chan error, 1)
+	go func() {
+		_, lErr := authSvc.Login(ctx, bobRes.User.Email, "correct-password-123", app.DeviceMeta{})
+		bobLoginDone <- lErr
+	}()
+	select {
+	case lErr := <-bobLoginDone:
+		if lErr != nil {
+			t.Fatalf("bob sign-in failed while alice delete tx open: %v", lErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("bob sign-in blocked by alice delete tx lock")
+	}
+	_ = aliceDelTx.Rollback(ctx)
+
+	// Alice deletes household A via HouseholdService.Delete
+	if err := households.Delete(ctx, alice, h.ID); err != nil {
+		t.Fatalf("alice Delete household A: %v", err)
+	}
+
+	// Assert A's household, family_members, household_quests and household_rewards are gone.
+	var count int
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM households WHERE id = $1", h.ID).Scan(&count); err != nil || count != 0 {
+		t.Errorf("household A row count = %d, want 0", count)
+	}
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM family_members WHERE household_id = $1", h.ID).Scan(&count); err != nil || count != 0 {
+		t.Errorf("household A family_members count = %d, want 0", count)
+	}
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM household_quests WHERE household_id = $1", h.ID).Scan(&count); err != nil || count != 0 {
+		t.Errorf("household A household_quests count = %d, want 0", count)
+	}
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM household_rewards WHERE household_id = $1", h.ID).Scan(&count); err != nil || count != 0 {
+		t.Errorf("household A household_rewards count = %d, want 0", count)
+	}
+
+	// Assert B's household, members, quests (including claimed and pending states), rewards and points are unchanged.
+	gotBH, err := households.Get(ctx, bob, bh.ID)
+	if err != nil || gotBH.ID != bh.ID || gotBH.Name != "Bob Family" {
+		t.Errorf("household B changed or missing: %+v, %v", gotBH, err)
+	}
+	gotBobMember, err := familySvc.Get(ctx, bob, bh.ID, bobMember.ID)
+	if err != nil || gotBobMember.ID != bobMember.ID || gotBobMember.Name != "Bob Member" || gotBobMember.Points != 25 {
+		t.Errorf("bob member changed or points modified: %+v, %v", gotBobMember, err)
+	}
+	gotBobClaimed, err := quests.Get(ctx, bob, bh.ID, bobClaimed.ID)
+	if err != nil || gotBobClaimed.ClaimedBy == nil || *gotBobClaimed.ClaimedBy != bobMember.ID || gotBobClaimed.DoneAt.Valid {
+		t.Errorf("bob claimed quest changed: %+v, %v", gotBobClaimed, err)
+	}
+	gotBobPending, err := quests.Get(ctx, bob, bh.ID, bobPending.ID)
+	if err != nil || gotBobPending.ClaimedBy == nil || *gotBobPending.ClaimedBy != bobMember.ID || !gotBobPending.DoneAt.Valid {
+		t.Errorf("bob pending quest changed: %+v, %v", gotBobPending, err)
+	}
+	gotBobReward, err := rewards.Get(ctx, bob, bh.ID, bobReward.ID)
+	if err != nil || gotBobReward.ID != bobReward.ID || gotBobReward.Description != "Ice cream" || gotBobReward.Cost != 100 {
+		t.Errorf("bob reward changed: %+v, %v", gotBobReward, err)
+	}
+
+	// Assert Bob's household_provisioned_at is unchanged.
+	var bobProvAfter pgtype.Timestamptz
+	if err := pool.QueryRow(ctx, "SELECT household_provisioned_at FROM users WHERE id = $1", bob).Scan(&bobProvAfter); err != nil {
+		t.Fatalf("query bob household_provisioned_at after: %v", err)
+	}
+	if bobProvBefore.Time.Unix() != bobProvAfter.Time.Unix() || bobProvBefore.Valid != bobProvAfter.Valid {
+		t.Errorf("bob household_provisioned_at changed: before %v, after %v", bobProvBefore, bobProvAfter)
 	}
 }
 
