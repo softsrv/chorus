@@ -494,7 +494,7 @@ function householdPanel(h) {
   }
 
   const manage = managementVisible();
-  const tabs = [['quests', 'Quests'], manage && ['family', 'Family'], ['events', 'Calendar']].filter(Boolean);
+  const tabs = [['quests', 'Quests'], ['rewards', 'Rewards'], manage && ['family', 'Family'], ['events', 'Calendar']].filter(Boolean);
   if (!tabs.some(([id]) => id === tab)) tab = 'quests';
 
   const header = el('div', { class: 'flex flex-wrap items-center gap-2' },
@@ -514,7 +514,7 @@ function householdPanel(h) {
       onclick: (e) => { e.preventDefault(); tab = id; renderHome(); },
     })));
 
-  const loaders = { quests: questsTab, family: familyTab, events: eventsTab };
+  const loaders = { quests: questsTab, rewards: rewardsTab, family: familyTab, events: eventsTab };
   (loaders[tab] || questsTab)(h, $content).catch((err) => showError($content, err));
   return el('div', { class: 'space-y-4 min-w-0' }, header, memberBar(h), tabBar, $content);
 }
@@ -861,6 +861,102 @@ function manageQuestsCard(h, quests, library, page, rerender) {
     el('div', { class: 'space-y-2' },
       el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Quest Library' }),
       el('ul', {}, libraryRows)));
+}
+
+// ── Rewards ───────────────────────────────────────────────────────────────────
+
+// rewardCost turns the cost input into the request value without judging it: a
+// numeric string is sent as a number, anything else (blank, "abc") as typed, so
+// the server decides what is invalid and reports it on the cost field.
+function rewardCost(val) {
+  if (String(val).trim() === '') return val;
+  const n = Number(val);
+  return Number.isNaN(n) ? val : n;
+}
+
+// rewardsTab lists the household's rewards as description and cost. Rewards are
+// a list only: no control here changes anyone's points. Add, edit, delete and
+// library Add show while management is unlocked, and every write carries
+// X-Admin-PIN (adminRequest).
+async function rewardsTab(h, $root) {
+  const rerender = () => { $root.replaceChildren(); rewardsTab(h, $root).catch((err) => showError($root, err)); };
+  const visible = managementVisible();
+  const unlocked = visible && managementUnlocked();
+  const base = `/households/${h.id}/rewards`;
+
+  const [page, library] = await Promise.all([
+    api('GET', base),
+    visible ? api('GET', '/reward-library') : { items: [] },
+  ]);
+  const rewards = page.items || [];
+  const costText = (r) => `${r.cost} points`;
+  const toBody = (v) => ({ description: v.description, cost: rewardCost(v.cost) });
+  const rewardFields = (r = {}) => [
+    { name: 'description', label: 'Description', required: true, value: r.description },
+    { name: 'cost', label: 'Cost (points)', type: 'number', value: r.cost ?? '' },
+  ];
+
+  const rows = rewards.map((r) => {
+    const $row = el('li', { class: 'flex flex-wrap items-center gap-2 py-2 border-b border-base-300' },
+      el('div', { class: 'flex-1 min-w-0' },
+        el('div', { class: 'font-medium', text: r.description }),
+        el('div', { class: 'text-xs opacity-60', text: costText(r) })),
+      unlocked && el('button', {
+        class: 'btn btn-ghost btn-xs', text: 'Edit',
+        onclick: () => $row.replaceWith(el('li', { class: 'py-2' }, form({
+          fields: rewardFields(r), submit: 'Save', inline: true,
+          onSubmit: async (v) => { await adminRequest('PUT', `${base}/${r.id}`, toBody(v)); rerender(); },
+        }))),
+      }),
+      unlocked && el('button', {
+        class: 'btn btn-ghost btn-xs text-error', text: 'Delete',
+        onclick: confirmClick('Sure?', async () => { await adminRequest('DELETE', `${base}/${r.id}`); rerender(); }),
+      }));
+    return $row;
+  });
+
+  const addForm = unlocked && form({
+    fields: rewardFields(), submit: 'Add reward', inline: true,
+    onSubmit: async (v) => { await adminRequest('POST', base, toBody(v)); rerender(); },
+  });
+
+  // In the administrator's view with the admin PIN set but not entered, the
+  // list is read-only until the PIN unlocks management.
+  const unlockForm = visible && !unlocked && pinForm({
+    label: 'Admin PIN',
+    submit: 'Unlock',
+    onPin: async (pin) => {
+      await api('POST', `/households/${h.id}/admin-pin/verify`, { pin });
+      adminPin = pin;
+      rerender();
+    },
+  });
+
+  const libraryRows = (library.items || []).map((item) => el('li', { class: 'flex items-center justify-between py-1.5 border-b border-base-300 text-sm' },
+    el('div', { class: 'flex-1 min-w-0' },
+      el('span', { class: 'font-medium', text: item.description }),
+      el('span', { class: 'text-xs opacity-60 ml-2', text: costText(item) })),
+    unlocked && el('button', {
+      class: 'btn btn-ghost btn-xs', text: 'Add',
+      onclick: action(async () => {
+        await adminRequest('POST', `${base}/from-library`, { library_id: item.id });
+        rerender();
+      }),
+    })));
+
+  $root.replaceChildren(card(null,
+    el('h3', { class: 'font-semibold', text: 'Rewards' }),
+    rows.length
+      ? el('ul', {}, rows)
+      : el('p', { class: 'opacity-70 py-2', text: 'No rewards yet. Add one below or browse the library for ideas.' }),
+    unlockForm && el('p', { class: 'text-sm opacity-70', text: 'Enter the admin PIN to manage rewards.' }),
+    unlockForm,
+    addForm && el('div', { class: 'divider my-0' }),
+    addForm,
+    visible && el('div', { class: 'divider my-0' }),
+    visible && el('div', { class: 'space-y-2' },
+      el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Reward Library' }),
+      el('ul', {}, libraryRows))));
 }
 
 // ── Family ────────────────────────────────────────────────────────────────────
