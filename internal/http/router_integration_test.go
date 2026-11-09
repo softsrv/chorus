@@ -1130,6 +1130,77 @@ func TestAPI_PINRateLimit(t *testing.T) {
 	}
 }
 
+func TestAPI_QuestPINRateLimit(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set; skipping integration test")
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	q := db.New(pool)
+	mail := &mailbox{text: map[string]string{}}
+	authSvc := app.NewAuthService(q, pool, mail, app.AuthServiceConfig{
+		JWTSecret: secret, AccessExpiry: 15 * time.Minute, RefreshExpiry: 24 * time.Hour,
+		BCryptCost: 10, PasswordMinLen: 8, AppBaseURL: "http://chorus.test", AppName: "Chorus",
+	})
+	t.Cleanup(authSvc.Shutdown)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	// Small PIN limit: 2 setup calls (member create + quest create, both PIN-limited) + 3 wrong guesses.
+	const setupCalls, wrongGuesses = 2, 3
+	handler := internalhttp.NewRouter(ctx, internalhttp.RouterConfig{
+		Queries: q, Pool: pool, AuthSvc: authSvc,
+		UserSvc:      app.NewUserService(q),
+		HouseholdSvc: app.NewHouseholdService(q, pool),
+		FamilySvc:    app.NewFamilyService(q, 10),
+		QuestSvc:     app.NewQuestService(q, pool),
+		JWTSecret:    secret,
+		PINRateLimit: setupCalls + wrongGuesses,
+	})
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	ts := &testServer{t: t, srv: srv, mail: mail, pool: pool}
+
+	u := ts.signUp("questrluser")
+	var h struct{ ID uuid.UUID }
+	ts.expect(http.StatusCreated, "POST", "/api/v1/households", u.AccessToken,
+		map[string]string{"name": "Quest RL Home", "timezone": "UTC"}, &h)
+
+	var m struct{ ID uuid.UUID }
+	ts.expect(http.StatusCreated, "POST", "/api/v1/households/"+h.ID.String()+"/family-members", u.AccessToken,
+		map[string]string{"name": "Kid", "pin": "1234"}, &m)
+
+	var quest struct{ ID uuid.UUID }
+	ts.expect(http.StatusCreated, "POST", "/api/v1/households/"+h.ID.String()+"/quests", u.AccessToken,
+		map[string]string{"name": "Mow Lawn"}, &quest)
+
+	ap := "/api/v1/households/" + h.ID.String() + "/quests/" + quest.ID.String() + "/accept"
+
+	// Wrong guesses within the limit are evaluated: 403 wrong_pin.
+	for i := 0; i < wrongGuesses; i++ {
+		var wrongPin apiError
+		ts.expect(http.StatusForbidden, "POST", ap, u.AccessToken,
+			map[string]any{"member_id": m.ID, "pin": "0000"}, &wrongPin)
+		if wrongPin.Error.Code != "wrong_pin" {
+			t.Errorf("expected wrong_pin, got %q", wrongPin.Error.Code)
+		}
+	}
+
+	// Past the limit: 429 Too Many Requests, even with the correct PIN.
+	var rlErr apiError
+	ts.expect(http.StatusTooManyRequests, "POST", ap, u.AccessToken,
+		map[string]any{"member_id": m.ID, "pin": "1234"}, &rlErr)
+	if rlErr.Error.Code != "rate_limited" {
+		t.Errorf("expected rate_limited, got %q", rlErr.Error.Code)
+	}
+}
+
 func TestAPI_RemovedInviteAndMemberRoutes404(t *testing.T) {
 	s := newTestServer(t)
 	u := s.signUp("removedroutes")

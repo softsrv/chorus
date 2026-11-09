@@ -5,6 +5,7 @@ package app_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -529,6 +530,83 @@ func TestIntegration_QuestAccept(t *testing.T) {
 	}
 	if got, err := quests.Get(ctx, alice, h.ID, quest.ID); err != nil || got.ClaimedBy == nil || *got.ClaimedBy != memberA.ID {
 		t.Errorf("quest after second accept: %+v %v", got, err)
+	}
+}
+
+// TestIntegration_QuestAcceptConcurrent: concurrent accepts of one available
+// quest by different members result in exactly one success (nil error) and N-1
+// ErrQuestTaken errors, and the quest is held by the winner.
+func TestIntegration_QuestAcceptConcurrent(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	households := app.NewHouseholdService(q, pool)
+	quests := app.NewQuestService(q, pool)
+	familySvc := app.NewFamilyService(q, 10)
+	ctx := context.Background()
+
+	alice := registerVerified(t, pool, authSvc, mailer, "questacceptconc").User.ID
+	h, err := households.Create(ctx, alice, app.HouseholdInput{Name: "Accept Conc Family"})
+	if err != nil {
+		t.Fatalf("create household: %v", err)
+	}
+
+	const n = 8
+	members := make([]db.FamilyMember, n)
+	for i := range n {
+		m, err := familySvc.Create(ctx, alice, h.ID, app.FamilyMemberInput{Name: fmt.Sprintf("Member %d", i)}, "")
+		if err != nil {
+			t.Fatalf("create member %d: %v", i, err)
+		}
+		members[i] = m
+	}
+
+	quest, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "Feed the cat", Points: num(5), Notes: "Half a scoop"}, "")
+	if err != nil {
+		t.Fatalf("create quest: %v", err)
+	}
+
+	start := make(chan struct{})
+	type result struct {
+		memberID uuid.UUID
+		quest    db.HouseholdQuest
+		err      error
+	}
+	results := make(chan result, n)
+	for i := range n {
+		go func(m db.FamilyMember) {
+			<-start
+			qRow, err := quests.Accept(ctx, alice, h.ID, quest.ID, app.MemberAction{MemberID: m.ID})
+			results <- result{memberID: m.ID, quest: qRow, err: err}
+		}(members[i])
+	}
+	close(start)
+
+	var wins, taken int
+	var winnerID uuid.UUID
+	for range n {
+		r := <-results
+		switch {
+		case r.err == nil:
+			wins++
+			winnerID = r.memberID
+		case errors.Is(r.err, app.ErrQuestTaken):
+			taken++
+		default:
+			t.Errorf("concurrent accept: unexpected error %v", r.err)
+		}
+	}
+	if wins != 1 || taken != n-1 {
+		t.Fatalf("concurrent accepts: %d won, %d taken; want 1 and %d", wins, taken, n-1)
+	}
+
+	got, err := quests.Get(ctx, alice, h.ID, quest.ID)
+	if err != nil {
+		t.Fatalf("get quest: %v", err)
+	}
+	if got.ClaimedBy == nil || *got.ClaimedBy != winnerID {
+		t.Errorf("quest claimed_by: got %v, want winner %v", got.ClaimedBy, winnerID)
 	}
 }
 
