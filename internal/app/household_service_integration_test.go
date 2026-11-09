@@ -27,7 +27,7 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
 	quests := app.NewQuestService(q, pool)
-	familySvc := app.NewFamilyService(q, 10)
+	familySvc := app.NewFamilyService(q, pool, 10)
 	rewards := app.NewRewardService(q)
 	ctx := context.Background()
 

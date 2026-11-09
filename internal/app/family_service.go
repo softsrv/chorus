@@ -43,16 +43,19 @@ type RenameMemberInput struct {
 // FamilyService manages family members within a household.
 type FamilyService struct {
 	q          *db.Queries
+	pool       pgxBeginner
 	bcryptCost int
 }
 
-// NewFamilyService constructs a FamilyService.
-func NewFamilyService(q *db.Queries, bcryptCost int) *FamilyService {
+// NewFamilyService constructs a FamilyService. pool runs the transaction that
+// removes a member.
+func NewFamilyService(q *db.Queries, pool pgxBeginner, bcryptCost int) *FamilyService {
 	if bcryptCost < bcrypt.MinCost || bcryptCost > bcrypt.MaxCost {
 		bcryptCost = 12
 	}
 	return &FamilyService{
 		q:          q,
+		pool:       pool,
 		bcryptCost: bcryptCost,
 	}
 }
@@ -173,12 +176,34 @@ func (s *FamilyService) Rename(ctx context.Context, userID, householdID, memberI
 
 // Remove deletes a family member from the household. Requires admin role and admin PIN if set.
 // Deleting a family member never deletes any users row.
+//
+// One transaction locks the member row, has the quest code hand back what the
+// member held, and deletes the row: either all of it happens or none does.
+// The row lock makes a concurrent Accept or MarkDone by this member wait, so
+// it either lands before the lock (and is handed back here) or fails after.
 func (s *FamilyService) Remove(ctx context.Context, userID, householdID, memberID uuid.UUID, adminPin string) error {
 	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
 		return err
 	}
 
-	rows, err := s.q.DeleteFamilyMember(ctx, db.DeleteFamilyMemberParams{
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin remove member: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	qtx := s.q.WithTx(tx)
+
+	ids := db.LockFamilyMemberParams{HouseholdID: householdID, ID: memberID}
+	if _, err := qtx.LockFamilyMember(ctx, ids); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("lock family member: %w", err)
+	}
+	if err := releaseMemberQuests(ctx, qtx, householdID, memberID); err != nil {
+		return err
+	}
+	rows, err := qtx.DeleteFamilyMember(ctx, db.DeleteFamilyMemberParams{
 		HouseholdID: householdID,
 		ID:          memberID,
 	})
@@ -187,6 +212,9 @@ func (s *FamilyService) Remove(ctx context.Context, userID, householdID, memberI
 	}
 	if rows == 0 {
 		return ErrNotFound
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit remove member: %w", err)
 	}
 	return nil
 }

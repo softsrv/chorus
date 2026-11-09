@@ -56,6 +56,17 @@ func NewQuestService(q *db.Queries, pool pgxBeginner) *QuestService {
 	return &QuestService{q: q, pool: pool}
 }
 
+// releaseMemberQuests returns every quest the member holds, one awaiting
+// approval included, to the household's pool. It is the one place that clears
+// a quest's holder when a member goes; qtx is the caller's transaction, so the
+// release commits or rolls back with the removal. No points move.
+func releaseMemberQuests(ctx context.Context, qtx *db.Queries, householdID, memberID uuid.UUID) error {
+	if err := qtx.ReleaseMemberQuests(ctx, db.ReleaseMemberQuestsParams{HouseholdID: householdID, MemberID: &memberID}); err != nil {
+		return fmt.Errorf("release member quests: %w", err)
+	}
+	return nil
+}
+
 // List returns up to p.Limit quests of the household, and whether more remain
 // after them.
 func (s *QuestService) List(ctx context.Context, userID, householdID uuid.UUID, p QuestPage) ([]db.HouseholdQuest, bool, error) {

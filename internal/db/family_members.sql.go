@@ -87,13 +87,8 @@ func (q *Queries) DeleteAdminPin(ctx context.Context, householdID uuid.UUID) (in
 }
 
 const deleteFamilyMember = `-- name: DeleteFamilyMember :execrows
-WITH released AS (
-    UPDATE household_quests
-    SET claimed_by = NULL, claimed_at = NULL, done_at = NULL, updated_at = NOW()
-    WHERE household_id = $1 AND claimed_by = $2
-)
-DELETE FROM family_members fm
-WHERE fm.household_id = $1 AND fm.id = $2
+DELETE FROM family_members
+WHERE household_id = $1 AND id = $2
 `
 
 type DeleteFamilyMemberParams struct {
@@ -101,9 +96,6 @@ type DeleteFamilyMemberParams struct {
 	ID          uuid.UUID `json:"id"`
 }
 
-// Releases the member's quests in the same statement, so a quest waiting for
-// approval (done_at set) returns to the pool instead of tripping the
-// done_at-needs-a-holder CHECK when the foreign key clears claimed_by.
 func (q *Queries) DeleteFamilyMember(ctx context.Context, arg DeleteFamilyMemberParams) (int64, error) {
 	result, err := q.db.Exec(ctx, deleteFamilyMember, arg.HouseholdID, arg.ID)
 	if err != nil {
@@ -191,6 +183,27 @@ func (q *Queries) ListFamilyMembers(ctx context.Context, householdID uuid.UUID) 
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockFamilyMember = `-- name: LockFamilyMember :one
+SELECT id FROM family_members
+WHERE household_id = $1 AND id = $2
+FOR UPDATE
+`
+
+type LockFamilyMemberParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	ID          uuid.UUID `json:"id"`
+}
+
+// Locks the member row for the rest of the transaction. The lock conflicts
+// with the key-share lock a foreign-key check takes, so rows that would point
+// at this member wait until the transaction ends.
+func (q *Queries) LockFamilyMember(ctx context.Context, arg LockFamilyMemberParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, lockFamilyMember, arg.HouseholdID, arg.ID)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
 }
 
 const renameFamilyMember = `-- name: RenameFamilyMember :one

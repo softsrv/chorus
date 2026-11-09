@@ -6,9 +6,12 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/softsrv/chorus/internal/app"
 	"github.com/softsrv/chorus/internal/db"
@@ -20,7 +23,7 @@ func TestIntegration_FamilyMemberLifecycle(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, 10)
+	familySvc := app.NewFamilyService(q, pool, 10)
 	ctx := context.Background()
 
 	admin := registerVerified(t, pool, authSvc, mailer, "familyadmin").User.ID
@@ -147,7 +150,7 @@ func TestIntegration_FamilyMemberValidation(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, 10)
+	familySvc := app.NewFamilyService(q, pool, 10)
 	ctx := context.Background()
 
 	admin := registerVerified(t, pool, authSvc, mailer, "valadmin").User.ID
@@ -201,7 +204,7 @@ func TestIntegration_FamilyMemberIsolation(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, 10)
+	familySvc := app.NewFamilyService(q, pool, 10)
 	ctx := context.Background()
 
 	admin := registerVerified(t, pool, authSvc, mailer, "aliceadmin").User.ID
@@ -248,7 +251,7 @@ func TestIntegration_VerifyMemberPin(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, 10)
+	familySvc := app.NewFamilyService(q, pool, 10)
 	ctx := context.Background()
 
 	admin := registerVerified(t, pool, authSvc, mailer, "pinadmin").User.ID
@@ -335,7 +338,7 @@ func TestIntegration_AdminPin(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, 10)
+	familySvc := app.NewFamilyService(q, pool, 10)
 	ctx := context.Background()
 
 	admin := registerVerified(t, pool, authSvc, mailer, "adminpinuser").User.ID
@@ -495,7 +498,7 @@ func TestIntegration_RemoveMemberHoldingQuests(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, 10)
+	familySvc := app.NewFamilyService(q, pool, 10)
 	quests := app.NewQuestService(q, pool)
 	ctx := context.Background()
 
@@ -534,14 +537,43 @@ func TestIntegration_RemoveMemberHoldingQuests(t *testing.T) {
 	if _, err := quests.MarkDone(ctx, admin, h.ID, pending.ID, annAct); err != nil {
 		t.Fatalf("Ann mark done: %v", err)
 	}
-	if _, err := quests.Accept(ctx, admin, h.ID, others.ID, app.MemberAction{MemberID: ben.ID}); err != nil {
+	// Ben earns points first, so a stray credit to him would show.
+	warmup, err := quests.Create(ctx, admin, h.ID, app.QuestInput{Name: "Warmup", Points: app.NumberField{Set: true, Value: 3}}, "")
+	if err != nil {
+		t.Fatalf("create quest: %v", err)
+	}
+	benAct := app.MemberAction{MemberID: ben.ID}
+	if _, err := quests.Accept(ctx, admin, h.ID, warmup.ID, benAct); err != nil {
+		t.Fatalf("Ben accept warmup: %v", err)
+	}
+	if _, err := quests.MarkDone(ctx, admin, h.ID, warmup.ID, benAct); err != nil {
+		t.Fatalf("Ben mark warmup done: %v", err)
+	}
+	if _, _, err := quests.Approve(ctx, admin, h.ID, warmup.ID, ""); err != nil {
+		t.Fatalf("approve warmup: %v", err)
+	}
+	if _, err := quests.Accept(ctx, admin, h.ID, others.ID, benAct); err != nil {
 		t.Fatalf("Ben accept: %v", err)
+	}
+	before, err := familySvc.List(ctx, admin, h.ID)
+	if err != nil {
+		t.Fatalf("list members: %v", err)
+	}
+	pointsBefore := map[uuid.UUID]int32{}
+	for _, m := range before {
+		pointsBefore[m.ID] = m.Points
+	}
+	if pointsBefore[ben.ID] != 3 {
+		t.Fatalf("Ben's points before removal = %d, want 3", pointsBefore[ben.ID])
 	}
 
 	if err := familySvc.Remove(ctx, admin, h.ID, ann.ID, ""); err != nil {
 		t.Fatalf("Remove member holding quests: %v", err)
 	}
 
+	if _, err := familySvc.Get(ctx, admin, h.ID, ann.ID); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("removed member still readable: %v", err)
+	}
 	for _, id := range []uuid.UUID{pending.ID, accepted.ID} {
 		got, err := quests.Get(ctx, admin, h.ID, id)
 		if err != nil {
@@ -550,6 +582,21 @@ func TestIntegration_RemoveMemberHoldingQuests(t *testing.T) {
 		if got.ClaimedBy != nil || got.DoneAt.Valid || got.ClaimedAt.Valid {
 			t.Errorf("quest %s not released: %+v", got.Name, got)
 		}
+		if !app.QuestAvailable(got, time.Now()) {
+			t.Errorf("released quest %s is not available: %+v", got.Name, got)
+		}
+	}
+	after, err := familySvc.List(ctx, admin, h.ID)
+	if err != nil {
+		t.Fatalf("list members after: %v", err)
+	}
+	if len(after) != len(before)-1 {
+		t.Errorf("members after removal = %d, want %d", len(after), len(before)-1)
+	}
+	for _, m := range after {
+		if want, ok := pointsBefore[m.ID]; !ok || m.Points != want {
+			t.Errorf("member %s points = %d, want unchanged %d", m.Name, m.Points, want)
+		}
 	}
 	if pend, err := quests.ListPending(ctx, admin, h.ID, ""); err != nil || len(pend) != 0 {
 		t.Errorf("pending after removal: %v %v", pend, err)
@@ -557,5 +604,273 @@ func TestIntegration_RemoveMemberHoldingQuests(t *testing.T) {
 	got, err := quests.Get(ctx, admin, h.ID, others.ID)
 	if err != nil || got.ClaimedBy == nil || *got.ClaimedBy != ben.ID {
 		t.Errorf("Ben's quest changed: %+v %v", got, err)
+	}
+}
+
+// TestIntegration_RemoveMemberRollsBack: the release and the delete are one
+// transaction. When the member delete fails after the release ran, the
+// release is undone: the member is still there and still holds their
+// accepted and pending quests, and the caller gets an error.
+func TestIntegration_RemoveMemberRollsBack(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	households := app.NewHouseholdService(q, pool)
+	familySvc := app.NewFamilyService(q, pool, 10)
+	quests := app.NewQuestService(q, pool)
+	ctx := context.Background()
+
+	admin := registerVerified(t, pool, authSvc, mailer, "removerollback").User.ID
+	h, err := households.Create(ctx, admin, app.HouseholdInput{Name: "Rollback"})
+	if err != nil {
+		t.Fatalf("create household: %v", err)
+	}
+	ann, err := familySvc.Create(ctx, admin, h.ID, app.FamilyMemberInput{Name: "Ann"}, "")
+	if err != nil {
+		t.Fatalf("create Ann: %v", err)
+	}
+	pending, err := quests.Create(ctx, admin, h.ID, app.QuestInput{Name: "Pending", Points: app.NumberField{Set: true, Value: 4}}, "")
+	if err != nil {
+		t.Fatalf("create quest: %v", err)
+	}
+	accepted, err := quests.Create(ctx, admin, h.ID, app.QuestInput{Name: "Accepted"}, "")
+	if err != nil {
+		t.Fatalf("create quest: %v", err)
+	}
+	annAct := app.MemberAction{MemberID: ann.ID}
+	for _, id := range []uuid.UUID{pending.ID, accepted.ID} {
+		if _, err := quests.Accept(ctx, admin, h.ID, id, annAct); err != nil {
+			t.Fatalf("Ann accept: %v", err)
+		}
+	}
+	marked, err := quests.MarkDone(ctx, admin, h.ID, pending.ID, annAct)
+	if err != nil {
+		t.Fatalf("Ann mark done: %v", err)
+	}
+
+	// The delete of this one member row fails; every other row is untouched.
+	fn := "fail_member_delete_" + strings.ReplaceAll(ann.ID.String(), "-", "")
+	ddl := `CREATE FUNCTION ` + fn + `() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+	IF OLD.id = '` + ann.ID.String() + `'::uuid THEN
+		RAISE EXCEPTION 'member delete refused for the test';
+	END IF;
+	RETURN OLD;
+END $$;
+CREATE TRIGGER ` + fn + ` BEFORE DELETE ON family_members FOR EACH ROW EXECUTE FUNCTION ` + fn + `();`
+	if _, err := pool.Exec(ctx, ddl); err != nil {
+		t.Fatalf("create failing trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := pool.Exec(context.Background(), `DROP TRIGGER IF EXISTS `+fn+` ON family_members; DROP FUNCTION IF EXISTS `+fn+`();`); err != nil {
+			t.Errorf("drop failing trigger: %v", err)
+		}
+	})
+
+	if err := familySvc.Remove(ctx, admin, h.ID, ann.ID, ""); err == nil {
+		t.Fatal("Remove succeeded although the member delete failed")
+	}
+
+	if _, err := familySvc.Get(ctx, admin, h.ID, ann.ID); err != nil {
+		t.Errorf("member gone after a failed removal: %v", err)
+	}
+	gotPending, err := quests.Get(ctx, admin, h.ID, pending.ID)
+	if err != nil {
+		t.Fatalf("Get pending: %v", err)
+	}
+	if gotPending.ClaimedBy == nil || *gotPending.ClaimedBy != ann.ID || !gotPending.DoneAt.Valid ||
+		!gotPending.DoneAt.Time.Equal(marked.DoneAt.Time) {
+		t.Errorf("pending quest changed by a failed removal: %+v", gotPending)
+	}
+	gotAccepted, err := quests.Get(ctx, admin, h.ID, accepted.ID)
+	if err != nil {
+		t.Fatalf("Get accepted: %v", err)
+	}
+	if gotAccepted.ClaimedBy == nil || *gotAccepted.ClaimedBy != ann.ID || gotAccepted.DoneAt.Valid || !gotAccepted.ClaimedAt.Valid {
+		t.Errorf("accepted quest changed by a failed removal: %+v", gotAccepted)
+	}
+	if pend, err := quests.ListPending(ctx, admin, h.ID, ""); err != nil || len(pend) != 1 || pend[0].HouseholdQuest.ID != pending.ID {
+		t.Errorf("pending list after a failed removal: %+v %v", pend, err)
+	}
+}
+
+// TestIntegration_RemoveMemberRacesQuestActions: an Accept or MarkDone by a
+// member who is being removed either lands first and is released by the
+// removal, or fails with ErrNotFound after it. No quest is left held by, or
+// waiting on, a removed member, and no other error surfaces.
+func TestIntegration_RemoveMemberRacesQuestActions(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	households := app.NewHouseholdService(q, pool)
+	familySvc := app.NewFamilyService(q, pool, 10)
+	quests := app.NewQuestService(q, pool)
+	ctx := context.Background()
+
+	admin := registerVerified(t, pool, authSvc, mailer, "removerace").User.ID
+	h, err := households.Create(ctx, admin, app.HouseholdInput{Name: "Race"})
+	if err != nil {
+		t.Fatalf("create household: %v", err)
+	}
+
+	newQuest := func(t *testing.T, name string) uuid.UUID {
+		t.Helper()
+		quest, err := quests.Create(ctx, admin, h.ID, app.QuestInput{Name: name, Points: app.NumberField{Set: true, Value: 2}}, "")
+		if err != nil {
+			t.Fatalf("create quest %s: %v", name, err)
+		}
+		return quest.ID
+	}
+	// heldBy counts the household's quests that still name memberID.
+	heldBy := func(t *testing.T, memberID uuid.UUID) int {
+		t.Helper()
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM household_quests WHERE household_id = $1 AND claimed_by = $2`, h.ID, memberID).Scan(&n); err != nil {
+			t.Fatalf("count held quests: %v", err)
+		}
+		return n
+	}
+	okAfterRemoval := func(t *testing.T, what string, err error) {
+		t.Helper()
+		if err != nil && !errors.Is(err, app.ErrNotFound) {
+			t.Errorf("%s racing the removal: %v, want success or ErrNotFound", what, err)
+		}
+	}
+
+	t.Run("the member row lock holds back a concurrent accept", func(t *testing.T) {
+		ann, err := familySvc.Create(ctx, admin, h.ID, app.FamilyMemberInput{Name: "Ann"}, "")
+		if err != nil {
+			t.Fatalf("create Ann: %v", err)
+		}
+		held, free := newQuest(t, "Held"), newQuest(t, "Free")
+		annAct := app.MemberAction{MemberID: ann.ID}
+		if _, err := quests.Accept(ctx, admin, h.ID, held, annAct); err != nil {
+			t.Fatalf("Ann accept: %v", err)
+		}
+
+		// Take the lock Remove takes, and hold it.
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+		if _, err := q.WithTx(tx).LockFamilyMember(ctx, db.LockFamilyMemberParams{HouseholdID: h.ID, ID: ann.ID}); err != nil {
+			t.Fatalf("lock member: %v", err)
+		}
+
+		acceptErr, markErr := make(chan error, 1), make(chan error, 1)
+		go func() { _, err := quests.Accept(ctx, admin, h.ID, free, annAct); acceptErr <- err }()
+		go func() { _, err := quests.MarkDone(ctx, admin, h.ID, held, annAct); markErr <- err }()
+
+		waitForLockWait(t, pool)
+		select {
+		case err := <-acceptErr:
+			t.Fatalf("Accept finished while the member row was locked: %v", err)
+		default:
+		}
+
+		removeErr := make(chan error, 1)
+		go func() { removeErr <- familySvc.Remove(ctx, admin, h.ID, ann.ID, "") }()
+		if err := tx.Rollback(ctx); err != nil {
+			t.Fatalf("release lock: %v", err)
+		}
+
+		if err := <-removeErr; err != nil {
+			t.Fatalf("Remove: %v", err)
+		}
+		okAfterRemoval(t, "Accept", <-acceptErr)
+		okAfterRemoval(t, "MarkDone", <-markErr)
+		if n := heldBy(t, ann.ID); n != 0 {
+			t.Errorf("%d quests still held by the removed member", n)
+		}
+		if pend, err := quests.ListPending(ctx, admin, h.ID, ""); err != nil || len(pend) != 0 {
+			t.Errorf("pending after removal: %+v %v", pend, err)
+		}
+	})
+
+	t.Run("concurrent accepts and mark-done against remove", func(t *testing.T) {
+		const rounds, accepts = 10, 4
+		for round := range rounds {
+			member, err := familySvc.Create(ctx, admin, h.ID, app.FamilyMemberInput{Name: "Racer"}, "")
+			if err != nil {
+				t.Fatalf("round %d: create member: %v", round, err)
+			}
+			act := app.MemberAction{MemberID: member.ID}
+			held := newQuest(t, "Held")
+			if _, err := quests.Accept(ctx, admin, h.ID, held, act); err != nil {
+				t.Fatalf("round %d: accept held: %v", round, err)
+			}
+			free := make([]uuid.UUID, accepts)
+			for i := range free {
+				free[i] = newQuest(t, "Free")
+			}
+
+			var wg sync.WaitGroup
+			start := make(chan struct{})
+			errs := make(chan error, accepts+1)
+			for _, id := range free {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					<-start
+					_, err := quests.Accept(ctx, admin, h.ID, id, act)
+					errs <- err
+				}()
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				_, err := quests.MarkDone(ctx, admin, h.ID, held, act)
+				errs <- err
+			}()
+			var removeErr error
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				removeErr = familySvc.Remove(ctx, admin, h.ID, member.ID, "")
+			}()
+			close(start)
+			wg.Wait()
+			close(errs)
+
+			if removeErr != nil {
+				t.Fatalf("round %d: Remove: %v", round, removeErr)
+			}
+			for err := range errs {
+				okAfterRemoval(t, "quest action", err)
+			}
+			if n := heldBy(t, member.ID); n != 0 {
+				t.Errorf("round %d: %d quests still held by the removed member", round, n)
+			}
+		}
+		if pend, err := quests.ListPending(ctx, admin, h.ID, ""); err != nil || len(pend) != 0 {
+			t.Errorf("pending after removals: %+v %v", pend, err)
+		}
+	})
+}
+
+// waitForLockWait waits, up to five seconds, until a session of this database
+// is waiting on a lock.
+func waitForLockWait(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var n int
+		err := pool.QueryRow(context.Background(),
+			`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&n)
+		if err != nil {
+			t.Fatalf("read lock waits: %v", err)
+		}
+		if n > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no session waited on the member row lock within 5s")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

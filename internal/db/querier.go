@@ -45,9 +45,6 @@ type Querier interface {
 	DeleteAdminPin(ctx context.Context, householdID uuid.UUID) (int64, error)
 	DeleteEvent(ctx context.Context, arg DeleteEventParams) (int64, error)
 	DeleteExpiredRefreshTokens(ctx context.Context) (int64, error)
-	// Releases the member's quests in the same statement, so a quest waiting for
-	// approval (done_at set) returns to the pool instead of tripping the
-	// done_at-needs-a-holder CHECK when the foreign key clears claimed_by.
 	DeleteFamilyMember(ctx context.Context, arg DeleteFamilyMemberParams) (int64, error)
 	// Returns the deleted row so its token can be revoked at Google afterwards.
 	DeleteGoogleCalendarConnectionByUser(ctx context.Context, userID uuid.UUID) (GoogleCalendarConnection, error)
@@ -124,6 +121,10 @@ type Querier interface {
 	// anyone's points.
 	ListRewardLibrary(ctx context.Context) ([]RewardLibrary, error)
 	LockAccount(ctx context.Context, arg LockAccountParams) error
+	// Locks the member row for the rest of the transaction. The lock conflicts
+	// with the key-share lock a foreign-key check takes, so rows that would point
+	// at this member wait until the transaction ends.
+	LockFamilyMember(ctx context.Context, arg LockFamilyMemberParams) (uuid.UUID, error)
 	LockUserProvisioning(ctx context.Context, id uuid.UUID) (pgtype.Timestamptz, error)
 	MarkGoogleCalendarConnectionBroken(ctx context.Context, userID uuid.UUID) (int64, error)
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
@@ -140,6 +141,10 @@ type Querier interface {
 	RejectQuest(ctx context.Context, arg RejectQuestParams) (HouseholdQuest, error)
 	// Re-arms first-sign-in provisioning for a user who has no household left.
 	ReleaseHouseholdProvisioning(ctx context.Context, id uuid.UUID) error
+	// Returns every quest the member holds to the pool, a quest awaiting approval
+	// included. done_at is cleared with the holder, so the done_at-needs-a-holder
+	// CHECK holds. No points move.
+	ReleaseMemberQuests(ctx context.Context, arg ReleaseMemberQuestsParams) error
 	RenameFamilyMember(ctx context.Context, arg RenameFamilyMemberParams) (FamilyMember, error)
 	ResetLoginAttempts(ctx context.Context, id uuid.UUID) error
 	RevokeAllUserRefreshTokens(ctx context.Context, userID uuid.UUID) error
