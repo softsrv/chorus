@@ -59,7 +59,7 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	familyH := handlers.NewFamilyCalendarHandler(familyCal)
 	familySvc := cfg.FamilySvc
 	if familySvc == nil {
-		familySvc = app.NewFamilyService(cfg.Queries, 12)
+		familySvc = app.NewFamilyService(cfg.Queries, cfg.Pool, 12)
 	}
 	familyMemberH := handlers.NewFamilyMemberHandler(familySvc)
 	questSvc := cfg.QuestSvc

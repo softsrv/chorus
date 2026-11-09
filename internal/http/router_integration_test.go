@@ -95,7 +95,7 @@ func newTestServer(t *testing.T) *testServer {
 		Queries: q, Pool: pool, AuthSvc: authSvc,
 		UserSvc:      app.NewUserService(q),
 		HouseholdSvc: app.NewHouseholdService(q, pool),
-		FamilySvc:    app.NewFamilyService(q, 10),
+		FamilySvc:    app.NewFamilyService(q, pool, 10),
 		JWTSecret:    secret,
 	})
 	srv := httptest.NewServer(handler)
@@ -1318,7 +1318,7 @@ func TestAPI_PINRateLimit(t *testing.T) {
 		Queries: q, Pool: pool, AuthSvc: authSvc,
 		UserSvc:      app.NewUserService(q),
 		HouseholdSvc: app.NewHouseholdService(q, pool),
-		FamilySvc:    app.NewFamilyService(q, 10),
+		FamilySvc:    app.NewFamilyService(q, pool, 10),
 		JWTSecret:    secret,
 		PINRateLimit: setupCalls + wrongGuesses,
 	})
@@ -1378,7 +1378,7 @@ func TestAPI_QuestPINRateLimit(t *testing.T) {
 		Queries: q, Pool: pool, AuthSvc: authSvc,
 		UserSvc:      app.NewUserService(q),
 		HouseholdSvc: app.NewHouseholdService(q, pool),
-		FamilySvc:    app.NewFamilyService(q, 10),
+		FamilySvc:    app.NewFamilyService(q, pool, 10),
 		QuestSvc:     app.NewQuestService(q, pool),
 		JWTSecret:    secret,
 		PINRateLimit: setupCalls + wrongGuesses,

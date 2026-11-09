@@ -480,6 +480,25 @@ func (q *Queries) RejectQuest(ctx context.Context, arg RejectQuestParams) (House
 	return i, err
 }
 
+const releaseMemberQuests = `-- name: ReleaseMemberQuests :exec
+UPDATE household_quests
+SET claimed_by = NULL, claimed_at = NULL, done_at = NULL, updated_at = NOW()
+WHERE household_id = $1 AND claimed_by = $2
+`
+
+type ReleaseMemberQuestsParams struct {
+	HouseholdID uuid.UUID  `json:"household_id"`
+	MemberID    *uuid.UUID `json:"member_id"`
+}
+
+// Returns every quest the member holds to the pool, a quest awaiting approval
+// included. done_at is cleared with the holder, so the done_at-needs-a-holder
+// CHECK holds. No points move.
+func (q *Queries) ReleaseMemberQuests(ctx context.Context, arg ReleaseMemberQuestsParams) error {
+	_, err := q.db.Exec(ctx, releaseMemberQuests, arg.HouseholdID, arg.MemberID)
+	return err
+}
+
 const updateHouseholdQuest = `-- name: UpdateHouseholdQuest :one
 UPDATE household_quests
 SET name = $3, points = $4, repeat_days = $5, notes = $6, updated_at = NOW()

@@ -53,6 +53,14 @@ WHERE household_id = sqlc.arg(household_id) AND id = sqlc.arg(id)
   AND done_at IS NULL
 RETURNING *;
 
+-- name: ReleaseMemberQuests :exec
+-- Returns every quest the member holds to the pool, a quest awaiting approval
+-- included. done_at is cleared with the holder, so the done_at-needs-a-holder
+-- CHECK holds. No points move.
+UPDATE household_quests
+SET claimed_by = NULL, claimed_at = NULL, done_at = NULL, updated_at = NOW()
+WHERE household_id = sqlc.arg(household_id) AND claimed_by = sqlc.arg(member_id);
+
 -- name: MarkQuestDone :one
 -- The holder marks the quest done; it then waits for the administrator.
 -- No points move here.
