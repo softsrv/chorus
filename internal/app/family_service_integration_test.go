@@ -690,7 +690,7 @@ CREATE TRIGGER ` + fn + ` BEFORE DELETE ON family_members FOR EACH ROW EXECUTE F
 	if gotAccepted.ClaimedBy == nil || *gotAccepted.ClaimedBy != ann.ID || gotAccepted.DoneAt.Valid || !gotAccepted.ClaimedAt.Valid {
 		t.Errorf("accepted quest changed by a failed removal: %+v", gotAccepted)
 	}
-	if pend, err := quests.ListPending(ctx, admin, h.ID, ""); err != nil || len(pend) != 1 || pend[0].ID != pending.ID {
+	if pend, err := quests.ListPending(ctx, admin, h.ID, ""); err != nil || len(pend) != 1 || pend[0].HouseholdQuest.ID != pending.ID {
 		t.Errorf("pending list after a failed removal: %+v %v", pend, err)
 	}
 }
