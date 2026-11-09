@@ -218,7 +218,6 @@ func newCalendarTestServer(t *testing.T, fake *fakeCalendarGoogle) *calendarServ
 		Queries: q, Pool: pool, AuthSvc: authSvc,
 		UserSvc:        app.NewUserService(q),
 		HouseholdSvc:   app.NewHouseholdService(q, pool),
-		ChoreSvc:       app.NewChoreService(q),
 		GoogleCalendar: calendar,
 		JWTSecret:      secret,
 	})

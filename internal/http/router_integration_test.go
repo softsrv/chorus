@@ -94,7 +94,6 @@ func newTestServer(t *testing.T) *testServer {
 		Queries: q, Pool: pool, AuthSvc: authSvc,
 		UserSvc:      app.NewUserService(q),
 		HouseholdSvc: app.NewHouseholdService(q, pool),
-		ChoreSvc:     app.NewChoreService(q),
 		FamilySvc:    app.NewFamilyService(q, 10),
 		JWTSecret:    secret,
 	})
@@ -221,68 +220,169 @@ func TestAPI_EndToEnd(t *testing.T) {
 	}
 	hp := "/api/v1/households/" + h.ID.String()
 
-	// Chore CRUD.
-	var chore struct {
-		ID         uuid.UUID  `json:"id"`
-		Title      string     `json:"title"`
-		AssigneeID *uuid.UUID `json:"assignee_id"`
-		DueOn      *string    `json:"due_on"`
-		Completed  bool       `json:"completed"`
+	// The old chore routes are gone: the API answers its JSON 404.
+	var gone apiError
+	s.expect(http.StatusNotFound, "GET", hp+"/chores", parent.AccessToken, nil, &gone)
+	if gone.Error.Code != "not_found" {
+		t.Errorf("GET chores: code %q, want not_found", gone.Error.Code)
 	}
-	s.expect(http.StatusCreated, "POST", hp+"/chores", parent.AccessToken, map[string]any{
-		"title": "Take out trash", "assignee_id": parent.User.ID, "due_on": "2026-11-01",
-	}, &chore)
-	if chore.DueOn == nil || *chore.DueOn != "2026-11-01" || *chore.AssigneeID != parent.User.ID {
-		t.Errorf("created chore: %+v", chore)
-	}
-	cp := hp + "/chores/" + chore.ID.String()
-
-	var mine struct {
-		Items      []map[string]any `json:"items"`
-		NextOffset *int             `json:"next_offset"`
-	}
-	s.expect(http.StatusOK, "GET", hp+"/chores?assignee=me", parent.AccessToken, nil, &mine)
-	if len(mine.Items) != 1 || mine.NextOffset != nil {
-		t.Errorf("parent's chores: %+v", mine)
+	gone = apiError{}
+	s.expect(http.StatusNotFound, "PUT", hp+"/chores/"+uuid.NewString()+"/completion", parent.AccessToken, nil, &gone)
+	if gone.Error.Code != "not_found" {
+		t.Errorf("PUT chore completion: code %q, want not_found", gone.Error.Code)
 	}
 
-	s.expect(http.StatusOK, "PUT", cp+"/completion", parent.AccessToken, nil, &chore)
-	if !chore.Completed {
-		t.Error("chore should be completed")
-	}
-	s.expect(http.StatusOK, "PUT", cp, parent.AccessToken, map[string]any{"title": "Trash + recycling"}, &chore)
-	if chore.Title != "Trash + recycling" || chore.AssigneeID != nil || chore.DueOn != nil {
-		t.Errorf("PUT is a full replacement; got %+v", chore)
-	}
-
-	// Pagination.
+	// Quest list pagination; the documented bounds are inclusive.
 	for i := range 3 {
-		s.expect(http.StatusCreated, "POST", hp+"/chores", parent.AccessToken, map[string]any{"title": fmt.Sprintf("chore %d", i)}, nil)
+		s.expect(http.StatusCreated, "POST", hp+"/quests", parent.AccessToken, map[string]any{"name": fmt.Sprintf("quest %d", i)}, nil)
 	}
 	var page struct {
 		Items      []map[string]any `json:"items"`
 		NextOffset *int             `json:"next_offset"`
 	}
-	s.expect(http.StatusOK, "GET", hp+"/chores?status=all&limit=2", parent.AccessToken, nil, &page)
+	s.expect(http.StatusOK, "GET", hp+"/quests?limit=2", parent.AccessToken, nil, &page)
 	if len(page.Items) != 2 || page.NextOffset == nil || *page.NextOffset != 2 {
 		t.Fatalf("page 1: %d items, next %v", len(page.Items), page.NextOffset)
 	}
-	s.expect(http.StatusOK, "GET", hp+"/chores?status=all&limit=2&offset=2", parent.AccessToken, nil, &page)
-	if len(page.Items) != 2 || page.NextOffset != nil {
+	s.expect(http.StatusOK, "GET", hp+"/quests?limit=2&offset=2", parent.AccessToken, nil, &page)
+	if len(page.Items) != 1 || page.NextOffset != nil {
 		t.Fatalf("page 2: %d items, next %v", len(page.Items), page.NextOffset)
 	}
-	// The documented bounds are inclusive.
-	s.expect(http.StatusOK, "GET", hp+"/chores?limit=100", parent.AccessToken, nil, nil)
-	s.expect(http.StatusUnprocessableEntity, "GET", hp+"/chores?limit=101", parent.AccessToken, nil, nil)
-	s.expect(http.StatusUnprocessableEntity, "GET", hp+"/chores?limit=0", parent.AccessToken, nil, nil)
+	s.expect(http.StatusOK, "GET", hp+"/quests?limit=100", parent.AccessToken, nil, nil)
+	s.expect(http.StatusUnprocessableEntity, "GET", hp+"/quests?limit=101", parent.AccessToken, nil, nil)
+	s.expect(http.StatusUnprocessableEntity, "GET", hp+"/quests?limit=0", parent.AccessToken, nil, nil)
+	// Clear them so the CRUD checks below start from an empty list.
+	var cleanup struct {
+		Items []struct {
+			ID uuid.UUID `json:"id"`
+		} `json:"items"`
+	}
+	s.expect(http.StatusOK, "GET", hp+"/quests", parent.AccessToken, nil, &cleanup)
+	for _, item := range cleanup.Items {
+		s.expect(http.StatusNoContent, "DELETE", hp+"/quests/"+item.ID.String(), parent.AccessToken, nil, nil)
+	}
 
-	s.expect(http.StatusNoContent, "DELETE", cp, parent.AccessToken, nil, nil)
-	s.expect(http.StatusNotFound, "GET", cp, parent.AccessToken, nil, nil)
+	// Quest CRUD: what is posted is what GET returns.
+	type questBody struct {
+		ID         uuid.UUID  `json:"id"`
+		LibraryID  *uuid.UUID `json:"library_id"`
+		Name       string     `json:"name"`
+		Points     int        `json:"points"`
+		RepeatDays int        `json:"repeat_days"`
+		Notes      string     `json:"notes"`
+	}
+	var quests struct {
+		Items      []questBody `json:"items"`
+		NextOffset *int        `json:"next_offset"`
+	}
+	var rawList map[string]json.RawMessage
+	s.expect(http.StatusOK, "GET", hp+"/quests", parent.AccessToken, nil, &rawList)
+	if string(rawList["items"]) != "[]" {
+		t.Errorf("empty quest list: items = %s, want []", rawList["items"])
+	}
+	// CLM-5: fresh household GET /quests returns 200 with items [] (not null) — and the library still lists.
+	var freshLib struct {
+		Items []questBody `json:"items"`
+	}
+	s.expect(http.StatusOK, "GET", "/api/v1/quest-library", parent.AccessToken, nil, &freshLib)
+	if len(freshLib.Items) == 0 {
+		t.Errorf("fresh household cannot list quest library: 0 items")
+	}
+	var quest questBody
+	s.expect(http.StatusCreated, "POST", hp+"/quests", parent.AccessToken, map[string]any{
+		"name": "Walk the dog", "points": 15, "repeat_days": 2, "notes": "Around the block",
+	}, &quest)
+	wantQuest := questBody{ID: quest.ID, Name: "Walk the dog", Points: 15, RepeatDays: 2, Notes: "Around the block"}
+	if quest != wantQuest {
+		t.Errorf("created quest: %+v", quest)
+	}
+	qp := hp + "/quests/" + quest.ID.String()
+	var gotQuest questBody
+	s.expect(http.StatusOK, "GET", qp, parent.AccessToken, nil, &gotQuest)
+	if gotQuest != wantQuest {
+		t.Errorf("get quest: %+v", gotQuest)
+	}
+	s.expect(http.StatusOK, "GET", hp+"/quests", parent.AccessToken, nil, &quests)
+	if len(quests.Items) != 1 || quests.Items[0] != wantQuest || quests.NextOffset != nil {
+		t.Errorf("list quests: %+v", quests)
+	}
+	s.expect(http.StatusOK, "PUT", qp, parent.AccessToken, map[string]any{
+		"name": "Walk the dog twice", "points": 20, "repeat_days": 1, "notes": "",
+	}, &gotQuest)
+	if gotQuest != (questBody{ID: quest.ID, Name: "Walk the dog twice", Points: 20, RepeatDays: 1}) {
+		t.Errorf("updated quest: %+v", gotQuest)
+	}
+	// One 422 lists every bad field, including a wrong-typed number.
+	var qerr apiError
+	if got := s.do("POST", hp+"/quests", parent.AccessToken, map[string]any{
+		"name": "", "points": "lots", "repeat_days": 0,
+	}, &qerr); got != http.StatusUnprocessableEntity ||
+		qerr.Error.Fields["name"] == "" || qerr.Error.Fields["points"] == "" || qerr.Error.Fields["repeat_days"] == "" {
+		t.Errorf("invalid quest: status %d, %+v", got, qerr)
+	}
+	// Non-numeric points value (e.g. "abc") is rejected with 422 and saves nothing.
+	if got := s.do("POST", hp+"/quests", parent.AccessToken, map[string]any{
+		"name": "Bad Points Quest", "points": "abc",
+	}, &qerr); got != http.StatusUnprocessableEntity || qerr.Error.Fields["points"] == "" {
+		t.Errorf("non-numeric points quest: status %d, %+v", got, qerr)
+	}
+	// notes > 2000 chars rejected
+	if got := s.do("POST", hp+"/quests", parent.AccessToken, map[string]any{
+		"name": "Long Notes", "notes": strings.Repeat("x", 2001),
+	}, &qerr); got != http.StatusUnprocessableEntity || qerr.Error.Fields["notes"] == "" {
+		t.Errorf("too long notes quest: status %d, %+v", got, qerr)
+	}
+	// Rejected creates saved nothing: list count is still 1.
+	s.expect(http.StatusOK, "GET", hp+"/quests", parent.AccessToken, nil, &quests)
+	if len(quests.Items) != 1 {
+		t.Errorf("rejected creates saved rows: %d quests", len(quests.Items))
+	}
+	// PUT with invalid fields rejected with 422, row unchanged.
+	if got := s.do("PUT", qp, parent.AccessToken, map[string]any{
+		"name": "", "points": -1, "repeat_days": 0,
+	}, &qerr); got != http.StatusUnprocessableEntity ||
+		qerr.Error.Fields["name"] == "" || qerr.Error.Fields["points"] == "" || qerr.Error.Fields["repeat_days"] == "" {
+		t.Errorf("invalid quest update: status %d, %+v", got, qerr)
+	}
+	var unchangedAfterPut questBody
+	s.expect(http.StatusOK, "GET", qp, parent.AccessToken, nil, &unchangedAfterPut)
+	if unchangedAfterPut != gotQuest {
+		t.Errorf("quest row changed after rejected update: %+v vs %+v", unchangedAfterPut, gotQuest)
+	}
+
+	// CLM-4: POST/PUT/DELETE on /api/v1/quest-library return 404 or 405.
+	for _, m := range []string{"POST", "PUT", "DELETE"} {
+		st := s.do(m, "/api/v1/quest-library", parent.AccessToken, map[string]any{"name": "test"}, nil)
+		if st != http.StatusNotFound && st != http.StatusMethodNotAllowed {
+			t.Errorf("%s /api/v1/quest-library returned %d, want 404 or 405", m, st)
+		}
+	}
+
+	// Library copy keeps the library's values and its id.
+	var library struct {
+		Items []questBody `json:"items"`
+	}
+	s.expect(http.StatusOK, "GET", "/api/v1/quest-library", parent.AccessToken, nil, &library)
+	if len(library.Items) == 0 {
+		t.Fatal("quest library is empty")
+	}
+	var copied questBody
+	s.expect(http.StatusCreated, "POST", hp+"/quests/from-library", parent.AccessToken,
+		map[string]any{"library_id": library.Items[0].ID}, &copied)
+	if copied.LibraryID == nil || *copied.LibraryID != library.Items[0].ID || copied.Name != library.Items[0].Name ||
+		copied.Points != library.Items[0].Points || copied.RepeatDays != library.Items[0].RepeatDays {
+		t.Errorf("copied quest %+v vs library %+v", copied, library.Items[0])
+	}
+
+	s.expect(http.StatusNoContent, "DELETE", qp, parent.AccessToken, nil, nil)
+	s.expect(http.StatusNotFound, "GET", qp, parent.AccessToken, nil, nil)
 
 	// Outsiders see nothing.
 	outsider := s.signUp("outsider")
 	s.expect(http.StatusNotFound, "GET", hp, outsider.AccessToken, nil, nil)
 	s.expect(http.StatusNotFound, "GET", hp+"/calendar", outsider.AccessToken, nil, nil)
+	s.expect(http.StatusNotFound, "GET", hp+"/quests", outsider.AccessToken, nil, nil)
+	s.expect(http.StatusNotFound, "GET", hp+"/quests/"+copied.ID.String(), outsider.AccessToken, nil, nil)
 }
 
 func TestAPI_SessionsAndLogout(t *testing.T) {
@@ -827,7 +927,6 @@ func TestAPI_PINRateLimit(t *testing.T) {
 		Queries: q, Pool: pool, AuthSvc: authSvc,
 		UserSvc:      app.NewUserService(q),
 		HouseholdSvc: app.NewHouseholdService(q, pool),
-		ChoreSvc:     app.NewChoreService(q),
 		FamilySvc:    app.NewFamilyService(q, 10),
 		JWTSecret:    secret,
 		PINRateLimit: setupCalls + wrongGuesses,

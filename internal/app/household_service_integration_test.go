@@ -25,7 +25,7 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	chores := app.NewChoreService(q)
+	quests := app.NewQuestService(q)
 	familySvc := app.NewFamilyService(q, 10)
 	ctx := context.Background()
 
@@ -48,10 +48,20 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create household: %v", err)
 	}
-	chore, err := chores.Create(ctx, alice, h.ID, app.ChoreInput{Title: "Dishes", AssigneeID: &alice})
+	aliceQuest, err := quests.Create(ctx, alice, h.ID, app.QuestInput{
+		Name:       "Dishes",
+		Points:     app.NumberField{Value: 10, Set: true},
+		RepeatDays: app.NumberField{Value: 1, Set: true},
+		Notes:      "Wash and dry",
+	}, "")
 	if err != nil {
-		t.Fatalf("Create chore: %v", err)
+		t.Fatalf("Create quest: %v", err)
 	}
+	libraryItems, err := quests.ListLibrary(ctx)
+	if err != nil || len(libraryItems) == 0 {
+		t.Fatalf("ListLibrary: %v", err)
+	}
+	libraryItemID := libraryItems[0].ID
 	if _, err := family.Set(ctx, alice, h.ID, "family-y@group.calendar.google.com"); err != nil {
 		t.Fatalf("Set family calendar: %v", err)
 	}
@@ -71,20 +81,22 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	_, checks["get household"] = households.Get(ctx, mallory, h.ID)
 	_, checks["update household"] = households.Update(ctx, mallory, h.ID, app.HouseholdInput{Name: "pwned"})
 	checks["delete household"] = households.Delete(ctx, mallory, h.ID)
-	_, _, checks["list chores"] = chores.List(ctx, mallory, h.ID, app.ChoreFilter{Limit: 10})
-	_, checks["get chore"] = chores.Get(ctx, mallory, h.ID, chore.ID)
-	_, checks["update chore"] = chores.Update(ctx, mallory, h.ID, chore.ID, app.ChoreInput{Title: "x"})
-	_, checks["complete chore"] = chores.SetCompleted(ctx, mallory, h.ID, chore.ID, true)
-	checks["delete chore"] = chores.Delete(ctx, mallory, h.ID, chore.ID)
+	_, _, checks["list quests"] = quests.List(ctx, mallory, h.ID, app.QuestPage{Limit: 10})
+	_, checks["get quest"] = quests.Get(ctx, mallory, h.ID, aliceQuest.ID)
+	_, checks["create quest"] = quests.Create(ctx, mallory, h.ID, app.QuestInput{Name: "Evil Quest"}, "")
+	_, checks["update quest"] = quests.Update(ctx, mallory, h.ID, aliceQuest.ID, app.QuestInput{Name: "Pwned"}, "")
+	checks["delete quest"] = quests.Delete(ctx, mallory, h.ID, aliceQuest.ID, "")
+	_, checks["copy quest from library"] = quests.CopyFromLibrary(ctx, mallory, h.ID, libraryItemID, "")
 	requestsBefore := len(google.recorded())
 	_, checks["family calendar status"] = family.Status(ctx, mallory, h.ID)
 	_, checks["family calendar entries"] = family.ListEntries(ctx, mallory, h.ID, from, to)
 	_, checks["set family calendar"] = family.Set(ctx, mallory, h.ID, "family-y@group.calendar.google.com")
 	checks["clear family calendar"] = family.Clear(ctx, mallory, h.ID)
 	_, checks["tag family calendar entry"] = family.SetEntryTags(ctx, mallory, h.ID, "y1", []uuid.UUID{alice})
-	// Cross-household ID smuggling: Mallory's household ID + Alice's chore ID.
-	_, checks["get chore via own household"] = chores.Get(ctx, mallory, mh.ID, chore.ID)
-	checks["delete chore via own household"] = chores.Delete(ctx, mallory, mh.ID, chore.ID)
+	// Cross-household ID smuggling: Mallory's household ID + Alice's quest ID.
+	_, checks["get quest via own household"] = quests.Get(ctx, mallory, mh.ID, aliceQuest.ID)
+	_, checks["update quest via own household"] = quests.Update(ctx, mallory, mh.ID, aliceQuest.ID, app.QuestInput{Name: "Smuggled"}, "")
+	checks["delete quest via own household"] = quests.Delete(ctx, mallory, mh.ID, aliceQuest.ID, "")
 	// Family member and admin-pin isolation checks
 	_, checks["list family members"] = familySvc.List(ctx, mallory, h.ID)
 	_, checks["get family member"] = familySvc.Get(ctx, mallory, h.ID, aliceMember.ID)
@@ -147,16 +159,13 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		t.Errorf("bob's calendar list = %+v, %v; want not_connected and empty", mine, err)
 	}
 
-	// Assigning a chore to a non-member is rejected.
-	_, err = chores.Create(ctx, alice, h.ID, app.ChoreInput{Title: "Mow", AssigneeID: &mallory})
-	var vErr *app.ValidationError
-	if !errors.As(err, &vErr) || vErr.Fields["assignee_id"] == "" {
-		t.Errorf("assign non-member: expected assignee_id validation error, got %v", err)
-	}
-
 	// Alice's data is intact.
-	if got, err := chores.Get(ctx, alice, h.ID, chore.ID); err != nil || got.Title != "Dishes" || got.CompletedAt.Valid {
-		t.Errorf("alice's chore was modified: %+v, %v", got, err)
+	if got, err := quests.Get(ctx, alice, h.ID, aliceQuest.ID); err != nil || got.Name != "Dishes" || got.Points != 10 ||
+		got.RepeatDays != 1 || got.Notes != "Wash and dry" {
+		t.Errorf("alice's quest was modified: %+v, %v", got, err)
+	}
+	if list, _, err := quests.List(ctx, alice, h.ID, app.QuestPage{Limit: 10}); err != nil || len(list) != 1 {
+		t.Errorf("alice's quests after outsider attempts: %d, %v; want exactly 1 (no smuggled create or copy)", len(list), err)
 	}
 	if st, err := family.Status(ctx, alice, h.ID); err != nil || st.CalendarID != "family-y@group.calendar.google.com" || st.SetByID != alice {
 		t.Errorf("alice's family calendar was modified: %+v, %v", st, err)

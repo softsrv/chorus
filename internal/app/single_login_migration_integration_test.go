@@ -103,22 +103,14 @@ func TestIntegration_SingleLoginMigration(t *testing.T) {
 	// Seed chores assigned to non-kept users (admin2 and member1)
 	chore1ID := uuid.Must(uuid.NewV7())
 	chore2ID := uuid.Must(uuid.NewV7())
-	if _, err := q.CreateChore(ctx, db.CreateChoreParams{
-		ID:          chore1ID,
-		HouseholdID: householdID,
-		Title:       "Chore for Admin 2",
-		AssigneeID:  &admin2.ID,
-		CreatedBy:   &admin1.ID,
-	}); err != nil {
+	// The chores table is a read-only archive with no sqlc queries left, so the
+	// pre-migration rows are seeded with plain SQL.
+	const insertChore = `INSERT INTO chores (id, household_id, title, assignee_id, created_by, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, NOW(), NOW())`
+	if _, err := pool.Exec(ctx, insertChore, chore1ID, householdID, "Chore for Admin 2", admin2.ID, admin1.ID); err != nil {
 		t.Fatalf("create chore 1: %v", err)
 	}
-	if _, err := q.CreateChore(ctx, db.CreateChoreParams{
-		ID:          chore2ID,
-		HouseholdID: householdID,
-		Title:       "Chore for Member",
-		AssigneeID:  &member1.ID,
-		CreatedBy:   &admin1.ID,
-	}); err != nil {
+	if _, err := pool.Exec(ctx, insertChore, chore2ID, householdID, "Chore for Member", member1.ID, admin1.ID); err != nil {
 		t.Fatalf("create chore 2: %v", err)
 	}
 
@@ -236,19 +228,20 @@ func TestIntegration_SingleLoginMigration(t *testing.T) {
 	}
 
 	// 4. Assignee IDs on chores remain intact (assignee_id unchanged)
-	c1, err := q.GetChore(ctx, db.GetChoreParams{HouseholdID: householdID, ID: chore1ID})
-	if err != nil {
-		t.Fatalf("get chore 1: %v", err)
+	choreAssignee := func(id uuid.UUID) *uuid.UUID {
+		t.Helper()
+		var a *uuid.UUID
+		if err := pool.QueryRow(ctx, "SELECT assignee_id FROM chores WHERE household_id = $1 AND id = $2",
+			householdID, id).Scan(&a); err != nil {
+			t.Fatalf("get chore %s: %v", id, err)
+		}
+		return a
 	}
-	if c1.AssigneeID == nil || *c1.AssigneeID != admin2.ID {
-		t.Errorf("chore 1: expected assignee %s, got %v", admin2.ID, c1.AssigneeID)
+	if a := choreAssignee(chore1ID); a == nil || *a != admin2.ID {
+		t.Errorf("chore 1: expected assignee %s, got %v", admin2.ID, a)
 	}
-	c2, err := q.GetChore(ctx, db.GetChoreParams{HouseholdID: householdID, ID: chore2ID})
-	if err != nil {
-		t.Fatalf("get chore 2: %v", err)
-	}
-	if c2.AssigneeID == nil || *c2.AssigneeID != member1.ID {
-		t.Errorf("chore 2: expected assignee %s, got %v", member1.ID, c2.AssigneeID)
+	if a := choreAssignee(chore2ID); a == nil || *a != member1.ID {
+		t.Errorf("chore 2: expected assignee %s, got %v", member1.ID, a)
 	}
 
 	// 5. All users still exist (none deleted)

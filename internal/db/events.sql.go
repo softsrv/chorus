@@ -31,7 +31,7 @@ type CreateEventParams struct {
 	CreatedBy   *uuid.UUID         `json:"created_by"`
 }
 
-// Every event query is scoped by household_id; see chores.sql.
+// Every event query is scoped by household_id; see quests.sql.
 func (q *Queries) CreateEvent(ctx context.Context, arg CreateEventParams) (Event, error) {
 	row := q.db.QueryRow(ctx, createEvent,
 		arg.ID,

@@ -14,8 +14,6 @@ import (
 // from the sqlc models so schema changes can't silently change the API (or
 // leak columns such as password_hash).
 
-const dateLayout = "2006-01-02"
-
 type listResponse[T any] struct {
 	Items []T `json:"items"`
 }
@@ -123,36 +121,51 @@ func toFamilyMember(m db.FamilyMember) familyMemberJSON {
 	}
 }
 
-type choreJSON struct {
+// questJSON is a household quest. claimed_by/done_at belong to the quest
+// lifecycle; they are exposed read-only and change only through quest actions.
+type questJSON struct {
 	ID          uuid.UUID  `json:"id"`
 	HouseholdID uuid.UUID  `json:"household_id"`
-	Title       string     `json:"title"`
-	Description string     `json:"description"`
-	AssigneeID  *uuid.UUID `json:"assignee_id"`
-	DueOn       *string    `json:"due_on"`
-	Completed   bool       `json:"completed"`
-	CompletedAt *time.Time `json:"completed_at"`
-	CompletedBy *uuid.UUID `json:"completed_by"`
-	CreatedBy   *uuid.UUID `json:"created_by"`
+	LibraryID   *uuid.UUID `json:"library_id"`
+	Name        string     `json:"name"`
+	Points      int32      `json:"points"`
+	RepeatDays  int32      `json:"repeat_days"`
+	Notes       string     `json:"notes"`
+	ClaimedBy   *uuid.UUID `json:"claimed_by"`
+	DoneAt      *time.Time `json:"done_at"`
+	AvailableAt *time.Time `json:"available_at"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
-func toChore(c db.Chore) choreJSON {
-	return choreJSON{
-		ID:          c.ID,
-		HouseholdID: c.HouseholdID,
-		Title:       c.Title,
-		Description: c.Description,
-		AssigneeID:  c.AssigneeID,
-		DueOn:       dateString(c.DueOn),
-		Completed:   c.CompletedAt.Valid,
-		CompletedAt: timePtr(c.CompletedAt),
-		CompletedBy: c.CompletedBy,
-		CreatedBy:   c.CreatedBy,
-		CreatedAt:   c.CreatedAt.Time.UTC(),
-		UpdatedAt:   c.UpdatedAt.Time.UTC(),
+func toQuest(q db.HouseholdQuest) questJSON {
+	return questJSON{
+		ID:          q.ID,
+		HouseholdID: q.HouseholdID,
+		LibraryID:   q.LibraryID,
+		Name:        q.Name,
+		Points:      q.Points,
+		RepeatDays:  q.RepeatDays,
+		Notes:       q.Notes,
+		ClaimedBy:   q.ClaimedBy,
+		DoneAt:      timePtr(q.DoneAt),
+		AvailableAt: timePtr(q.AvailableAt),
+		CreatedAt:   q.CreatedAt.Time.UTC(),
+		UpdatedAt:   q.UpdatedAt.Time.UTC(),
 	}
+}
+
+// libraryQuestJSON is a quest of the global, read-only library.
+type libraryQuestJSON struct {
+	ID         uuid.UUID `json:"id"`
+	Name       string    `json:"name"`
+	Points     int32     `json:"points"`
+	RepeatDays int32     `json:"repeat_days"`
+	Notes      string    `json:"notes"`
+}
+
+func toLibraryQuest(q db.QuestLibrary) libraryQuestJSON {
+	return libraryQuestJSON{ID: q.ID, Name: q.Name, Points: q.Points, RepeatDays: q.RepeatDays, Notes: q.Notes}
 }
 
 func mapSlice[T, U any](in []T, f func(T) U) []U {
@@ -161,14 +174,6 @@ func mapSlice[T, U any](in []T, f func(T) U) []U {
 		out[i] = f(v)
 	}
 	return out
-}
-
-func dateString(d pgtype.Date) *string {
-	if !d.Valid {
-		return nil
-	}
-	s := d.Time.Format(dateLayout)
-	return &s
 }
 
 func timePtr(t pgtype.Timestamptz) *time.Time {
