@@ -1,0 +1,243 @@
+//go:build integration
+
+package app_test
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/google/uuid"
+
+	"github.com/softsrv/chorus/internal/app"
+	"github.com/softsrv/chorus/internal/db"
+)
+
+func TestIntegration_FamilyMemberLifecycle(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	households := app.NewHouseholdService(q, pool)
+	familySvc := app.NewFamilyService(q, 10)
+	ctx := context.Background()
+
+	admin := registerVerified(t, pool, authSvc, mailer, "familyadmin").User.ID
+
+	h, err := households.Create(ctx, admin, app.HouseholdInput{Name: "Family Home", Timezone: "America/Chicago"})
+	if err != nil {
+		t.Fatalf("Create household: %v", err)
+	}
+
+	// Initial list is empty (non-nil)
+	initialList, err := familySvc.List(ctx, admin, h.ID)
+	if err != nil {
+		t.Fatalf("List initial members: %v", err)
+	}
+	if initialList == nil || len(initialList) != 0 {
+		t.Fatalf("expected empty non-nil slice, got: %+v", initialList)
+	}
+
+	// 1. Create family member without PIN
+	m1, err := familySvc.Create(ctx, admin, h.ID, app.FamilyMemberInput{Name: "Alice"})
+	if err != nil {
+		t.Fatalf("Create Alice: %v", err)
+	}
+	if m1.Name != "Alice" {
+		t.Errorf("Alice Name: got %q, want %q", m1.Name, "Alice")
+	}
+	if m1.Points != 0 {
+		t.Errorf("Alice Points: got %d, want 0", m1.Points)
+	}
+	if m1.HasPin {
+		t.Errorf("Alice HasPin: got true, want false")
+	}
+
+	// 2. Create family member with 4-digit PIN
+	m2, err := familySvc.Create(ctx, admin, h.ID, app.FamilyMemberInput{Name: "Bob", PIN: "1234"})
+	if err != nil {
+		t.Fatalf("Create Bob: %v", err)
+	}
+	if m2.Name != "Bob" {
+		t.Errorf("Bob Name: got %q, want %q", m2.Name, "Bob")
+	}
+	if m2.Points != 0 {
+		t.Errorf("Bob Points: got %d, want 0", m2.Points)
+	}
+	if !m2.HasPin {
+		t.Errorf("Bob HasPin: got false, want true")
+	}
+
+	// 3. List members
+	members, err := familySvc.List(ctx, admin, h.ID)
+	if err != nil {
+		t.Fatalf("List members: %v", err)
+	}
+	if len(members) != 2 {
+		t.Fatalf("List count: got %d, want 2", len(members))
+	}
+	if members[0].Name != "Alice" || members[1].Name != "Bob" {
+		t.Errorf("List order: got [%s, %s], want [Alice, Bob]", members[0].Name, members[1].Name)
+	}
+
+	// 4. Get member
+	gotM1, err := familySvc.Get(ctx, admin, h.ID, m1.ID)
+	if err != nil {
+		t.Fatalf("Get m1: %v", err)
+	}
+	if gotM1.ID != m1.ID || gotM1.Name != "Alice" {
+		t.Errorf("Get m1: got %+v", gotM1)
+	}
+
+	// 5. Rename member
+	renamed, err := familySvc.Rename(ctx, admin, h.ID, m1.ID, app.RenameMemberInput{Name: "Alicia"})
+	if err != nil {
+		t.Fatalf("Rename Alice: %v", err)
+	}
+	if renamed.Name != "Alicia" {
+		t.Errorf("Renamed Name: got %q, want Alicia", renamed.Name)
+	}
+
+	// 6. Set PIN
+	withPin, err := familySvc.SetPin(ctx, admin, h.ID, m1.ID, "4321")
+	if err != nil {
+		t.Fatalf("SetPin m1: %v", err)
+	}
+	if !withPin.HasPin {
+		t.Errorf("SetPin HasPin: got false, want true")
+	}
+
+	// 7. Clear PIN
+	cleared, err := familySvc.ClearPin(ctx, admin, h.ID, m1.ID)
+	if err != nil {
+		t.Fatalf("ClearPin m1: %v", err)
+	}
+	if cleared.HasPin {
+		t.Errorf("ClearPin HasPin: got true, want false")
+	}
+
+	// 8. Removal deletes no users row
+	var usersBefore int
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM users").Scan(&usersBefore); err != nil {
+		t.Fatalf("count users before: %v", err)
+	}
+
+	if err := familySvc.Remove(ctx, admin, h.ID, m1.ID); err != nil {
+		t.Fatalf("Remove m1: %v", err)
+	}
+
+	var usersAfter int
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM users").Scan(&usersAfter); err != nil {
+		t.Fatalf("count users after: %v", err)
+	}
+	if usersBefore != usersAfter {
+		t.Errorf("users row count changed on family member delete: before %d, after %d", usersBefore, usersAfter)
+	}
+
+	// Verify member is gone
+	if _, err := familySvc.Get(ctx, admin, h.ID, m1.ID); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("Get deleted member: expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestIntegration_FamilyMemberValidation(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	households := app.NewHouseholdService(q, pool)
+	familySvc := app.NewFamilyService(q, 10)
+	ctx := context.Background()
+
+	admin := registerVerified(t, pool, authSvc, mailer, "valadmin").User.ID
+	h, err := households.Create(ctx, admin, app.HouseholdInput{Name: "Validation Home"})
+	if err != nil {
+		t.Fatalf("Create household: %v", err)
+	}
+
+	// Empty name
+	var vErr *app.ValidationError
+	_, err = familySvc.Create(ctx, admin, h.ID, app.FamilyMemberInput{Name: ""})
+	if !errors.As(err, &vErr) || vErr.Fields["name"] == "" {
+		t.Errorf("empty name: expected ValidationError on name, got %v", err)
+	}
+
+	// Name too long (>50 chars)
+	tooLong := strings.Repeat("a", 51)
+	_, err = familySvc.Create(ctx, admin, h.ID, app.FamilyMemberInput{Name: tooLong})
+	if !errors.As(err, &vErr) || vErr.Fields["name"] == "" {
+		t.Errorf("too long name: expected ValidationError on name, got %v", err)
+	}
+
+	// Invalid PINs
+	for _, badPin := range []string{"123", "12345", "abcd", "12a4"} {
+		_, err = familySvc.Create(ctx, admin, h.ID, app.FamilyMemberInput{Name: "Kid", PIN: badPin})
+		if !errors.As(err, &vErr) || vErr.Fields["pin"] == "" {
+			t.Errorf("bad pin %q: expected ValidationError on pin, got %v", badPin, err)
+		}
+	}
+
+	// Rename with empty name
+	m, err := familySvc.Create(ctx, admin, h.ID, app.FamilyMemberInput{Name: "ValidKid"})
+	if err != nil {
+		t.Fatalf("create valid kid: %v", err)
+	}
+	_, err = familySvc.Rename(ctx, admin, h.ID, m.ID, app.RenameMemberInput{Name: ""})
+	if !errors.As(err, &vErr) || vErr.Fields["name"] == "" {
+		t.Errorf("empty rename: expected ValidationError on name, got %v", err)
+	}
+
+	// SetPin with bad pin
+	_, err = familySvc.SetPin(ctx, admin, h.ID, m.ID, "999")
+	if !errors.As(err, &vErr) || vErr.Fields["pin"] == "" {
+		t.Errorf("bad setpin: expected ValidationError on pin, got %v", err)
+	}
+}
+
+func TestIntegration_FamilyMemberIsolation(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	households := app.NewHouseholdService(q, pool)
+	familySvc := app.NewFamilyService(q, 10)
+	ctx := context.Background()
+
+	admin := registerVerified(t, pool, authSvc, mailer, "aliceadmin").User.ID
+	mallory := registerVerified(t, pool, authSvc, mailer, "mallory").User.ID
+
+	h, err := households.Create(ctx, admin, app.HouseholdInput{Name: "Alice Home"})
+	if err != nil {
+		t.Fatalf("Create household: %v", err)
+	}
+
+	m, err := familySvc.Create(ctx, admin, h.ID, app.FamilyMemberInput{Name: "Kid Alice"})
+	if err != nil {
+		t.Fatalf("Create member: %v", err)
+	}
+
+	checks := map[string]error{}
+	_, checks["list members"] = familySvc.List(ctx, mallory, h.ID)
+	_, checks["get member"] = familySvc.Get(ctx, mallory, h.ID, m.ID)
+	_, checks["create member"] = familySvc.Create(ctx, mallory, h.ID, app.FamilyMemberInput{Name: "Mallory Plant"})
+	_, checks["rename member"] = familySvc.Rename(ctx, mallory, h.ID, m.ID, app.RenameMemberInput{Name: "Hacked"})
+	checks["remove member"] = familySvc.Remove(ctx, mallory, h.ID, m.ID)
+	_, checks["set pin"] = familySvc.SetPin(ctx, mallory, h.ID, m.ID, "1234")
+	_, checks["clear pin"] = familySvc.ClearPin(ctx, mallory, h.ID, m.ID)
+
+	for name, err := range checks {
+		if !errors.Is(err, app.ErrNotFound) {
+			t.Errorf("%s: expected ErrNotFound, got %v", name, err)
+		}
+	}
+
+	// Nonexistent member ID from same household
+	fakeID := uuid.New()
+	if _, err := familySvc.Get(ctx, admin, h.ID, fakeID); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("get nonexistent: expected ErrNotFound, got %v", err)
+	}
+	if err := familySvc.Remove(ctx, admin, h.ID, fakeID); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("remove nonexistent: expected ErrNotFound, got %v", err)
+	}
+}
