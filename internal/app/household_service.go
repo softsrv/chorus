@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/softsrv/chorus/internal/auth"
 	"github.com/softsrv/chorus/internal/db"
@@ -359,6 +360,37 @@ func requireAdmin(ctx context.Context, q *db.Queries, userID, householdID uuid.U
 	if h.Role != RoleAdmin {
 		return Household{}, ErrForbidden
 	}
+	return h, nil
+}
+
+// requireAdminPin validates that the user is an admin of the household, and if the household has an
+// admin PIN set, requires that adminPin matches the stored hash.
+// If an admin PIN is set and adminPin is empty, ErrAdminPinRequired is returned.
+// If adminPin does not match, ErrWrongPIN is returned.
+// Non-members receive ErrNotFound (via requireAdmin -> getHousehold).
+func requireAdminPin(ctx context.Context, q *db.Queries, userID, householdID uuid.UUID, adminPin string) (Household, error) {
+	h, err := requireAdmin(ctx, q, userID, householdID)
+	if err != nil {
+		return Household{}, err
+	}
+
+	pinRow, err := q.GetAdminPin(ctx, householdID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// No admin PIN is set on this household; requireAdmin was sufficient.
+			return h, nil
+		}
+		return Household{}, fmt.Errorf("get admin pin: %w", err)
+	}
+
+	if adminPin == "" {
+		return Household{}, ErrAdminPinRequired
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(pinRow.PinHash), []byte(adminPin)); err != nil {
+		return Household{}, ErrWrongPIN
+	}
+
 	return h, nil
 }
 

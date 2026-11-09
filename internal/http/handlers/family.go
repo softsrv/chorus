@@ -14,11 +14,16 @@ import (
 type familyServicer interface {
 	List(ctx context.Context, userID, householdID uuid.UUID) ([]app.Member, error)
 	Get(ctx context.Context, userID, householdID, memberID uuid.UUID) (app.Member, error)
-	Create(ctx context.Context, userID, householdID uuid.UUID, in app.FamilyMemberInput) (app.Member, error)
-	Rename(ctx context.Context, userID, householdID, memberID uuid.UUID, in app.RenameMemberInput) (app.Member, error)
-	Remove(ctx context.Context, userID, householdID, memberID uuid.UUID) error
-	SetPin(ctx context.Context, userID, householdID, memberID uuid.UUID, pin string) (app.Member, error)
-	ClearPin(ctx context.Context, userID, householdID, memberID uuid.UUID) (app.Member, error)
+	Create(ctx context.Context, userID, householdID uuid.UUID, in app.FamilyMemberInput, adminPin string) (app.Member, error)
+	Rename(ctx context.Context, userID, householdID, memberID uuid.UUID, in app.RenameMemberInput, adminPin string) (app.Member, error)
+	Remove(ctx context.Context, userID, householdID, memberID uuid.UUID, adminPin string) error
+	SetPin(ctx context.Context, userID, householdID, memberID uuid.UUID, pin string, adminPin string) (app.Member, error)
+	ClearPin(ctx context.Context, userID, householdID, memberID uuid.UUID, adminPin string) (app.Member, error)
+	Verify(ctx context.Context, userID, householdID, memberID uuid.UUID, pin string) (app.Member, error)
+	AdminPinSet(ctx context.Context, userID, householdID uuid.UUID) (bool, error)
+	SetAdminPin(ctx context.Context, userID, householdID uuid.UUID, newPin, currentAdminPin string) error
+	ClearAdminPin(ctx context.Context, userID, householdID uuid.UUID, currentAdminPin string) error
+	VerifyAdminPin(ctx context.Context, userID, householdID uuid.UUID, pin string) error
 }
 
 // FamilyMemberHandler serves family member CRUD endpoints.
@@ -74,6 +79,18 @@ type setMemberPinRequest struct {
 	PIN string `json:"pin"`
 }
 
+type verifyMemberPinRequest struct {
+	PIN string `json:"pin"`
+}
+
+type adminPinRequest struct {
+	PIN string `json:"pin"`
+}
+
+type adminPinStatusResponse struct {
+	Set bool `json:"set"`
+}
+
 func parseHouseholdID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 	if r.PathValue("householdID") != "" {
 		return pathUUID(w, r, "householdID")
@@ -104,8 +121,12 @@ func (h *FamilyMemberHandler) List(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	items := mapSlice(members, toMemberResponse)
+	if items == nil {
+		items = []memberResponse{}
+	}
 	respond.JSON(w, http.StatusOK, listResponse[memberResponse]{
-		Items: mapSlice(members, toMemberResponse),
+		Items: items,
 	})
 }
 
@@ -119,10 +140,11 @@ func (h *FamilyMemberHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	adminPin := r.Header.Get("X-Admin-PIN")
 	m, err := h.svc.Create(r.Context(), currentUser(r), hid, app.FamilyMemberInput{
 		Name: req.Name,
 		PIN:  req.PIN,
-	})
+	}, adminPin)
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -154,9 +176,10 @@ func (h *FamilyMemberHandler) Rename(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	adminPin := r.Header.Get("X-Admin-PIN")
 	m, err := h.svc.Rename(r.Context(), currentUser(r), hid, mid, app.RenameMemberInput{
 		Name: req.Name,
-	})
+	}, adminPin)
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -170,7 +193,8 @@ func (h *FamilyMemberHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := h.svc.Remove(r.Context(), currentUser(r), hid, mid); err != nil {
+	adminPin := r.Header.Get("X-Admin-PIN")
+	if err := h.svc.Remove(r.Context(), currentUser(r), hid, mid, adminPin); err != nil {
 		writeError(w, r, err)
 		return
 	}
@@ -187,7 +211,8 @@ func (h *FamilyMemberHandler) SetPin(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	m, err := h.svc.SetPin(r.Context(), currentUser(r), hid, mid, req.PIN)
+	adminPin := r.Header.Get("X-Admin-PIN")
+	m, err := h.svc.SetPin(r.Context(), currentUser(r), hid, mid, req.PIN, adminPin)
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -201,10 +226,97 @@ func (h *FamilyMemberHandler) ClearPin(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	m, err := h.svc.ClearPin(r.Context(), currentUser(r), hid, mid)
+	adminPin := r.Header.Get("X-Admin-PIN")
+	m, err := h.svc.ClearPin(r.Context(), currentUser(r), hid, mid, adminPin)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
 	respond.JSON(w, http.StatusOK, toMemberResponse(m))
+}
+
+// Verify verifies a family member's PIN.
+// POST /api/v1/households/{householdID}/family-members/{memberID}/verify
+func (h *FamilyMemberHandler) Verify(w http.ResponseWriter, r *http.Request) {
+	hid, mid, ok := parseMemberIDs(w, r)
+	if !ok {
+		return
+	}
+	var req verifyMemberPinRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	m, err := h.svc.Verify(r.Context(), currentUser(r), hid, mid, req.PIN)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, toMemberResponse(m))
+}
+
+// AdminPinStatus returns whether an admin PIN is set.
+// GET /api/v1/households/{householdID}/admin-pin
+func (h *FamilyMemberHandler) AdminPinStatus(w http.ResponseWriter, r *http.Request) {
+	hid, ok := parseHouseholdID(w, r)
+	if !ok {
+		return
+	}
+	set, err := h.svc.AdminPinSet(r.Context(), currentUser(r), hid)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, adminPinStatusResponse{Set: set})
+}
+
+// SetAdminPin sets or changes the household's admin PIN.
+// PUT /api/v1/households/{householdID}/admin-pin
+func (h *FamilyMemberHandler) SetAdminPin(w http.ResponseWriter, r *http.Request) {
+	hid, ok := parseHouseholdID(w, r)
+	if !ok {
+		return
+	}
+	var req adminPinRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	currentAdminPin := r.Header.Get("X-Admin-PIN")
+	if err := h.svc.SetAdminPin(r.Context(), currentUser(r), hid, req.PIN, currentAdminPin); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, adminPinStatusResponse{Set: true})
+}
+
+// ClearAdminPin deletes the household's admin PIN.
+// DELETE /api/v1/households/{householdID}/admin-pin
+func (h *FamilyMemberHandler) ClearAdminPin(w http.ResponseWriter, r *http.Request) {
+	hid, ok := parseHouseholdID(w, r)
+	if !ok {
+		return
+	}
+	currentAdminPin := r.Header.Get("X-Admin-PIN")
+	if err := h.svc.ClearAdminPin(r.Context(), currentUser(r), hid, currentAdminPin); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.NoContent(w)
+}
+
+// VerifyAdminPin verifies the household's admin PIN.
+// POST /api/v1/households/{householdID}/admin-pin/verify
+func (h *FamilyMemberHandler) VerifyAdminPin(w http.ResponseWriter, r *http.Request) {
+	hid, ok := parseHouseholdID(w, r)
+	if !ok {
+		return
+	}
+	var req adminPinRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := h.svc.VerifyAdminPin(r.Context(), currentUser(r), hid, req.PIN); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, map[string]any{})
 }

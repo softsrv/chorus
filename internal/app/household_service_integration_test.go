@@ -26,6 +26,7 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
 	chores := app.NewChoreService(q)
+	familySvc := app.NewFamilyService(q, 10)
 	ctx := context.Background()
 
 	alice := registerVerified(t, pool, authSvc, mailer, "alice").User.ID
@@ -61,6 +62,10 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	if _, err := family.Set(ctx, alice, h.ID, "family-y@group.calendar.google.com"); err != nil {
 		t.Fatalf("Set family calendar: %v", err)
 	}
+	aliceMember, err := familySvc.Create(ctx, alice, h.ID, app.FamilyMemberInput{Name: "Alice Member", PIN: "1234"}, "")
+	if err != nil {
+		t.Fatalf("Create alice member: %v", err)
+	}
 	from, to := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
 
 	// Mallory has her own household; IDs from it must not unlock Alice's data.
@@ -89,6 +94,22 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	// Cross-household ID smuggling: Mallory's household ID + Alice's chore ID.
 	_, checks["get chore via own household"] = chores.Get(ctx, mallory, mh.ID, chore.ID)
 	checks["delete chore via own household"] = chores.Delete(ctx, mallory, mh.ID, chore.ID)
+	// Family member and admin-pin isolation checks
+	_, checks["list family members"] = familySvc.List(ctx, mallory, h.ID)
+	_, checks["get family member"] = familySvc.Get(ctx, mallory, h.ID, aliceMember.ID)
+	_, checks["create family member"] = familySvc.Create(ctx, mallory, h.ID, app.FamilyMemberInput{Name: "Evil"}, "")
+	_, checks["rename family member"] = familySvc.Rename(ctx, mallory, h.ID, aliceMember.ID, app.RenameMemberInput{Name: "Pwned"}, "")
+	checks["remove family member"] = familySvc.Remove(ctx, mallory, h.ID, aliceMember.ID, "")
+	_, checks["set member pin"] = familySvc.SetPin(ctx, mallory, h.ID, aliceMember.ID, "9999", "")
+	_, checks["clear member pin"] = familySvc.ClearPin(ctx, mallory, h.ID, aliceMember.ID, "")
+	_, checks["verify member pin"] = familySvc.Verify(ctx, mallory, h.ID, aliceMember.ID, "1234")
+	_, checks["admin pin set"] = familySvc.AdminPinSet(ctx, mallory, h.ID)
+	checks["set admin pin"] = familySvc.SetAdminPin(ctx, mallory, h.ID, "1111", "")
+	checks["clear admin pin"] = familySvc.ClearAdminPin(ctx, mallory, h.ID, "")
+	checks["verify admin pin"] = familySvc.VerifyAdminPin(ctx, mallory, h.ID, "1111")
+	// Cross-household ID smuggling with family members:
+	_, checks["get family member via own household"] = familySvc.Get(ctx, mallory, mh.ID, aliceMember.ID)
+	checks["remove family member via own household"] = familySvc.Remove(ctx, mallory, mh.ID, aliceMember.ID, "")
 
 	for name, err := range checks {
 		if !errors.Is(err, app.ErrNotFound) {
