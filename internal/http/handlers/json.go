@@ -109,6 +109,8 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 		respond.Error(w, http.StatusForbidden, "wrong_pin", "Wrong PIN.")
 	case errors.Is(err, app.ErrAdminPinRequired):
 		respond.Error(w, http.StatusForbidden, "admin_pin_required", "Admin PIN is required.")
+	case errors.Is(err, app.ErrQuestTaken):
+		respond.Error(w, http.StatusConflict, "quest_taken", "This quest has already been taken.")
 	default:
 		slog.ErrorContext(r.Context(), "unhandled error",
 			"request_id", middleware.GetRequestID(r.Context()),

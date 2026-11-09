@@ -28,6 +28,9 @@ var (
 	// ErrAdminPinRequired is returned when an admin PIN is set on the household
 	// but was not provided in the request.
 	ErrAdminPinRequired = errors.New("admin PIN is required")
+	// ErrQuestTaken is returned when a quest is accepted but is no longer
+	// available: another member holds it, or it is waiting out its repeat days.
+	ErrQuestTaken = errors.New("quest is already taken")
 )
 
 // RateLimitedError is returned when an operation is attempted too frequently.

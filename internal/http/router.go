@@ -158,6 +158,8 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("GET /api/v1/households/{householdID}/quests/{questID}", verified(questH.Get))
 	api.Handle("PUT /api/v1/households/{householdID}/quests/{questID}", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Update))))
 	api.Handle("DELETE /api/v1/households/{householdID}/quests/{questID}", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Delete))))
+	// Member actions carry the member's PIN, so they share the PIN limiter.
+	api.Handle("POST /api/v1/households/{householdID}/quests/{questID}/accept", verified(limit(pinRL, questH.Accept)))
 
 	// ── Family calendar ────────────────────────────────────────────────────
 	// Entries come from the household's chosen Google calendar. Chorus has no

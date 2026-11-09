@@ -97,6 +97,16 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	_, checks["get quest via own household"] = quests.Get(ctx, mallory, mh.ID, aliceQuest.ID)
 	_, checks["update quest via own household"] = quests.Update(ctx, mallory, mh.ID, aliceQuest.ID, app.QuestInput{Name: "Smuggled"}, "")
 	checks["delete quest via own household"] = quests.Delete(ctx, mallory, mh.ID, aliceQuest.ID, "")
+	// Quest actions: an outsider cannot accept Alice's quest, and smuggling
+	// Alice's member or quest id through Mallory's own household fails too.
+	malloryMember, err := familySvc.Create(ctx, mallory, mh.ID, app.FamilyMemberInput{Name: "Mallory Member"}, "")
+	if err != nil {
+		t.Fatalf("Create mallory member: %v", err)
+	}
+	_, checks["accept quest"] = quests.Accept(ctx, mallory, h.ID, aliceQuest.ID, app.MemberAction{MemberID: aliceMember.ID, PIN: "1234"})
+	_, checks["accept quest as own member"] = quests.Accept(ctx, mallory, h.ID, aliceQuest.ID, app.MemberAction{MemberID: malloryMember.ID})
+	_, checks["accept quest via own household with alice's member"] = quests.Accept(ctx, mallory, mh.ID, aliceQuest.ID, app.MemberAction{MemberID: aliceMember.ID, PIN: "1234"})
+	_, checks["accept quest via own household"] = quests.Accept(ctx, mallory, mh.ID, aliceQuest.ID, app.MemberAction{MemberID: malloryMember.ID})
 	// Family member and admin-pin isolation checks
 	_, checks["list family members"] = familySvc.List(ctx, mallory, h.ID)
 	_, checks["get family member"] = familySvc.Get(ctx, mallory, h.ID, aliceMember.ID)
@@ -161,7 +171,7 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 
 	// Alice's data is intact.
 	if got, err := quests.Get(ctx, alice, h.ID, aliceQuest.ID); err != nil || got.Name != "Dishes" || got.Points != 10 ||
-		got.RepeatDays != 1 || got.Notes != "Wash and dry" {
+		got.RepeatDays != 1 || got.Notes != "Wash and dry" || got.ClaimedBy != nil || got.ClaimedAt.Valid {
 		t.Errorf("alice's quest was modified: %+v, %v", got, err)
 	}
 	if list, _, err := quests.List(ctx, alice, h.ID, app.QuestPage{Limit: 10}); err != nil || len(list) != 1 {

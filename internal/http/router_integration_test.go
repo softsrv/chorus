@@ -358,6 +358,55 @@ func TestAPI_EndToEnd(t *testing.T) {
 		}
 	}
 
+	// Accept: a verified acting member takes an available quest; the 200
+	// body carries its notes, claimed_by and available=false, and a second
+	// member is told it is taken.
+	type acceptedBody struct {
+		ID        uuid.UUID  `json:"id"`
+		Notes     string     `json:"notes"`
+		Available bool       `json:"available"`
+		ClaimedBy *uuid.UUID `json:"claimed_by"`
+		ClaimedAt *time.Time `json:"claimed_at"`
+	}
+	var member, member2 struct {
+		ID uuid.UUID `json:"id"`
+	}
+	s.expect(http.StatusCreated, "POST", hp+"/family-members", parent.AccessToken, map[string]string{"name": "Kid", "pin": "4321"}, &member)
+	s.expect(http.StatusCreated, "POST", hp+"/family-members", parent.AccessToken, map[string]string{"name": "Kid two"}, &member2)
+	var acceptQuest acceptedBody
+	s.expect(http.StatusCreated, "POST", hp+"/quests", parent.AccessToken, map[string]any{"name": "Take out trash", "notes": "Blue bin too"}, &acceptQuest)
+	if !acceptQuest.Available || acceptQuest.ClaimedBy != nil {
+		t.Errorf("new quest: %+v, want available and unclaimed", acceptQuest)
+	}
+	ap := hp + "/quests/" + acceptQuest.ID.String() + "/accept"
+	var wrongPin apiError
+	s.expect(http.StatusForbidden, "POST", ap, parent.AccessToken, map[string]any{"member_id": member.ID, "pin": "0000"}, &wrongPin)
+	if wrongPin.Error.Code != "wrong_pin" {
+		t.Errorf("accept with wrong pin: code %q", wrongPin.Error.Code)
+	}
+	s.expect(http.StatusUnprocessableEntity, "POST", ap, parent.AccessToken, map[string]any{"pin": "4321"}, nil)
+	var accepted acceptedBody
+	s.expect(http.StatusOK, "POST", ap, parent.AccessToken, map[string]any{"member_id": member.ID, "pin": "4321"}, &accepted)
+	if accepted.ID != acceptQuest.ID || accepted.Notes != "Blue bin too" || accepted.Available ||
+		accepted.ClaimedBy == nil || *accepted.ClaimedBy != member.ID || accepted.ClaimedAt == nil {
+		t.Errorf("accepted quest: %+v", accepted)
+	}
+	var afterAccept struct {
+		Items []acceptedBody `json:"items"`
+	}
+	s.expect(http.StatusOK, "GET", hp+"/quests", parent.AccessToken, nil, &afterAccept)
+	for _, it := range afterAccept.Items {
+		if it.ID == acceptQuest.ID && (it.Available || it.ClaimedBy == nil || *it.ClaimedBy != member.ID) {
+			t.Errorf("listed accepted quest: %+v", it)
+		}
+	}
+	var taken apiError
+	s.expect(http.StatusConflict, "POST", ap, parent.AccessToken, map[string]any{"member_id": member2.ID}, &taken)
+	if taken.Error.Code != "quest_taken" {
+		t.Errorf("second accept: code %q, want quest_taken", taken.Error.Code)
+	}
+	s.expect(http.StatusNoContent, "DELETE", hp+"/quests/"+acceptQuest.ID.String(), parent.AccessToken, nil, nil)
+
 	// Library copy keeps the library's values and its id.
 	var library struct {
 		Items []questBody `json:"items"`

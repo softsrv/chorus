@@ -24,6 +24,7 @@ type questServicer interface {
 	Delete(ctx context.Context, userID, householdID, questID uuid.UUID, adminPin string) error
 	CopyFromLibrary(ctx context.Context, userID, householdID, libraryID uuid.UUID, adminPin string) (db.HouseholdQuest, error)
 	ListLibrary(ctx context.Context) ([]db.QuestLibrary, error)
+	Accept(ctx context.Context, userID, householdID, questID uuid.UUID, act app.MemberAction) (db.HouseholdQuest, error)
 }
 
 // QuestHandler serves /api/v1/households/{householdID}/quests and
@@ -201,6 +202,50 @@ func (h *QuestHandler) CopyFromLibrary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.JSON(w, http.StatusCreated, toQuest(quest))
+}
+
+// questActionRequest is the body of a member's quest action: the acting
+// member and, when the member has one, their PIN.
+type questActionRequest struct {
+	MemberID uuid.UUID `json:"member_id"`
+	PIN      *string   `json:"pin"`
+}
+
+// decodeQuestAction reads a strict questActionRequest; a missing member_id
+// is a 422 on that field.
+func decodeQuestAction(w http.ResponseWriter, r *http.Request) (app.MemberAction, bool) {
+	var req questActionRequest
+	if !decodeJSON(w, r, &req) {
+		return app.MemberAction{}, false
+	}
+	if req.MemberID == uuid.Nil {
+		writeError(w, r, &app.ValidationError{Fields: map[string]string{"member_id": "is required"}})
+		return app.MemberAction{}, false
+	}
+	act := app.MemberAction{MemberID: req.MemberID}
+	if req.PIN != nil {
+		act.PIN = *req.PIN
+	}
+	return act, true
+}
+
+// Accept assigns an available quest to the acting member:
+// {"member_id": "...", "pin": "1234"}.
+func (h *QuestHandler) Accept(w http.ResponseWriter, r *http.Request) {
+	hid, qid, ok := parseQuestIDs(w, r)
+	if !ok {
+		return
+	}
+	act, ok := decodeQuestAction(w, r)
+	if !ok {
+		return
+	}
+	quest, err := h.svc.Accept(r.Context(), currentUser(r), hid, qid, act)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, toQuest(quest))
 }
 
 // Library lists the global quest library.

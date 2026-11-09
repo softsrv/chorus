@@ -31,3 +31,14 @@ RETURNING *;
 
 -- name: DeleteHouseholdQuest :execrows
 DELETE FROM household_quests WHERE household_id = $1 AND id = $2;
+
+-- name: ClaimQuest :one
+-- Assigns an available quest to a family member. The availability check and
+-- the write are one statement, so of two concurrent claims exactly one
+-- matches; the other gets no row.
+UPDATE household_quests
+SET claimed_by = sqlc.arg(member_id), claimed_at = NOW(), updated_at = NOW()
+WHERE household_id = sqlc.arg(household_id) AND id = sqlc.arg(id)
+  AND claimed_by IS NULL
+  AND (available_at IS NULL OR available_at <= NOW())
+RETURNING *;

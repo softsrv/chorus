@@ -11,6 +11,46 @@ import (
 	"github.com/google/uuid"
 )
 
+const claimQuest = `-- name: ClaimQuest :one
+UPDATE household_quests
+SET claimed_by = $1, claimed_at = NOW(), updated_at = NOW()
+WHERE household_id = $2 AND id = $3
+  AND claimed_by IS NULL
+  AND (available_at IS NULL OR available_at <= NOW())
+RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at
+`
+
+type ClaimQuestParams struct {
+	MemberID    *uuid.UUID `json:"member_id"`
+	HouseholdID uuid.UUID  `json:"household_id"`
+	ID          uuid.UUID  `json:"id"`
+}
+
+// Assigns an available quest to a family member. The availability check and
+// the write are one statement, so of two concurrent claims exactly one
+// matches; the other gets no row.
+func (q *Queries) ClaimQuest(ctx context.Context, arg ClaimQuestParams) (HouseholdQuest, error) {
+	row := q.db.QueryRow(ctx, claimQuest, arg.MemberID, arg.HouseholdID, arg.ID)
+	var i HouseholdQuest
+	err := row.Scan(
+		&i.ID,
+		&i.HouseholdID,
+		&i.LibraryID,
+		&i.Name,
+		&i.Points,
+		&i.RepeatDays,
+		&i.Notes,
+		&i.ClaimedBy,
+		&i.ClaimedAt,
+		&i.DoneAt,
+		&i.CompletedAt,
+		&i.AvailableAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const createHouseholdQuest = `-- name: CreateHouseholdQuest :one
 INSERT INTO household_quests (id, household_id, library_id, name, points, repeat_days, notes, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())

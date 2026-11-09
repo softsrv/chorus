@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -153,6 +154,44 @@ func (s *QuestService) CopyFromLibrary(ctx context.Context, userID, householdID,
 	return s.insert(ctx, householdID, &item.ID, validQuest{
 		name: item.Name, points: item.Points, repeatDays: item.RepeatDays, notes: item.Notes,
 	})
+}
+
+// MemberAction names the family member taking a quest action and the PIN
+// that proves it. PIN is empty when the member has none.
+type MemberAction struct {
+	MemberID uuid.UUID
+	PIN      string
+}
+
+// QuestAvailable reports whether a quest is in the pool: nobody holds it and
+// its repeat days since the last approval have passed.
+func QuestAvailable(q db.HouseholdQuest, now time.Time) bool {
+	return q.ClaimedBy == nil && (!q.AvailableAt.Valid || !q.AvailableAt.Time.After(now))
+}
+
+// Accept assigns an available quest to the acting member. The member must
+// belong to the household and prove themselves with their PIN. A quest that
+// another member holds, or that is waiting out its repeat days, gives
+// ErrQuestTaken; of two concurrent accepts exactly one succeeds.
+func (s *QuestService) Accept(ctx context.Context, userID, householdID, questID uuid.UUID, act MemberAction) (db.HouseholdQuest, error) {
+	if _, err := getHousehold(ctx, s.q, userID, householdID); err != nil {
+		return db.HouseholdQuest{}, err
+	}
+	if _, err := VerifyMemberPin(ctx, s.q, householdID, act.MemberID, act.PIN); err != nil {
+		return db.HouseholdQuest{}, err
+	}
+	quest, err := s.q.ClaimQuest(ctx, db.ClaimQuestParams{HouseholdID: householdID, ID: questID, MemberID: &act.MemberID})
+	if err == nil {
+		return quest, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return db.HouseholdQuest{}, fmt.Errorf("claim quest: %w", err)
+	}
+	// No row: either the quest is not in this household, or it is not available.
+	if _, err := notFoundIfNoRows(s.q.GetHouseholdQuest(ctx, db.GetHouseholdQuestParams{HouseholdID: householdID, ID: questID})); err != nil {
+		return db.HouseholdQuest{}, err
+	}
+	return db.HouseholdQuest{}, ErrQuestTaken
 }
 
 // ListLibrary returns the global quest library. It holds no household data,

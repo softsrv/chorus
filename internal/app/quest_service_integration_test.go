@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/softsrv/chorus/internal/app"
 	"github.com/softsrv/chorus/internal/db"
@@ -446,5 +447,85 @@ func TestIntegration_QuestWritesNeedAdminPin(t *testing.T) {
 	}
 	if _, err := quests.Update(ctx, alice, h.ID, quest.ID, in, "2468"); err != nil {
 		t.Fatalf("update with right pin: %v", err)
+	}
+}
+
+// TestIntegration_QuestAccept: a verified acting member accepts an available
+// quest; it is then theirs, carries its notes, and no other member sees it as
+// available. A wrong PIN or a member from another household changes nothing.
+func TestIntegration_QuestAccept(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	households := app.NewHouseholdService(q, pool)
+	quests := app.NewQuestService(q)
+	familySvc := app.NewFamilyService(q, 10)
+	ctx := context.Background()
+
+	alice := registerVerified(t, pool, authSvc, mailer, "questaccept").User.ID
+	h, err := households.Create(ctx, alice, app.HouseholdInput{Name: "Accept Family"})
+	if err != nil {
+		t.Fatalf("create household: %v", err)
+	}
+	other, err := households.Create(ctx, alice, app.HouseholdInput{Name: "Other Family"})
+	if err != nil {
+		t.Fatalf("create other household: %v", err)
+	}
+	memberA, err := familySvc.Create(ctx, alice, h.ID, app.FamilyMemberInput{Name: "Ann", PIN: "1111"}, "")
+	if err != nil {
+		t.Fatalf("create member A: %v", err)
+	}
+	memberB, err := familySvc.Create(ctx, alice, h.ID, app.FamilyMemberInput{Name: "Ben"}, "")
+	if err != nil {
+		t.Fatalf("create member B: %v", err)
+	}
+	outsider, err := familySvc.Create(ctx, alice, other.ID, app.FamilyMemberInput{Name: "Otto"}, "")
+	if err != nil {
+		t.Fatalf("create outsider member: %v", err)
+	}
+	quest, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "Feed the cat", Points: num(5), Notes: "Half a scoop"}, "")
+	if err != nil {
+		t.Fatalf("create quest: %v", err)
+	}
+	if !app.QuestAvailable(quest, time.Now()) {
+		t.Fatalf("a new quest is not available: %+v", quest)
+	}
+
+	// A wrong PIN, or a member of another household, cannot accept it.
+	if _, err := quests.Accept(ctx, alice, h.ID, quest.ID, app.MemberAction{MemberID: memberA.ID, PIN: "9999"}); !errors.Is(err, app.ErrWrongPIN) {
+		t.Errorf("accept with wrong pin: %v", err)
+	}
+	if _, err := quests.Accept(ctx, alice, h.ID, quest.ID, app.MemberAction{MemberID: outsider.ID}); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("accept as another household's member: %v", err)
+	}
+	if got, err := quests.Get(ctx, alice, h.ID, quest.ID); err != nil || got.ClaimedBy != nil {
+		t.Fatalf("quest claimed by a refused accept: %+v %v", got, err)
+	}
+
+	accepted, err := quests.Accept(ctx, alice, h.ID, quest.ID, app.MemberAction{MemberID: memberA.ID, PIN: "1111"})
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if accepted.ClaimedBy == nil || *accepted.ClaimedBy != memberA.ID || !accepted.ClaimedAt.Valid ||
+		accepted.Notes != "Half a scoop" || app.QuestAvailable(accepted, time.Now()) {
+		t.Errorf("accepted quest: %+v", accepted)
+	}
+
+	// The list marks it unavailable, so it is in no member's available set.
+	list, _, err := quests.List(ctx, alice, h.ID, app.QuestPage{Limit: 10})
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list: %+v %v", list, err)
+	}
+	if list[0].ClaimedBy == nil || *list[0].ClaimedBy != memberA.ID || app.QuestAvailable(list[0], time.Now()) {
+		t.Errorf("listed quest still available: %+v", list[0])
+	}
+
+	// Another member accepting it is told it is taken, and A keeps it.
+	if _, err := quests.Accept(ctx, alice, h.ID, quest.ID, app.MemberAction{MemberID: memberB.ID}); !errors.Is(err, app.ErrQuestTaken) {
+		t.Errorf("second accept: %v, want ErrQuestTaken", err)
+	}
+	if got, err := quests.Get(ctx, alice, h.ID, quest.ID); err != nil || got.ClaimedBy == nil || *got.ClaimedBy != memberA.ID {
+		t.Errorf("quest after second accept: %+v %v", got, err)
 	}
 }

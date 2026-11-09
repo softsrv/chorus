@@ -15,6 +15,10 @@ type Querier interface {
 	AddHouseholdMember(ctx context.Context, arg AddHouseholdMemberParams) error
 	AddMemberPoints(ctx context.Context, arg AddMemberPointsParams) (FamilyMember, error)
 	ClaimHouseholdProvisioning(ctx context.Context, id uuid.UUID) (int64, error)
+	// Assigns an available quest to a family member. The availability check and
+	// the write are one statement, so of two concurrent claims exactly one
+	// matches; the other gets no row.
+	ClaimQuest(ctx context.Context, arg ClaimQuestParams) (HouseholdQuest, error)
 	// Single use: conditional on used_at IS NULL, unexpired, and the flow's
 	// purpose, so a state can't be replayed or used to complete another flow.
 	ConsumeOAuthState(ctx context.Context, arg ConsumeOAuthStateParams) (OauthState, error)
