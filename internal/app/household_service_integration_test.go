@@ -27,6 +27,7 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	households := app.NewHouseholdService(q, pool)
 	quests := app.NewQuestService(q, pool)
 	familySvc := app.NewFamilyService(q, 10)
+	rewards := app.NewRewardService(q)
 	ctx := context.Background()
 
 	alice := registerVerified(t, pool, authSvc, mailer, "alice").User.ID
@@ -62,6 +63,10 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		t.Fatalf("ListLibrary: %v", err)
 	}
 	libraryItemID := libraryItems[0].ID
+	aliceReward, err := rewards.Create(ctx, alice, h.ID, app.RewardInput{Description: "Movie night", Cost: num(300)}, "")
+	if err != nil {
+		t.Fatalf("Create reward: %v", err)
+	}
 	if _, err := family.Set(ctx, alice, h.ID, "family-y@group.calendar.google.com"); err != nil {
 		t.Fatalf("Set family calendar: %v", err)
 	}
@@ -149,6 +154,24 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	// Cross-household ID smuggling with family members:
 	_, checks["get family member via own household"] = familySvc.Get(ctx, mallory, mh.ID, aliceMember.ID)
 	checks["remove family member via own household"] = familySvc.Remove(ctx, mallory, mh.ID, aliceMember.ID, "")
+	// Reward isolation: every reward operation by an outsider is ErrNotFound,
+	// and Alice's reward id smuggled under Mallory's own household fails too.
+	rewardLibrary, err := rewards.ListLibrary(ctx)
+	if err != nil || len(rewardLibrary) == 0 {
+		t.Fatalf("ListLibrary rewards: %v", err)
+	}
+	_, checks["list rewards"] = rewards.List(ctx, mallory, h.ID)
+	_, checks["get reward"] = rewards.Get(ctx, mallory, h.ID, aliceReward.ID)
+	_, checks["create reward"] = rewards.Create(ctx, mallory, h.ID, app.RewardInput{Description: "Evil", Cost: num(1)}, "")
+	_, checks["update reward"] = rewards.Update(ctx, mallory, h.ID, aliceReward.ID, app.RewardInput{Description: "Pwned", Cost: num(0)}, "")
+	checks["delete reward"] = rewards.Delete(ctx, mallory, h.ID, aliceReward.ID, "")
+	_, checks["adopt reward from library"] = rewards.CopyFromLibrary(ctx, mallory, h.ID, rewardLibrary[0].ID, "")
+	_, checks["get reward via own household"] = rewards.Get(ctx, mallory, mh.ID, aliceReward.ID)
+	_, checks["update reward via own household"] = rewards.Update(ctx, mallory, mh.ID, aliceReward.ID, app.RewardInput{Description: "Smuggled", Cost: num(0)}, "")
+	checks["delete reward via own household"] = rewards.Delete(ctx, mallory, mh.ID, aliceReward.ID, "")
+	if own, err := rewards.List(ctx, mallory, mh.ID); err != nil || len(own) != 0 {
+		t.Errorf("mallory's own reward list shows other households' rewards: %+v, %v", own, err)
+	}
 
 	for name, err := range checks {
 		if !errors.Is(err, app.ErrNotFound) {
@@ -209,6 +232,10 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	}
 	if m, err := familySvc.Get(ctx, alice, h.ID, aliceMember.ID); err != nil || m.Points != 0 {
 		t.Errorf("alice's member points changed by the outsider: %+v, %v", m, err)
+	}
+	if list, err := rewards.List(ctx, alice, h.ID); err != nil || len(list) != 1 || list[0].ID != aliceReward.ID ||
+		list[0].Description != "Movie night" || list[0].Cost != 300 || list[0].LibraryID != nil {
+		t.Errorf("alice's rewards after outsider attempts = %+v, %v; want only Movie night / 300", list, err)
 	}
 	if st, err := family.Status(ctx, alice, h.ID); err != nil || st.CalendarID != "family-y@group.calendar.google.com" || st.SetByID != alice {
 		t.Errorf("alice's family calendar was modified: %+v, %v", st, err)

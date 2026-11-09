@@ -326,6 +326,108 @@ func TestIntegration_QuestLibraryGlobalAndReadOnly(t *testing.T) {
 	}
 }
 
+// TestIntegration_RewardLibraryAdoptAndGlobal: the reward library is one
+// global, read-only table (no household_id) that every household reads the
+// same, seeded with 6 rewards. Adopting copies its description, cost and
+// library_id; editing the copy leaves the library and other households'
+// adoptions untouched; an unknown library id is ErrNotFound.
+func TestIntegration_RewardLibraryAdoptAndGlobal(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	households := app.NewHouseholdService(q, pool)
+	rewards := app.NewRewardService(q)
+	ctx := context.Background()
+
+	var colCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM information_schema.columns
+		WHERE table_name = 'reward_library' AND column_name = 'household_id'
+	`).Scan(&colCount); err != nil {
+		t.Fatalf("query information_schema for reward_library: %v", err)
+	}
+	if colCount != 0 {
+		t.Fatalf("reward_library table has a household_id column; must have none")
+	}
+
+	alice := registerVerified(t, pool, authSvc, mailer, "rewardlibalice").User.ID
+	bob := registerVerified(t, pool, authSvc, mailer, "rewardlibbob").User.ID
+	hAlice, err := households.Create(ctx, alice, app.HouseholdInput{Name: "Alice Rewards"})
+	if err != nil {
+		t.Fatalf("create alice household: %v", err)
+	}
+	hBob, err := households.Create(ctx, bob, app.HouseholdInput{Name: "Bob Rewards"})
+	if err != nil {
+		t.Fatalf("create bob household: %v", err)
+	}
+
+	before, err := rewards.ListLibrary(ctx)
+	if err != nil {
+		t.Fatalf("list reward library: %v", err)
+	}
+	if len(before) != 6 {
+		t.Fatalf("reward library count: got %d, want 6", len(before))
+	}
+	var ten *db.RewardLibrary
+	for i := range before {
+		if i > 0 && before[i-1].Cost > before[i].Cost {
+			t.Errorf("reward library not ordered by cost: %+v before %+v", before[i-1], before[i])
+		}
+		if before[i].Description == "$10" {
+			ten = &before[i]
+		}
+	}
+	if ten == nil || ten.Cost != 1000 {
+		t.Fatalf("seeded '$10' reward = %+v, want cost 1000", ten)
+	}
+
+	adopted, err := rewards.CopyFromLibrary(ctx, alice, hAlice.ID, ten.ID, "")
+	if err != nil {
+		t.Fatalf("adopt '$10': %v", err)
+	}
+	if adopted.HouseholdID != hAlice.ID || adopted.LibraryID == nil || *adopted.LibraryID != ten.ID ||
+		adopted.Description != "$10" || adopted.Cost != 1000 {
+		t.Fatalf("adopted reward = %+v, want '$10' / 1000 from library %s", adopted, ten.ID)
+	}
+	edited, err := rewards.Update(ctx, alice, hAlice.ID, adopted.ID, app.RewardInput{Description: "Twenty dollars", Cost: num(2000)}, "")
+	if err != nil {
+		t.Fatalf("edit adopted reward: %v", err)
+	}
+	if edited.Description != "Twenty dollars" || edited.Cost != 2000 || edited.LibraryID == nil || *edited.LibraryID != ten.ID {
+		t.Fatalf("edited reward = %+v", edited)
+	}
+
+	// Bob's adoption starts from the library's values, not Alice's edit.
+	bobCopy, err := rewards.CopyFromLibrary(ctx, bob, hBob.ID, ten.ID, "")
+	if err != nil {
+		t.Fatalf("bob adopt '$10': %v", err)
+	}
+	if bobCopy.Description != "$10" || bobCopy.Cost != 1000 {
+		t.Fatalf("bob's copy = %+v, want '$10' / 1000", bobCopy)
+	}
+
+	after, err := rewards.ListLibrary(ctx)
+	if err != nil {
+		t.Fatalf("list reward library after edits: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("library size changed: %d -> %d", len(before), len(after))
+	}
+	for i := range before {
+		if before[i] != after[i] {
+			t.Errorf("library row %d changed: %+v -> %+v", i, before[i], after[i])
+		}
+	}
+
+	if _, err := rewards.CopyFromLibrary(ctx, alice, hAlice.ID, uuid.New(), ""); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("adopt unknown library id: got %v, want ErrNotFound", err)
+	}
+	if list, err := rewards.List(ctx, alice, hAlice.ID); err != nil || len(list) != 1 {
+		t.Errorf("alice's rewards = %+v, %v; want exactly the one adopted", list, err)
+	}
+}
+
 // TestIntegration_LibrarySeeded proves CLM-9:
 // - ListLibrary has exactly 14 quests including 'Wash the car' (40 points, 30 days), 'Make your bed'.
 // - reward_library table has exactly 6 rows (query via pool SQL) including '$10' cost 1000 and 'Choose the game on family game night' 200.

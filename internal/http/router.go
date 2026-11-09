@@ -32,6 +32,7 @@ type RouterConfig struct {
 	FamilyCalendar    *app.FamilyCalendar // nil = built from Queries + GoogleCalendar
 	FamilySvc         *app.FamilyService  // nil = built from Queries
 	QuestSvc          *app.QuestService   // nil = built from Queries
+	RewardSvc         *app.RewardService  // nil = built from Queries
 	GoogleSignIn      *app.GoogleSignIn   // nil = Google sign-in disabled
 	GoogleCalendar    *app.GoogleCalendar // nil = Google Calendar unavailable
 	JWTSecret         string
@@ -66,6 +67,11 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 		questSvc = app.NewQuestService(cfg.Queries, cfg.Pool)
 	}
 	questH := handlers.NewQuestHandler(questSvc)
+	rewardSvc := cfg.RewardSvc
+	if rewardSvc == nil {
+		rewardSvc = app.NewRewardService(cfg.Queries)
+	}
+	rewardH := handlers.NewRewardHandler(rewardSvc)
 	googleH := handlers.NewGoogleHandler(cfg.GoogleSignIn, cfg.TrustedProxyCount)
 	calendarH := handlers.NewGoogleCalendarHandler(cfg.GoogleCalendar)
 
@@ -177,6 +183,18 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	// Approval is admin-only and, once an admin PIN is set, needs X-Admin-PIN.
 	api.Handle("POST /api/v1/households/{householdID}/quests/{questID}/approve", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Approve))))
 	api.Handle("POST /api/v1/households/{householdID}/quests/{questID}/reject", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Reject))))
+
+	// ── Rewards ───────────────────────────────────────────────────────────────
+	// Same rules as quest writes: admin-only, X-Admin-PIN once one is set, on
+	// the PIN rate limiter. The library is global and read-only. Rewards are a
+	// priced list only: there is no redeem, buy or spend route.
+	api.Handle("GET /api/v1/reward-library", verified(rewardH.Library))
+	api.Handle("GET /api/v1/households/{householdID}/rewards", verified(rewardH.List))
+	api.Handle("POST /api/v1/households/{householdID}/rewards", authMW(middleware.RequireEmailVerified(limit(pinRL, rewardH.Create))))
+	api.Handle("POST /api/v1/households/{householdID}/rewards/from-library", authMW(middleware.RequireEmailVerified(limit(pinRL, rewardH.CopyFromLibrary))))
+	api.Handle("GET /api/v1/households/{householdID}/rewards/{rewardID}", verified(rewardH.Get))
+	api.Handle("PUT /api/v1/households/{householdID}/rewards/{rewardID}", authMW(middleware.RequireEmailVerified(limit(pinRL, rewardH.Update))))
+	api.Handle("DELETE /api/v1/households/{householdID}/rewards/{rewardID}", authMW(middleware.RequireEmailVerified(limit(pinRL, rewardH.Delete))))
 
 	// ── Family calendar ────────────────────────────────────────────────────
 	// Entries come from the household's chosen Google calendar. Chorus has no

@@ -124,6 +124,26 @@ Quest lifecycle: available → `accept` (held by a member) → `done` (`awaiting
 
 Validation is per field and all at once: a `422` lists every bad field in `fields` — `name` (1–200 characters), `points` (a whole number ≥ 0; a non-numeric value is rejected), `repeat_days` (a whole number ≥ 1), `notes` (≤ 2000 characters). Nothing is saved on a `422`. A non-member, or a quest id from another household, gets `404`. Quest writes share the PIN rate limit.
 
+### Rewards 🔒 — `/households/{id}/rewards`, `/reward-library`
+
+Rewards are a priced list created by the administrator or copied from the library. Each reward has a text description and a point cost. Rewards cannot be redeemed, bought or spent yet: no redemption or spending route exists, and no reward action changes any family member's points.
+
+Reward: `id, household_id, library_id, description, cost, created_at, updated_at`. `library_id` is set when the reward was copied from the library.
+
+Library reward: `id, description, cost`. The reward library is global, read-only and seeded with 6 starter ideas; it holds no household's own data and is ordered stably by cost then description.
+
+| Method & path | Body | Notes |
+|---|---|---|
+| `GET /reward-library` | none | Global read-only library. `{items: [library reward]}` |
+| `GET /households/{id}/rewards` | none | Any member. `{items: [reward]}`; `{items: []}` when there are none |
+| `POST /households/{id}/rewards` | `description, cost` | admin; `X-Admin-PIN` header if set. `201` reward |
+| `POST /households/{id}/rewards/from-library` | `library_id` | admin; `X-Admin-PIN` header if set. Copies the library reward's description and cost; editing or deleting the copy never changes the library. `201` reward, `404` for an unknown `library_id` |
+| `GET /households/{id}/rewards/{rewardId}` | none | Any member |
+| `PUT /households/{id}/rewards/{rewardId}` | `description, cost` | admin; `X-Admin-PIN` header if set. Full replacement |
+| `DELETE /households/{id}/rewards/{rewardId}` | none | admin; `X-Admin-PIN` header if set. `204` |
+
+Validation is per field: a `422` lists bad fields in `fields` — `description` (1–200 characters after trimming), `cost` (required whole number ≥ 0 that fits int32; non-numeric or fractional values rejected). On `/from-library`, a missing `library_id` returns `422`. Nothing is saved on a `422`. Every household reward operation checks household membership first: non-members or a reward id from another household return `404 not_found`. While an admin PIN is set, write endpoints require `X-Admin-PIN` (`403 admin_pin_required` if missing, `403 wrong_pin` if wrong). Reward writes share the PIN rate limit.
+
 ### Family calendar 🔒 — `/households/{id}/calendar`, `/households/{id}/events`
 
 One member who has connected Google Calendar picks one of their own calendars as the household's family calendar. Every member then sees its entries, which the server fetches with that member's Google token. Chorus has no route that creates, moves or deletes an entry. Its one write to Google is an entry's title, when a member tags it: the tagged members' display names go in one trailing group, e.g. `Dentist [Mom, Sam]`. Chorus stores no title of its own. The family calendar is cleared when its member disconnects Google or deletes their account.
