@@ -31,6 +31,7 @@ type Querier interface {
 	// email, so the account starts verified.
 	CreateGoogleUser(ctx context.Context, arg CreateGoogleUserParams) (User, error)
 	CreateHousehold(ctx context.Context, arg CreateHouseholdParams) (Household, error)
+	CreateHouseholdQuest(ctx context.Context, arg CreateHouseholdQuestParams) (HouseholdQuest, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	DeleteAdminPin(ctx context.Context, householdID uuid.UUID) (int64, error)
 	DeleteChore(ctx context.Context, arg DeleteChoreParams) (int64, error)
@@ -42,6 +43,7 @@ type Querier interface {
 	DeleteHousehold(ctx context.Context, id uuid.UUID) error
 	// Only the member who set it can clear it.
 	DeleteHouseholdCalendar(ctx context.Context, arg DeleteHouseholdCalendarParams) (int64, error)
+	DeleteHouseholdQuest(ctx context.Context, arg DeleteHouseholdQuestParams) (int64, error)
 	// Deletes every household where the user is the only member.
 	DeleteSoleMemberHouseholds(ctx context.Context, userID uuid.UUID) error
 	DeleteStaleOAuthStates(ctx context.Context) (int64, error)
@@ -62,8 +64,10 @@ type Querier interface {
 	// as "not found" so household IDs can't be probed.
 	GetHouseholdForMember(ctx context.Context, arg GetHouseholdForMemberParams) (GetHouseholdForMemberRow, error)
 	GetHouseholdMember(ctx context.Context, arg GetHouseholdMemberParams) (HouseholdMember, error)
+	GetHouseholdQuest(ctx context.Context, arg GetHouseholdQuestParams) (HouseholdQuest, error)
 	GetOldestRecentVerificationCode(ctx context.Context, userID uuid.UUID) (pgtype.Timestamptz, error)
 	GetPasswordResetTokenByHash(ctx context.Context, tokenHash string) (PasswordResetToken, error)
+	GetQuestLibraryItem(ctx context.Context, id uuid.UUID) (QuestLibrary, error)
 	GetRefreshTokenByHash(ctx context.Context, tokenHash string) (RefreshToken, error)
 	GetRefreshTokenByID(ctx context.Context, id uuid.UUID) (RefreshToken, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
@@ -89,7 +93,13 @@ type Querier interface {
 	// predicate guarantees a member ID from another household can never be
 	// read or modified through this one.
 	ListFamilyMembers(ctx context.Context, householdID uuid.UUID) ([]FamilyMember, error)
+	ListHouseholdQuests(ctx context.Context, arg ListHouseholdQuestsParams) ([]HouseholdQuest, error)
 	ListHouseholdsForUser(ctx context.Context, userID uuid.UUID) ([]ListHouseholdsForUserRow, error)
+	// Household quest queries are scoped by household_id. Membership is checked
+	// by the service layer first; the household_id predicate guarantees a quest ID
+	// from another household can never be read or modified through this one.
+	// The quest library is global and read-only: there are no write queries on it.
+	ListQuestLibrary(ctx context.Context) ([]QuestLibrary, error)
 	LockAccount(ctx context.Context, arg LockAccountParams) error
 	MarkGoogleCalendarConnectionBroken(ctx context.Context, userID uuid.UUID) (int64, error)
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
@@ -116,6 +126,7 @@ type Querier interface {
 	UpdateEvent(ctx context.Context, arg UpdateEventParams) (Event, error)
 	UpdateGoogleCalendarAccessToken(ctx context.Context, arg UpdateGoogleCalendarAccessTokenParams) (int64, error)
 	UpdateHousehold(ctx context.Context, arg UpdateHouseholdParams) (Household, error)
+	UpdateHouseholdQuest(ctx context.Context, arg UpdateHouseholdQuestParams) (HouseholdQuest, error)
 	UpdatePasswordHash(ctx context.Context, arg UpdatePasswordHashParams) error
 	UpdateRefreshTokenLastUsed(ctx context.Context, arg UpdateRefreshTokenLastUsedParams) error
 	UpsertAdminPin(ctx context.Context, arg UpsertAdminPinParams) error

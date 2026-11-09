@@ -155,6 +155,53 @@ func toChore(c db.Chore) choreJSON {
 	}
 }
 
+// questJSON is a household quest. claimed_by/done_at belong to the quest
+// lifecycle; they are exposed read-only and change only through quest actions.
+type questJSON struct {
+	ID          uuid.UUID  `json:"id"`
+	HouseholdID uuid.UUID  `json:"household_id"`
+	LibraryID   *uuid.UUID `json:"library_id"`
+	Name        string     `json:"name"`
+	Points      int32      `json:"points"`
+	RepeatDays  int32      `json:"repeat_days"`
+	Notes       string     `json:"notes"`
+	ClaimedBy   *uuid.UUID `json:"claimed_by"`
+	DoneAt      *time.Time `json:"done_at"`
+	AvailableAt *time.Time `json:"available_at"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+func toQuest(q db.HouseholdQuest) questJSON {
+	return questJSON{
+		ID:          q.ID,
+		HouseholdID: q.HouseholdID,
+		LibraryID:   q.LibraryID,
+		Name:        q.Name,
+		Points:      q.Points,
+		RepeatDays:  q.RepeatDays,
+		Notes:       q.Notes,
+		ClaimedBy:   q.ClaimedBy,
+		DoneAt:      timePtr(q.DoneAt),
+		AvailableAt: timePtr(q.AvailableAt),
+		CreatedAt:   q.CreatedAt.Time.UTC(),
+		UpdatedAt:   q.UpdatedAt.Time.UTC(),
+	}
+}
+
+// libraryQuestJSON is a quest of the global, read-only library.
+type libraryQuestJSON struct {
+	ID         uuid.UUID `json:"id"`
+	Name       string    `json:"name"`
+	Points     int32     `json:"points"`
+	RepeatDays int32     `json:"repeat_days"`
+	Notes      string    `json:"notes"`
+}
+
+func toLibraryQuest(q db.QuestLibrary) libraryQuestJSON {
+	return libraryQuestJSON{ID: q.ID, Name: q.Name, Points: q.Points, RepeatDays: q.RepeatDays, Notes: q.Notes}
+}
+
 func mapSlice[T, U any](in []T, f func(T) U) []U {
 	out := make([]U, len(in))
 	for i, v := range in {

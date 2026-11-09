@@ -14,10 +14,6 @@ import (
 	"github.com/softsrv/chorus/internal/db"
 )
 
-// MaxPageSize caps list endpoints so a single request can't pull an unbounded
-// number of rows.
-const MaxPageSize = 100
-
 // ChoreInput is the editable part of a chore.
 type ChoreInput struct {
 	Title       string
@@ -226,16 +222,4 @@ func toPgDate(t *time.Time) pgtype.Date {
 		return pgtype.Date{}
 	}
 	return pgtype.Date{Time: time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC), Valid: true}
-}
-
-// notFoundIfNoRows maps pgx.ErrNoRows to ErrNotFound for single-row queries.
-func notFoundIfNoRows[T any](v T, err error) (T, error) {
-	if err != nil {
-		var zero T
-		if errors.Is(err, pgx.ErrNoRows) {
-			return zero, ErrNotFound
-		}
-		return zero, err
-	}
-	return v, nil
 }

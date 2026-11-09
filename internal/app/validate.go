@@ -1,6 +1,8 @@
 package app
 
 import (
+	"fmt"
+	"math"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -62,6 +64,24 @@ func (v *validator) text(field, s string, minLen, maxLen int, multiline bool) st
 // displayName validates and normalizes a user's display name.
 func (v *validator) displayName(s string) string {
 	return v.text("display_name", s, 1, 50, false)
+}
+
+// intField checks a numeric request field: absent gives def; present it must
+// be a whole number between minVal and the int32 maximum the column holds.
+func (v *validator) intField(field string, f NumberField, def, minVal int32) int32 {
+	switch {
+	case !f.Set:
+		return def
+	case f.Invalid:
+		v.fail(field, "must be a whole number")
+	case f.Value < int64(minVal):
+		v.fail(field, fmt.Sprintf("must be at least %d", minVal))
+	case f.Value > math.MaxInt32:
+		v.fail(field, "is too large")
+	default:
+		return int32(f.Value)
+	}
+	return def
 }
 
 // pin validates that s is exactly 4 ASCII digits.

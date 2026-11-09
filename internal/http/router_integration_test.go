@@ -279,10 +279,82 @@ func TestAPI_EndToEnd(t *testing.T) {
 	s.expect(http.StatusNoContent, "DELETE", cp, parent.AccessToken, nil, nil)
 	s.expect(http.StatusNotFound, "GET", cp, parent.AccessToken, nil, nil)
 
+	// Quest CRUD: what is posted is what GET returns.
+	type questBody struct {
+		ID         uuid.UUID  `json:"id"`
+		LibraryID  *uuid.UUID `json:"library_id"`
+		Name       string     `json:"name"`
+		Points     int        `json:"points"`
+		RepeatDays int        `json:"repeat_days"`
+		Notes      string     `json:"notes"`
+	}
+	var quests struct {
+		Items      []questBody `json:"items"`
+		NextOffset *int        `json:"next_offset"`
+	}
+	var rawList map[string]json.RawMessage
+	s.expect(http.StatusOK, "GET", hp+"/quests", parent.AccessToken, nil, &rawList)
+	if string(rawList["items"]) != "[]" {
+		t.Errorf("empty quest list: items = %s, want []", rawList["items"])
+	}
+	var quest questBody
+	s.expect(http.StatusCreated, "POST", hp+"/quests", parent.AccessToken, map[string]any{
+		"name": "Walk the dog", "points": 15, "repeat_days": 2, "notes": "Around the block",
+	}, &quest)
+	wantQuest := questBody{ID: quest.ID, Name: "Walk the dog", Points: 15, RepeatDays: 2, Notes: "Around the block"}
+	if quest != wantQuest {
+		t.Errorf("created quest: %+v", quest)
+	}
+	qp := hp + "/quests/" + quest.ID.String()
+	var gotQuest questBody
+	s.expect(http.StatusOK, "GET", qp, parent.AccessToken, nil, &gotQuest)
+	if gotQuest != wantQuest {
+		t.Errorf("get quest: %+v", gotQuest)
+	}
+	s.expect(http.StatusOK, "GET", hp+"/quests", parent.AccessToken, nil, &quests)
+	if len(quests.Items) != 1 || quests.Items[0] != wantQuest || quests.NextOffset != nil {
+		t.Errorf("list quests: %+v", quests)
+	}
+	s.expect(http.StatusOK, "PUT", qp, parent.AccessToken, map[string]any{
+		"name": "Walk the dog twice", "points": 20, "repeat_days": 1, "notes": "",
+	}, &gotQuest)
+	if gotQuest != (questBody{ID: quest.ID, Name: "Walk the dog twice", Points: 20, RepeatDays: 1}) {
+		t.Errorf("updated quest: %+v", gotQuest)
+	}
+	// One 422 lists every bad field, including a wrong-typed number.
+	var qerr apiError
+	if got := s.do("POST", hp+"/quests", parent.AccessToken, map[string]any{
+		"name": "", "points": "lots", "repeat_days": 0,
+	}, &qerr); got != http.StatusUnprocessableEntity ||
+		qerr.Error.Fields["name"] == "" || qerr.Error.Fields["points"] == "" || qerr.Error.Fields["repeat_days"] == "" {
+		t.Errorf("invalid quest: status %d, %+v", got, qerr)
+	}
+
+	// Library copy keeps the library's values and its id.
+	var library struct {
+		Items []questBody `json:"items"`
+	}
+	s.expect(http.StatusOK, "GET", "/api/v1/quest-library", parent.AccessToken, nil, &library)
+	if len(library.Items) == 0 {
+		t.Fatal("quest library is empty")
+	}
+	var copied questBody
+	s.expect(http.StatusCreated, "POST", hp+"/quests/from-library", parent.AccessToken,
+		map[string]any{"library_id": library.Items[0].ID}, &copied)
+	if copied.LibraryID == nil || *copied.LibraryID != library.Items[0].ID || copied.Name != library.Items[0].Name ||
+		copied.Points != library.Items[0].Points || copied.RepeatDays != library.Items[0].RepeatDays {
+		t.Errorf("copied quest %+v vs library %+v", copied, library.Items[0])
+	}
+
+	s.expect(http.StatusNoContent, "DELETE", qp, parent.AccessToken, nil, nil)
+	s.expect(http.StatusNotFound, "GET", qp, parent.AccessToken, nil, nil)
+
 	// Outsiders see nothing.
 	outsider := s.signUp("outsider")
 	s.expect(http.StatusNotFound, "GET", hp, outsider.AccessToken, nil, nil)
 	s.expect(http.StatusNotFound, "GET", hp+"/calendar", outsider.AccessToken, nil, nil)
+	s.expect(http.StatusNotFound, "GET", hp+"/quests", outsider.AccessToken, nil, nil)
+	s.expect(http.StatusNotFound, "GET", hp+"/quests/"+copied.ID.String(), outsider.AccessToken, nil, nil)
 }
 
 func TestAPI_SessionsAndLogout(t *testing.T) {

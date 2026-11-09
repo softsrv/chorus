@@ -23,6 +23,7 @@ type RouterConfig struct {
 	ChoreSvc          *app.ChoreService
 	FamilyCalendar    *app.FamilyCalendar // nil = built from Queries + GoogleCalendar
 	FamilySvc         *app.FamilyService  // nil = built from Queries
+	QuestSvc          *app.QuestService   // nil = built from Queries
 	GoogleSignIn      *app.GoogleSignIn   // nil = Google sign-in disabled
 	GoogleCalendar    *app.GoogleCalendar // nil = Google Calendar unavailable
 	JWTSecret         string
@@ -53,6 +54,11 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 		familySvc = app.NewFamilyService(cfg.Queries, 12)
 	}
 	familyMemberH := handlers.NewFamilyMemberHandler(familySvc)
+	questSvc := cfg.QuestSvc
+	if questSvc == nil {
+		questSvc = app.NewQuestService(cfg.Queries)
+	}
+	questH := handlers.NewQuestHandler(questSvc)
 	googleH := handlers.NewGoogleHandler(cfg.GoogleSignIn, cfg.TrustedProxyCount)
 	calendarH := handlers.NewGoogleCalendarHandler(cfg.GoogleCalendar)
 
@@ -142,6 +148,18 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("PUT /api/v1/households/{householdID}/admin-pin", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.SetAdminPin))))
 	api.Handle("DELETE /api/v1/households/{householdID}/admin-pin", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.ClearAdminPin))))
 	api.Handle("POST /api/v1/households/{householdID}/admin-pin/verify", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.VerifyAdminPin))))
+
+	// ── Quests ───────────────────────────────────────────────────────────────
+	// Writes are admin-only and, once an admin PIN is set, need X-Admin-PIN;
+	// they share the PIN rate limiter so the header can't be brute-forced.
+	// The library is global and read-only: there is no route that writes it.
+	api.Handle("GET /api/v1/quest-library", verified(questH.Library))
+	api.Handle("GET /api/v1/households/{householdID}/quests", verified(questH.List))
+	api.Handle("POST /api/v1/households/{householdID}/quests", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Create))))
+	api.Handle("POST /api/v1/households/{householdID}/quests/from-library", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.CopyFromLibrary))))
+	api.Handle("GET /api/v1/households/{householdID}/quests/{questID}", verified(questH.Get))
+	api.Handle("PUT /api/v1/households/{householdID}/quests/{questID}", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Update))))
+	api.Handle("DELETE /api/v1/households/{householdID}/quests/{questID}", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Delete))))
 
 	// ── Chores ────────────────────────────────────────────────────────────────
 	api.Handle("GET /api/v1/households/{householdID}/chores", verified(choreH.List))

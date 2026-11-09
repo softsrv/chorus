@@ -12,8 +12,6 @@ import (
 	"github.com/softsrv/chorus/internal/http/respond"
 )
 
-const defaultPageSize = 50
-
 type choreServicer interface {
 	List(ctx context.Context, userID, householdID uuid.UUID, f app.ChoreFilter) ([]db.Chore, bool, error)
 	Get(ctx context.Context, userID, householdID, choreID uuid.UUID) (db.Chore, error)
