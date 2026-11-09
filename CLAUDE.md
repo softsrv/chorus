@@ -65,7 +65,7 @@ docs/API.md                     API contract for client developers
 
 ### Households
 
-A household has exactly one login account, its administrator. Family members belong to the household as names and optional 4-digit PINs. Multi-login members and invites are retired.
+A household has exactly one login account, its administrator. Family members belong to the household as names and optional 4-digit PINs. Multi-login members and invites are retired. Household Delete and first-sign-in provisioning serialize on the users row lock, so a sign-in overlapping a delete still ends with a household.
 
 ### Middleware chain (outermost → innermost)
 

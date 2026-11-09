@@ -572,7 +572,7 @@ func (s *AuthService) ResendVerification(ctx context.Context, userID uuid.UUID) 
 // ── private helpers ───────────────────────────────────────────────────────────
 
 func (s *AuthService) issueTokenPair(ctx context.Context, user db.User, meta DeviceMeta) (TokenResult, error) {
-	if user.EmailVerified && !user.HouseholdProvisionedAt.Valid {
+	if user.EmailVerified {
 		if err := provisionFirstHousehold(ctx, s.pool, s.q, user); err != nil {
 			return TokenResult{}, fmt.Errorf("provision first household: %w", err)
 		}

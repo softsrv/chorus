@@ -579,6 +579,121 @@ func TestIntegration_FirstSignInProvisionsHousehold(t *testing.T) {
 		}
 	})
 
+	t.Run("a sign-in overlapping the household delete ends with a household", func(t *testing.T) {
+		res := registerVerified(t, pool, svc, mailer, "overlap-del")
+
+		var oldID uuid.UUID
+		if err := pool.QueryRow(ctx, "SELECT household_id FROM household_members WHERE user_id = $1", res.User.ID).Scan(&oldID); err != nil {
+			t.Fatalf("find household: %v", err)
+		}
+
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin tx: %v", err)
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+
+		// In a manual tx take the users row lock (FOR UPDATE), delete the household
+		// and set household_provisioned_at = NULL, mirroring HouseholdService.Delete in flight.
+		if _, err := tx.Exec(ctx, "SELECT household_provisioned_at FROM users WHERE id = $1 FOR UPDATE", res.User.ID); err != nil {
+			t.Fatalf("lock user: %v", err)
+		}
+		if _, err := tx.Exec(ctx, "DELETE FROM households WHERE id = $1", oldID); err != nil {
+			t.Fatalf("delete household: %v", err)
+		}
+		if _, err := tx.Exec(ctx, "UPDATE users SET household_provisioned_at = NULL WHERE id = $1", res.User.ID); err != nil {
+			t.Fatalf("release provisioning: %v", err)
+		}
+
+		loginDone := make(chan error, 1)
+		go func() {
+			_, err := svc.Login(ctx, res.User.Email, "correct-password-123", app.DeviceMeta{})
+			loginDone <- err
+		}()
+
+		// Assert it has not returned within a short wait because it is blocked on the row lock.
+		select {
+		case err := <-loginDone:
+			t.Fatalf("Login returned while delete tx was still open: %v", err)
+		case <-time.After(100 * time.Millisecond):
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit tx: %v", err)
+		}
+
+		select {
+		case err := <-loginDone:
+			if err != nil {
+				t.Fatalf("Login failed after commit: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("Login timed out waiting for delete commit")
+		}
+
+		var count int
+		var newID uuid.UUID
+		if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM household_members WHERE user_id = $1", res.User.ID).Scan(&count); err != nil {
+			t.Fatalf("query count: %v", err)
+		}
+		if count != 1 {
+			t.Fatalf("expected exactly 1 household, got %d", count)
+		}
+		if err := pool.QueryRow(ctx, "SELECT household_id FROM household_members WHERE user_id = $1", res.User.ID).Scan(&newID); err != nil {
+			t.Fatalf("query new household id: %v", err)
+		}
+		if newID == oldID {
+			t.Errorf("expected new household id to differ from deleted id %v", oldID)
+		}
+	})
+
+	t.Run("concurrent HouseholdService.Delete and Login still ends with a household", func(t *testing.T) {
+		res := registerVerified(t, pool, svc, mailer, "concurrent-del")
+		households := app.NewHouseholdService(db.New(pool), pool)
+
+		var oldID uuid.UUID
+		if err := pool.QueryRow(ctx, "SELECT household_id FROM household_members WHERE user_id = $1", res.User.ID).Scan(&oldID); err != nil {
+			t.Fatalf("find household: %v", err)
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		var delErr, loginErr error
+
+		go func() {
+			defer wg.Done()
+			delErr = households.Delete(ctx, res.User.ID, oldID)
+		}()
+		go func() {
+			defer wg.Done()
+			_, loginErr = svc.Login(ctx, res.User.Email, "correct-password-123", app.DeviceMeta{})
+		}()
+
+		wg.Wait()
+
+		if delErr != nil {
+			t.Fatalf("concurrent Delete: %v", delErr)
+		}
+		if loginErr != nil {
+			t.Fatalf("concurrent Login: %v", loginErr)
+		}
+
+		var count int
+		var newID uuid.UUID
+		if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM household_members WHERE user_id = $1", res.User.ID).Scan(&count); err != nil {
+			t.Fatalf("query count: %v", err)
+		}
+		if count != 1 {
+			t.Fatalf("expected exactly 1 household, got %d", count)
+		}
+		if err := pool.QueryRow(ctx, "SELECT household_id FROM household_members WHERE user_id = $1", res.User.ID).Scan(&newID); err != nil {
+			t.Fatalf("query new household id: %v", err)
+		}
+		if newID == oldID {
+			t.Errorf("expected new household id to differ from deleted id %v", oldID)
+		}
+	})
+
 	t.Run("long display name truncated to 100 runes", func(t *testing.T) {
 		email := uniqueEmail("longname")
 		// The longest display name the users CHECK allows: 50 runes, multibyte included.

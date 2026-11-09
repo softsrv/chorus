@@ -109,6 +109,9 @@ func provisionFirstHousehold(ctx context.Context, pool pgxBeginner, q *db.Querie
 	defer tx.Rollback(ctx) //nolint:errcheck
 
 	qtx := q.WithTx(tx)
+	if _, err := qtx.LockUserProvisioning(ctx, user.ID); err != nil {
+		return fmt.Errorf("lock user provisioning: %w", err)
+	}
 	rows, err := qtx.ClaimHouseholdProvisioning(ctx, user.ID)
 	if err != nil {
 		return fmt.Errorf("claim household provisioning: %w", err)
@@ -158,8 +161,9 @@ func (s *HouseholdService) Update(ctx context.Context, userID, householdID uuid.
 	return Household{Household: h, Role: RoleAdmin}, nil
 }
 
-// Delete removes a household and everything in it. Admins only. The user is
-// then due a new household at their next sign-in.
+// Delete removes a household and everything in it. Admins only. A sign-in
+// that overlaps the delete waits on the users row lock, then still ends
+// with a household.
 func (s *HouseholdService) Delete(ctx context.Context, userID, householdID uuid.UUID) error {
 	if _, err := requireAdmin(ctx, s.q, userID, householdID); err != nil {
 		return err
@@ -171,6 +175,9 @@ func (s *HouseholdService) Delete(ctx context.Context, userID, householdID uuid.
 	defer tx.Rollback(ctx) //nolint:errcheck
 
 	qtx := s.q.WithTx(tx)
+	if _, err := qtx.LockUserProvisioning(ctx, userID); err != nil {
+		return fmt.Errorf("lock user provisioning: %w", err)
+	}
 	if err := qtx.DeleteHousehold(ctx, householdID); err != nil {
 		return fmt.Errorf("delete household: %w", err)
 	}

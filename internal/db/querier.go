@@ -124,6 +124,7 @@ type Querier interface {
 	// anyone's points.
 	ListRewardLibrary(ctx context.Context) ([]RewardLibrary, error)
 	LockAccount(ctx context.Context, arg LockAccountParams) error
+	LockUserProvisioning(ctx context.Context, id uuid.UUID) (pgtype.Timestamptz, error)
 	MarkGoogleCalendarConnectionBroken(ctx context.Context, userID uuid.UUID) (int64, error)
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
 	MarkPasswordResetTokenUsed(ctx context.Context, id uuid.UUID) (int64, error)
