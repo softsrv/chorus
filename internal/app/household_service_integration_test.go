@@ -159,16 +159,13 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		t.Errorf("bob's calendar list = %+v, %v; want not_connected and empty", mine, err)
 	}
 
-	// Assigning a chore to a non-member is rejected.
-	_, err = chores.Create(ctx, alice, h.ID, app.ChoreInput{Title: "Mow", AssigneeID: &mallory})
-	var vErr *app.ValidationError
-	if !errors.As(err, &vErr) || vErr.Fields["assignee_id"] == "" {
-		t.Errorf("assign non-member: expected assignee_id validation error, got %v", err)
-	}
-
 	// Alice's data is intact.
-	if got, err := chores.Get(ctx, alice, h.ID, chore.ID); err != nil || got.Title != "Dishes" || got.CompletedAt.Valid {
-		t.Errorf("alice's chore was modified: %+v, %v", got, err)
+	if got, err := quests.Get(ctx, alice, h.ID, aliceQuest.ID); err != nil || got.Name != "Dishes" || got.Points != 10 ||
+		got.RepeatDays != 1 || got.Notes != "Wash and dry" {
+		t.Errorf("alice's quest was modified: %+v, %v", got, err)
+	}
+	if list, _, err := quests.List(ctx, alice, h.ID, app.QuestPage{Limit: 10}); err != nil || len(list) != 1 {
+		t.Errorf("alice's quests after outsider attempts: %d, %v; want exactly 1 (no smuggled create or copy)", len(list), err)
 	}
 	if st, err := family.Status(ctx, alice, h.ID); err != nil || st.CalendarID != "family-y@group.calendar.google.com" || st.SetByID != alice {
 		t.Errorf("alice's family calendar was modified: %+v, %v", st, err)

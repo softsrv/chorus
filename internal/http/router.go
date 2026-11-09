@@ -159,15 +159,6 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("PUT /api/v1/households/{householdID}/quests/{questID}", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Update))))
 	api.Handle("DELETE /api/v1/households/{householdID}/quests/{questID}", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Delete))))
 
-	// ── Chores ────────────────────────────────────────────────────────────────
-	api.Handle("GET /api/v1/households/{householdID}/chores", verified(choreH.List))
-	api.Handle("POST /api/v1/households/{householdID}/chores", verified(choreH.Create))
-	api.Handle("GET /api/v1/households/{householdID}/chores/{choreID}", verified(choreH.Get))
-	api.Handle("PUT /api/v1/households/{householdID}/chores/{choreID}", verified(choreH.Update))
-	api.Handle("DELETE /api/v1/households/{householdID}/chores/{choreID}", verified(choreH.Delete))
-	api.Handle("PUT /api/v1/households/{householdID}/chores/{choreID}/completion", verified(choreH.Complete))
-	api.Handle("DELETE /api/v1/households/{householdID}/chores/{choreID}/completion", verified(choreH.Complete))
-
 	// ── Family calendar ────────────────────────────────────────────────────
 	// Entries come from the household's chosen Google calendar. Chorus has no
 	// route that creates, moves or deletes an entry; its one change is an

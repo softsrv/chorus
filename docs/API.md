@@ -5,7 +5,7 @@ The contract the iOS/Android apps and the web test client build against. Base pa
 ## Conventions
 
 - **JSON only.** Request bodies require `Content-Type: application/json`. Unknown fields, trailing data, and bodies over 64 KiB are rejected.
-- **IDs** are UUIDv7 strings. **Timestamps** are RFC 3339 in UTC (`2026-11-05T18:00:00Z`). **Dates** (chore due dates) are `YYYY-MM-DD`.
+- **IDs** are UUIDv7 strings. **Timestamps** are RFC 3339 in UTC (`2026-11-05T18:00:00Z`).
 - **PUT is full replacement.** An omitted optional field is cleared. Send the whole object.
 - **Lists** return `{"items": [...]}`. Paginated lists also return `next_offset` (`null` on the last page).
 - **Not found vs. forbidden.** Resources in a household you don't belong to return `404`, the same as nonexistent ones. Each household has one login, its admin; a `403` means a PIN check failed (see below).
@@ -82,7 +82,7 @@ Each household has exactly one login account (its administrator); invites and lo
 | `POST /households` | `name, timezone?` | Creator becomes admin. `timezone` is IANA (default `UTC`). |
 | `GET /households/{id}` | none | |
 | `PUT /households/{id}` | `name, timezone` | admin |
-| `DELETE /households/{id}` | none | admin; deletes all chores and family members |
+| `DELETE /households/{id}` | none | admin; deletes all quests and family members |
 | `GET /households/{id}/family-members` | none | `{items: [member]}`; `{items: []}` when there are none |
 | `POST /households/{id}/family-members` | `name, pin?` | admin; optional `X-Admin-PIN` header if set |
 | `GET /households/{id}/family-members/{memberId}` | none | member |
@@ -96,19 +96,25 @@ Each household has exactly one login account (its administrator); invites and lo
 | `DELETE /households/{id}/admin-pin` | none | admin; `X-Admin-PIN` header required; `204` |
 | `POST /households/{id}/admin-pin/verify` | `pin` | `200 {}`, or `403 wrong_pin` |
 
-### Chores 🔒 — `/households/{id}/chores`
+### Quests 🔒 — `/households/{id}/quests`, `/quest-library`
 
-Chore: `id, household_id, title, description, assignee_id, due_on, completed, completed_at, completed_by, created_by, created_at, updated_at`
+Quests replace chores: the old `/households/{id}/chores` routes are removed and answer `404 not_found`. Every existing chore was carried over into a quest with the same id (0 points, daily); the chore details stay in the database as a read-only archive.
+
+Quest: `id, household_id, library_id, name, points, repeat_days, notes, claimed_by, done_at, available_at, created_at, updated_at`. `library_id` is set when the quest was copied from the library. `repeat_days` is the number of days until the quest is available again after completion (1 = daily, 30 = monthly).
+
+Library quest: `id, name, points, repeat_days, notes`. The library is the same for every household and read-only: there is no route that writes to it.
 
 | Method & path | Body / query | Notes |
 |---|---|---|
-| `GET /` | `?status=open\|done\|all` (default `open`), `?assignee=me\|<userId>`, `?limit=1..100` (default 50), `?offset=` | Ordered by due date (undated last) |
-| `POST /` | `title, description?, assignee_id?, due_on?` | Assignee must be the household's login (`422`). |
-| `GET /{choreId}` | none | |
-| `PUT /{choreId}` | same as POST | Full replacement |
-| `DELETE /{choreId}` | none | |
-| `PUT /{choreId}/completion` | none | Mark done |
-| `DELETE /{choreId}/completion` | none | Reopen |
+| `GET /quest-library` | none | `{items: [library quest]}` |
+| `GET /households/{id}/quests` | `?limit=1..100` (default 50), `?offset=` | Any member. `{items: [quest], next_offset}`; `{items: []}` when there are none |
+| `POST /households/{id}/quests` | `name, points?, repeat_days?, notes?` | admin; `X-Admin-PIN` header if set. `points` defaults to 0, `repeat_days` to 1. `201` quest |
+| `POST /households/{id}/quests/from-library` | `library_id` | admin; `X-Admin-PIN` header if set. Copies the library quest's name, points, days and notes; editing the copy never changes the library. `201` quest, `404` for an unknown `library_id` |
+| `GET /households/{id}/quests/{questId}` | none | Any member |
+| `PUT /households/{id}/quests/{questId}` | same as POST | admin; `X-Admin-PIN` header if set. Full replacement |
+| `DELETE /households/{id}/quests/{questId}` | none | admin; `X-Admin-PIN` header if set. `204` |
+
+Validation is per field and all at once: a `422` lists every bad field in `fields` — `name` (1–200 characters), `points` (a whole number ≥ 0; a non-numeric value is rejected), `repeat_days` (a whole number ≥ 1), `notes` (≤ 2000 characters). Nothing is saved on a `422`. A non-member, or a quest id from another household, gets `404`. Quest writes share the PIN rate limit.
 
 ### Family calendar 🔒 — `/households/{id}/calendar`, `/households/{id}/events`
 

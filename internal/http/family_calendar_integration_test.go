@@ -281,7 +281,6 @@ func newFamilyTestServer(t *testing.T, fake *fakeFamilyGoogle) *calendarServer {
 		Queries: q, Pool: pool, AuthSvc: authSvc,
 		UserSvc:        app.NewUserService(q),
 		HouseholdSvc:   app.NewHouseholdService(q, pool),
-		ChoreSvc:       app.NewChoreService(q),
 		GoogleCalendar: gc,
 		FamilyCalendar: app.NewFamilyCalendar(q, gc),
 		JWTSecret:      secret,

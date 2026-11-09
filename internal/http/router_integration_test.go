@@ -94,7 +94,6 @@ func newTestServer(t *testing.T) *testServer {
 		Queries: q, Pool: pool, AuthSvc: authSvc,
 		UserSvc:      app.NewUserService(q),
 		HouseholdSvc: app.NewHouseholdService(q, pool),
-		ChoreSvc:     app.NewChoreService(q),
 		FamilySvc:    app.NewFamilyService(q, 10),
 		JWTSecret:    secret,
 	})
@@ -221,63 +220,47 @@ func TestAPI_EndToEnd(t *testing.T) {
 	}
 	hp := "/api/v1/households/" + h.ID.String()
 
-	// Chore CRUD.
-	var chore struct {
-		ID         uuid.UUID  `json:"id"`
-		Title      string     `json:"title"`
-		AssigneeID *uuid.UUID `json:"assignee_id"`
-		DueOn      *string    `json:"due_on"`
-		Completed  bool       `json:"completed"`
+	// The old chore routes are gone: the API answers its JSON 404.
+	var gone apiError
+	s.expect(http.StatusNotFound, "GET", hp+"/chores", parent.AccessToken, nil, &gone)
+	if gone.Error.Code != "not_found" {
+		t.Errorf("GET chores: code %q, want not_found", gone.Error.Code)
 	}
-	s.expect(http.StatusCreated, "POST", hp+"/chores", parent.AccessToken, map[string]any{
-		"title": "Take out trash", "assignee_id": parent.User.ID, "due_on": "2026-11-01",
-	}, &chore)
-	if chore.DueOn == nil || *chore.DueOn != "2026-11-01" || *chore.AssigneeID != parent.User.ID {
-		t.Errorf("created chore: %+v", chore)
-	}
-	cp := hp + "/chores/" + chore.ID.String()
-
-	var mine struct {
-		Items      []map[string]any `json:"items"`
-		NextOffset *int             `json:"next_offset"`
-	}
-	s.expect(http.StatusOK, "GET", hp+"/chores?assignee=me", parent.AccessToken, nil, &mine)
-	if len(mine.Items) != 1 || mine.NextOffset != nil {
-		t.Errorf("parent's chores: %+v", mine)
+	gone = apiError{}
+	s.expect(http.StatusNotFound, "PUT", hp+"/chores/"+uuid.NewString()+"/completion", parent.AccessToken, nil, &gone)
+	if gone.Error.Code != "not_found" {
+		t.Errorf("PUT chore completion: code %q, want not_found", gone.Error.Code)
 	}
 
-	s.expect(http.StatusOK, "PUT", cp+"/completion", parent.AccessToken, nil, &chore)
-	if !chore.Completed {
-		t.Error("chore should be completed")
-	}
-	s.expect(http.StatusOK, "PUT", cp, parent.AccessToken, map[string]any{"title": "Trash + recycling"}, &chore)
-	if chore.Title != "Trash + recycling" || chore.AssigneeID != nil || chore.DueOn != nil {
-		t.Errorf("PUT is a full replacement; got %+v", chore)
-	}
-
-	// Pagination.
+	// Quest list pagination; the documented bounds are inclusive.
 	for i := range 3 {
-		s.expect(http.StatusCreated, "POST", hp+"/chores", parent.AccessToken, map[string]any{"title": fmt.Sprintf("chore %d", i)}, nil)
+		s.expect(http.StatusCreated, "POST", hp+"/quests", parent.AccessToken, map[string]any{"name": fmt.Sprintf("quest %d", i)}, nil)
 	}
 	var page struct {
 		Items      []map[string]any `json:"items"`
 		NextOffset *int             `json:"next_offset"`
 	}
-	s.expect(http.StatusOK, "GET", hp+"/chores?status=all&limit=2", parent.AccessToken, nil, &page)
+	s.expect(http.StatusOK, "GET", hp+"/quests?limit=2", parent.AccessToken, nil, &page)
 	if len(page.Items) != 2 || page.NextOffset == nil || *page.NextOffset != 2 {
 		t.Fatalf("page 1: %d items, next %v", len(page.Items), page.NextOffset)
 	}
-	s.expect(http.StatusOK, "GET", hp+"/chores?status=all&limit=2&offset=2", parent.AccessToken, nil, &page)
-	if len(page.Items) != 2 || page.NextOffset != nil {
+	s.expect(http.StatusOK, "GET", hp+"/quests?limit=2&offset=2", parent.AccessToken, nil, &page)
+	if len(page.Items) != 1 || page.NextOffset != nil {
 		t.Fatalf("page 2: %d items, next %v", len(page.Items), page.NextOffset)
 	}
-	// The documented bounds are inclusive.
-	s.expect(http.StatusOK, "GET", hp+"/chores?limit=100", parent.AccessToken, nil, nil)
-	s.expect(http.StatusUnprocessableEntity, "GET", hp+"/chores?limit=101", parent.AccessToken, nil, nil)
-	s.expect(http.StatusUnprocessableEntity, "GET", hp+"/chores?limit=0", parent.AccessToken, nil, nil)
-
-	s.expect(http.StatusNoContent, "DELETE", cp, parent.AccessToken, nil, nil)
-	s.expect(http.StatusNotFound, "GET", cp, parent.AccessToken, nil, nil)
+	s.expect(http.StatusOK, "GET", hp+"/quests?limit=100", parent.AccessToken, nil, nil)
+	s.expect(http.StatusUnprocessableEntity, "GET", hp+"/quests?limit=101", parent.AccessToken, nil, nil)
+	s.expect(http.StatusUnprocessableEntity, "GET", hp+"/quests?limit=0", parent.AccessToken, nil, nil)
+	// Clear them so the CRUD checks below start from an empty list.
+	var cleanup struct {
+		Items []struct {
+			ID uuid.UUID `json:"id"`
+		} `json:"items"`
+	}
+	s.expect(http.StatusOK, "GET", hp+"/quests", parent.AccessToken, nil, &cleanup)
+	for _, item := range cleanup.Items {
+		s.expect(http.StatusNoContent, "DELETE", hp+"/quests/"+item.ID.String(), parent.AccessToken, nil, nil)
+	}
 
 	// Quest CRUD: what is posted is what GET returns.
 	type questBody struct {
@@ -899,7 +882,6 @@ func TestAPI_PINRateLimit(t *testing.T) {
 		Queries: q, Pool: pool, AuthSvc: authSvc,
 		UserSvc:      app.NewUserService(q),
 		HouseholdSvc: app.NewHouseholdService(q, pool),
-		ChoreSvc:     app.NewChoreService(q),
 		FamilySvc:    app.NewFamilyService(q, 10),
 		JWTSecret:    secret,
 		PINRateLimit: setupCalls + wrongGuesses,
