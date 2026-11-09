@@ -28,7 +28,7 @@ func clientJS(t *testing.T) map[string]string {
 var removedClientFeatures = []string{
 	"/invites", "/members", "/chores", "Create invite code", "Make admin",
 	"Make member", "membersTab", "membersFor", "choresTab", "Add chore",
-	"'Chores'", "Join with invite code", "XXXX-XXXX-XXXX",
+	"'Chores'", "Join with invite code", "XXXX-XXXX-XXXX", "/completion", "Reopen",
 }
 
 func findRemoved(src string) []string {

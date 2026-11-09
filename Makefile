@@ -5,7 +5,7 @@ BIN_DIR          := ./bin
 -include .env
 export
 
-.PHONY: dev run build test test-integration test-cover fmt vet lint vulncheck check \
+.PHONY: dev run build test test-js test-integration test-cover fmt vet lint vulncheck check \
         services-up services-down services-reset \
         daisyui-install tailwind tailwind-watch air \
         migrate-up migrate-down migrate-create migrate-status migrate-test \
@@ -41,6 +41,10 @@ build:
 test:
 	go test -race ./...
 
+# Web client unit tests: app.js against a minimal DOM and a stubbed fetch.
+test-js:
+	node --test web/jstest/quests.test.mjs
+
 # Integration tests run against TEST_DATABASE_URL (the chorus_test database).
 test-integration: migrate-test
 	go test -race -tags integration -p 1 ./...
@@ -63,7 +67,7 @@ vulncheck:
 	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 # Everything CI runs.
-check: vet test test-integration vulncheck
+check: vet test test-js test-integration vulncheck
 
 ## ── CSS ──────────────────────────────────────────────────────────────────────
 
