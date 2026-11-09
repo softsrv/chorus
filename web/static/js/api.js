@@ -64,15 +64,17 @@ export function refresh() {
 
 // api calls an endpoint under /api/v1. On a token_expired 401 it refreshes
 // once and retries. A 401 that can't be fixed by refreshing (revoked session,
-// deleted account) clears the tokens and fires "chorus:signed-out".
-export async function api(method, path, body) {
+// deleted account) clears the tokens and fires "chorus:signed-out". Any other
+// status (a 403 wrong_pin included) is thrown and never signs out. Extra
+// headers (e.g. X-Admin-PIN) are sent on the first attempt and on the retry.
+export async function api(method, path, body, { headers } = {}) {
   try {
-    return await request(method, path, body, { auth: true });
+    return await request(method, path, body, { auth: true, headers });
   } catch (err) {
     if (!(err instanceof ApiError) || err.status !== 401) throw err;
     if (err.code === 'token_expired' && await refresh()) {
       try {
-        return await request(method, path, body, { auth: true });
+        return await request(method, path, body, { auth: true, headers });
       } catch (retryErr) {
         if (!(retryErr instanceof ApiError) || retryErr.status !== 401) throw retryErr;
       }
@@ -99,8 +101,8 @@ export async function googleRedeem(code, deviceName = DEVICE_NAME) {
   return t;
 }
 
-async function request(method, path, body, { auth }) {
-  const headers = { Accept: 'application/json' };
+async function request(method, path, body, { auth, headers: extra = {} }) {
+  const headers = { ...extra, Accept: 'application/json' };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (auth && accessToken) headers.Authorization = `Bearer ${accessToken}`;
 
