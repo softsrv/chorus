@@ -238,6 +238,18 @@ func (q *Queries) LockAccount(ctx context.Context, arg LockAccountParams) error 
 	return err
 }
 
+const releaseHouseholdProvisioning = `-- name: ReleaseHouseholdProvisioning :exec
+UPDATE users SET household_provisioned_at = NULL, updated_at = NOW()
+WHERE id = $1
+  AND NOT EXISTS (SELECT 1 FROM household_members WHERE user_id = $1)
+`
+
+// Re-arms first-sign-in provisioning for a user who has no household left.
+func (q *Queries) ReleaseHouseholdProvisioning(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, releaseHouseholdProvisioning, id)
+	return err
+}
+
 const resetLoginAttempts = `-- name: ResetLoginAttempts :exec
 UPDATE users SET failed_login_attempts = 0, locked_until = NULL, updated_at = NOW() WHERE id = $1
 `

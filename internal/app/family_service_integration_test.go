@@ -485,3 +485,77 @@ func TestIntegration_AdminPin(t *testing.T) {
 		t.Errorf("mallory VerifyAdminPin: expected ErrNotFound, got %v", err)
 	}
 }
+
+// TestIntegration_RemoveMemberHoldingQuests: removing a member who holds a
+// quest, accepted or waiting for approval, succeeds and returns the quest to
+// the pool; other members' quests are untouched.
+func TestIntegration_RemoveMemberHoldingQuests(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	households := app.NewHouseholdService(q, pool)
+	familySvc := app.NewFamilyService(q, 10)
+	quests := app.NewQuestService(q, pool)
+	ctx := context.Background()
+
+	admin := registerVerified(t, pool, authSvc, mailer, "removeholder").User.ID
+	h, err := households.Create(ctx, admin, app.HouseholdInput{Name: "Holders"})
+	if err != nil {
+		t.Fatalf("create household: %v", err)
+	}
+	ann, err := familySvc.Create(ctx, admin, h.ID, app.FamilyMemberInput{Name: "Ann"}, "")
+	if err != nil {
+		t.Fatalf("create Ann: %v", err)
+	}
+	ben, err := familySvc.Create(ctx, admin, h.ID, app.FamilyMemberInput{Name: "Ben"}, "")
+	if err != nil {
+		t.Fatalf("create Ben: %v", err)
+	}
+
+	pending, err := quests.Create(ctx, admin, h.ID, app.QuestInput{Name: "Pending", Points: app.NumberField{Set: true, Value: 5}}, "")
+	if err != nil {
+		t.Fatalf("create quest: %v", err)
+	}
+	accepted, err := quests.Create(ctx, admin, h.ID, app.QuestInput{Name: "Accepted"}, "")
+	if err != nil {
+		t.Fatalf("create quest: %v", err)
+	}
+	others, err := quests.Create(ctx, admin, h.ID, app.QuestInput{Name: "Bens"}, "")
+	if err != nil {
+		t.Fatalf("create quest: %v", err)
+	}
+	annAct := app.MemberAction{MemberID: ann.ID}
+	for _, id := range []uuid.UUID{pending.ID, accepted.ID} {
+		if _, err := quests.Accept(ctx, admin, h.ID, id, annAct); err != nil {
+			t.Fatalf("Ann accept: %v", err)
+		}
+	}
+	if _, err := quests.MarkDone(ctx, admin, h.ID, pending.ID, annAct); err != nil {
+		t.Fatalf("Ann mark done: %v", err)
+	}
+	if _, err := quests.Accept(ctx, admin, h.ID, others.ID, app.MemberAction{MemberID: ben.ID}); err != nil {
+		t.Fatalf("Ben accept: %v", err)
+	}
+
+	if err := familySvc.Remove(ctx, admin, h.ID, ann.ID, ""); err != nil {
+		t.Fatalf("Remove member holding quests: %v", err)
+	}
+
+	for _, id := range []uuid.UUID{pending.ID, accepted.ID} {
+		got, err := quests.Get(ctx, admin, h.ID, id)
+		if err != nil {
+			t.Fatalf("Get quest: %v", err)
+		}
+		if got.ClaimedBy != nil || got.DoneAt.Valid || got.ClaimedAt.Valid {
+			t.Errorf("quest %s not released: %+v", got.Name, got)
+		}
+	}
+	if pend, err := quests.ListPending(ctx, admin, h.ID, ""); err != nil || len(pend) != 0 {
+		t.Errorf("pending after removal: %v %v", pend, err)
+	}
+	got, err := quests.Get(ctx, admin, h.ID, others.ID)
+	if err != nil || got.ClaimedBy == nil || *got.ClaimedBy != ben.ID {
+		t.Errorf("Ben's quest changed: %+v %v", got, err)
+	}
+}

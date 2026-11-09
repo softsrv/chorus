@@ -82,12 +82,12 @@ Each household has exactly one login account (its administrator); invites and lo
 | `POST /households` | `name, timezone?` | Creator becomes admin. `timezone` is IANA (default `UTC`). |
 | `GET /households/{id}` | none | |
 | `PUT /households/{id}` | `name, timezone` | admin |
-| `DELETE /households/{id}` | none | admin; deletes all quests and family members |
+| `DELETE /households/{id}` | none | admin; deletes all quests and family members. The user's next sign-in creates a new household for them |
 | `GET /households/{id}/family-members` | none | `{items: [member]}`; `{items: []}` when there are none |
 | `POST /households/{id}/family-members` | `name, pin?` | admin; optional `X-Admin-PIN` header if set |
 | `GET /households/{id}/family-members/{memberId}` | none | member |
 | `PUT /households/{id}/family-members/{memberId}` | `name` | admin; optional `X-Admin-PIN` header if set |
-| `DELETE /households/{id}/family-members/{memberId}` | none | admin; optional `X-Admin-PIN` header if set |
+| `DELETE /households/{id}/family-members/{memberId}` | none | admin; optional `X-Admin-PIN` header if set. Quests the member holds, including ones waiting for approval, go back to the pool |
 | `PUT /households/{id}/family-members/{memberId}/pin` | `pin` | admin; 4-digit PIN; optional `X-Admin-PIN` header if set |
 | `DELETE /households/{id}/family-members/{memberId}/pin` | none | admin; optional `X-Admin-PIN` header if set |
 | `POST /households/{id}/family-members/{memberId}/verify` | `pin` (empty for a member with no PIN) | `200` member, or `403 wrong_pin`. Sets no cookie or token: each later member action carries `member_id` and `pin` |

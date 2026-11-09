@@ -45,6 +45,9 @@ type Querier interface {
 	DeleteAdminPin(ctx context.Context, householdID uuid.UUID) (int64, error)
 	DeleteEvent(ctx context.Context, arg DeleteEventParams) (int64, error)
 	DeleteExpiredRefreshTokens(ctx context.Context) (int64, error)
+	// Releases the member's quests in the same statement, so a quest waiting for
+	// approval (done_at set) returns to the pool instead of tripping the
+	// done_at-needs-a-holder CHECK when the foreign key clears claimed_by.
 	DeleteFamilyMember(ctx context.Context, arg DeleteFamilyMemberParams) (int64, error)
 	// Returns the deleted row so its token can be revoked at Google afterwards.
 	DeleteGoogleCalendarConnectionByUser(ctx context.Context, userID uuid.UUID) (GoogleCalendarConnection, error)
@@ -134,6 +137,8 @@ type Querier interface {
 	RedeemSignInHandoff(ctx context.Context, codeHash string) (uuid.UUID, error)
 	// Sends a pending quest back to its holder: it stays theirs, unfinished.
 	RejectQuest(ctx context.Context, arg RejectQuestParams) (HouseholdQuest, error)
+	// Re-arms first-sign-in provisioning for a user who has no household left.
+	ReleaseHouseholdProvisioning(ctx context.Context, id uuid.UUID) error
 	RenameFamilyMember(ctx context.Context, arg RenameFamilyMemberParams) (FamilyMember, error)
 	ResetLoginAttempts(ctx context.Context, id uuid.UUID) error
 	RevokeAllUserRefreshTokens(ctx context.Context, userID uuid.UUID) error

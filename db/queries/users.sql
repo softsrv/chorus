@@ -32,6 +32,12 @@ UPDATE users SET email_verified = true, updated_at = NOW() WHERE id = $1;
 UPDATE users SET household_provisioned_at = NOW(), updated_at = NOW()
 WHERE id = $1 AND household_provisioned_at IS NULL;
 
+-- name: ReleaseHouseholdProvisioning :exec
+-- Re-arms first-sign-in provisioning for a user who has no household left.
+UPDATE users SET household_provisioned_at = NULL, updated_at = NOW()
+WHERE id = $1
+  AND NOT EXISTS (SELECT 1 FROM household_members WHERE user_id = $1);
+
 -- name: IncrementFailedLoginAttempts :exec
 UPDATE users SET failed_login_attempts = failed_login_attempts + 1, updated_at = NOW() WHERE id = $1;
 

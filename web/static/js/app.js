@@ -782,7 +782,10 @@ async function approvalsCard(h, members, rerender) {
 function manageQuestsCard(h, quests, library, page, rerender) {
   const unlocked = managementUnlocked();
 
+  // A blank field is sent as typed, never as 0: the server owns validation
+  // and reports an error on the field.
   const toNum = (val) => {
+    if (typeof val === 'string' && val.trim() === '') return val;
     const n = Number(val);
     return Number.isNaN(n) ? val : n;
   };

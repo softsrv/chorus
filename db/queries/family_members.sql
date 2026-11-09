@@ -30,8 +30,16 @@ WHERE household_id = $1 AND id = $2
 RETURNING *;
 
 -- name: DeleteFamilyMember :execrows
-DELETE FROM family_members
-WHERE household_id = $1 AND id = $2;
+-- Releases the member's quests in the same statement, so a quest waiting for
+-- approval (done_at set) returns to the pool instead of tripping the
+-- done_at-needs-a-holder CHECK when the foreign key clears claimed_by.
+WITH released AS (
+    UPDATE household_quests
+    SET claimed_by = NULL, claimed_at = NULL, done_at = NULL, updated_at = NOW()
+    WHERE household_id = $1 AND claimed_by = $2
+)
+DELETE FROM family_members fm
+WHERE fm.household_id = $1 AND fm.id = $2;
 
 -- name: AddMemberPoints :one
 UPDATE family_members
