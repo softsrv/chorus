@@ -598,9 +598,93 @@ function confirmClick(prompt, fn) {
 // ── Quests ────────────────────────────────────────────────────────────────────
 
 async function questsTab(h, $root) {
+  const rerender = () => { $root.replaceChildren(); questsTab(h, $root).catch((err) => showError($root, err)); };
+
+  const [page, library] = await Promise.all([
+    api('GET', `/households/${h.id}/quests?limit=100`),
+    api('GET', '/quest-library'),
+  ]);
+
+  const unlocked = managementUnlocked();
+
+  const toNum = (val) => {
+    const n = Number(val);
+    return Number.isNaN(n) ? val : n;
+  };
+
+  const toBody = (v) => ({
+    name: v.name,
+    points: toNum(v.points),
+    repeat_days: toNum(v.repeat_days),
+    notes: v.notes,
+  });
+
+  const questFields = (q = {}) => [
+    { name: 'name', label: 'Name', required: true, value: q.name },
+    { name: 'points', label: 'Points', type: 'number', value: q.points ?? '' },
+    { name: 'repeat_days', label: 'Days until available again', type: 'number', value: q.repeat_days ?? '' },
+    { name: 'notes', label: 'Notes', type: 'textarea', value: q.notes ?? '' },
+  ];
+
+  const rows = (page.items || []).map((q) => {
+    const $row = el('li', { class: 'flex flex-wrap items-center gap-2 py-2 border-b border-base-300' },
+      el('div', { class: 'flex-1 min-w-0' },
+        el('div', { class: 'font-medium', text: q.name }),
+        el('div', { class: 'text-xs opacity-60', text: `${q.points} points · ${q.repeat_days} day(s)` }),
+        q.notes ? el('div', { class: 'text-xs opacity-70 mt-1', text: q.notes }) : null),
+      unlocked && el('button', {
+        class: 'btn btn-ghost btn-xs', text: 'Edit',
+        onclick: () => $row.replaceWith(el('li', { class: 'py-2' }, form({
+          fields: questFields(q), submit: 'Save', inline: true,
+          onSubmit: async (v) => {
+            await adminRequest('PUT', `/households/${h.id}/quests/${q.id}`, toBody(v));
+            rerender();
+          },
+        }))),
+      }),
+      unlocked && el('button', {
+        class: 'btn btn-ghost btn-xs text-error', text: 'Delete',
+        onclick: confirmClick('Sure?', async () => {
+          await adminRequest('DELETE', `/households/${h.id}/quests/${q.id}`);
+          rerender();
+        }),
+      }));
+    return $row;
+  });
+
+  const addForm = unlocked && form({
+    fields: questFields(), submit: 'Add quest', inline: true,
+    onSubmit: async (v) => {
+      await adminRequest('POST', `/households/${h.id}/quests`, toBody(v));
+      rerender();
+    },
+  });
+
+  const libraryRows = (library.items || []).map((item) => el('li', { class: 'flex items-center justify-between py-1.5 border-b border-base-300 text-sm' },
+    el('div', { class: 'flex-1 min-w-0' },
+      el('span', { class: 'font-medium', text: item.name }),
+      el('span', { class: 'text-xs opacity-60 ml-2', text: `${item.points} points · ${item.repeat_days} day(s)` }),
+      item.notes ? el('div', { class: 'text-xs opacity-70', text: item.notes }) : null),
+    unlocked && el('button', {
+      class: 'btn btn-ghost btn-xs', text: 'Add',
+      onclick: action(async () => {
+        await adminRequest('POST', `/households/${h.id}/quests/from-library`, { library_id: item.id });
+        rerender();
+      }),
+    })));
+
   $root.replaceChildren(card(null,
     el('h3', { class: 'font-semibold', text: 'Quests' }),
-    el('p', { class: 'text-sm opacity-70', text: 'Quests will appear here.' })));
+    rows.length
+      ? el('ul', {}, rows)
+      : el('p', { class: 'opacity-70 py-2', text: 'No quests yet. Add one below or browse the library.' }),
+    page.next_offset !== null && page.next_offset !== undefined && el('p', { class: 'text-xs opacity-60', text: 'Showing the first 100.' }),
+    addForm && el('div', { class: 'divider my-0' }),
+    addForm,
+    el('div', { class: 'divider my-0' }),
+    el('div', { class: 'space-y-2' },
+      el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Quest Library' }),
+      el('ul', {}, libraryRows))));
 }
 
 // ── Family ────────────────────────────────────────────────────────────────────

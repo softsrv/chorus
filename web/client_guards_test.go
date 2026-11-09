@@ -147,3 +147,70 @@ func TestClientJS_AdminPinHeader(t *testing.T) {
 		t.Error("the admin PIN must never travel in a request body")
 	}
 }
+
+func TestClientJS_QuestsTab(t *testing.T) {
+	app := readStatic(t, "js/app.js")
+
+	t.Run("questsTab defined and routed", func(t *testing.T) {
+		if !strings.Contains(app, "async function questsTab(h, $root)") {
+			t.Error("expected async function questsTab(h, $root)")
+		}
+		if !strings.Contains(app, "quests: questsTab") {
+			t.Error("expected loaders to map quests to questsTab")
+		}
+	})
+
+	t.Run("empty state message", func(t *testing.T) {
+		want := "No quests yet. Add one below or browse the library."
+		if !strings.Contains(app, want) {
+			t.Errorf("expected empty state %q", want)
+		}
+		if strings.Contains(app, "Nothing here.") {
+			t.Error("found retired string 'Nothing here.'")
+		}
+	})
+
+	t.Run("quest fields and labels", func(t *testing.T) {
+		for _, field := range []string{"name: 'name'", "name: 'points'", "name: 'repeat_days'", "name: 'notes'"} {
+			if !strings.Contains(app, field) {
+				t.Errorf("expected quest field %s", field)
+			}
+		}
+		if !strings.Contains(app, "label: 'Days until available again'") {
+			t.Error("expected repeat_days labelled 'Days until available again'")
+		}
+	})
+
+	t.Run("API routes and methods", func(t *testing.T) {
+		checks := []struct {
+			name string
+			want string
+		}{
+			{"list quests", "api('GET', `/households/${h.id}/quests?limit=100`)"},
+			{"list library", "api('GET', '/quest-library')"},
+			{"create quest", "adminRequest('POST', `/households/${h.id}/quests`, toBody(v))"},
+			{"update quest", "adminRequest('PUT', `/households/${h.id}/quests/${q.id}`, toBody(v))"},
+			{"delete quest", "adminRequest('DELETE', `/households/${h.id}/quests/${q.id}`)"},
+			{"from library", "adminRequest('POST', `/households/${h.id}/quests/from-library`, { library_id: item.id })"},
+		}
+		for _, c := range checks {
+			if !strings.Contains(app, c.want) {
+				t.Errorf("%s: expected app.js to contain %q", c.name, c.want)
+			}
+		}
+	})
+
+	t.Run("library is read-only", func(t *testing.T) {
+		if strings.Contains(app, "POST', '/quest-library") ||
+			strings.Contains(app, "PUT', '/quest-library") ||
+			strings.Contains(app, "DELETE', '/quest-library") {
+			t.Error("quest-library must not be modified by client")
+		}
+	})
+
+	t.Run("managementUnlocked gating", func(t *testing.T) {
+		if !strings.Contains(app, "const unlocked = managementUnlocked();") {
+			t.Error("expected questsTab to check managementUnlocked()")
+		}
+	})
+}
