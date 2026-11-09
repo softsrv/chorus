@@ -24,6 +24,12 @@ type questServicer interface {
 	Delete(ctx context.Context, userID, householdID, questID uuid.UUID, adminPin string) error
 	CopyFromLibrary(ctx context.Context, userID, householdID, libraryID uuid.UUID, adminPin string) (db.HouseholdQuest, error)
 	ListLibrary(ctx context.Context) ([]db.QuestLibrary, error)
+	Accept(ctx context.Context, userID, householdID, questID uuid.UUID, act app.MemberAction) (db.HouseholdQuest, error)
+	Abandon(ctx context.Context, userID, householdID, questID uuid.UUID, act app.MemberAction) (db.HouseholdQuest, error)
+	MarkDone(ctx context.Context, userID, householdID, questID uuid.UUID, act app.MemberAction) (db.HouseholdQuest, error)
+	ListPending(ctx context.Context, userID, householdID uuid.UUID, adminPin string) ([]db.ListPendingQuestsRow, error)
+	Approve(ctx context.Context, userID, householdID, questID uuid.UUID, adminPin string) (db.HouseholdQuest, db.FamilyMember, error)
+	Reject(ctx context.Context, userID, householdID, questID uuid.UUID, adminPin string) (db.HouseholdQuest, error)
 }
 
 // QuestHandler serves /api/v1/households/{householdID}/quests and
@@ -201,6 +207,154 @@ func (h *QuestHandler) CopyFromLibrary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.JSON(w, http.StatusCreated, toQuest(quest))
+}
+
+// questActionRequest is the body of a member's quest action: the acting
+// member and, when the member has one, their PIN.
+type questActionRequest struct {
+	MemberID uuid.UUID `json:"member_id"`
+	PIN      *string   `json:"pin"`
+}
+
+// decodeQuestAction reads a strict questActionRequest; a missing member_id
+// is a 422 on that field.
+func decodeQuestAction(w http.ResponseWriter, r *http.Request) (app.MemberAction, bool) {
+	var req questActionRequest
+	if !decodeJSON(w, r, &req) {
+		return app.MemberAction{}, false
+	}
+	if req.MemberID == uuid.Nil {
+		writeError(w, r, &app.ValidationError{Fields: map[string]string{"member_id": "is required"}})
+		return app.MemberAction{}, false
+	}
+	act := app.MemberAction{MemberID: req.MemberID}
+	if req.PIN != nil {
+		act.PIN = *req.PIN
+	}
+	return act, true
+}
+
+// Accept assigns an available quest to the acting member:
+// {"member_id": "...", "pin": "1234"}.
+func (h *QuestHandler) Accept(w http.ResponseWriter, r *http.Request) {
+	hid, qid, ok := parseQuestIDs(w, r)
+	if !ok {
+		return
+	}
+	act, ok := decodeQuestAction(w, r)
+	if !ok {
+		return
+	}
+	quest, err := h.svc.Accept(r.Context(), currentUser(r), hid, qid, act)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, toQuest(quest))
+}
+
+// memberAction runs one of the acting member's quest actions (abandon, mark
+// done) and answers the quest.
+func (h *QuestHandler) memberAction(w http.ResponseWriter, r *http.Request,
+	do func(ctx context.Context, userID, householdID, questID uuid.UUID, act app.MemberAction) (db.HouseholdQuest, error)) {
+	hid, qid, ok := parseQuestIDs(w, r)
+	if !ok {
+		return
+	}
+	act, ok := decodeQuestAction(w, r)
+	if !ok {
+		return
+	}
+	quest, err := do(r.Context(), currentUser(r), hid, qid, act)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, toQuest(quest))
+}
+
+// Abandon puts the acting member's quest back in the pool:
+// {"member_id": "...", "pin": "1234"}.
+func (h *QuestHandler) Abandon(w http.ResponseWriter, r *http.Request) {
+	h.memberAction(w, r, h.svc.Abandon)
+}
+
+// MarkDone marks the acting member's quest done; it then waits for approval:
+// {"member_id": "...", "pin": "1234"}.
+func (h *QuestHandler) MarkDone(w http.ResponseWriter, r *http.Request) {
+	h.memberAction(w, r, h.svc.MarkDone)
+}
+
+// pendingQuestJSON is a quest waiting for approval with the name of the
+// member who holds it (claimed_by).
+type pendingQuestJSON struct {
+	questJSON
+	MemberName string `json:"member_name"`
+}
+
+// Pending lists the quests waiting for approval. The admin PIN travels in
+// X-Admin-PIN. None waiting answers {"items": []}, never null.
+func (h *QuestHandler) Pending(w http.ResponseWriter, r *http.Request) {
+	hid, ok := pathUUID(w, r, "householdID")
+	if !ok {
+		return
+	}
+	rows, err := h.svc.ListPending(r.Context(), currentUser(r), hid, r.Header.Get("X-Admin-PIN"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	items := mapSlice(rows, func(p db.ListPendingQuestsRow) pendingQuestJSON {
+		return pendingQuestJSON{questJSON: toQuest(p.HouseholdQuest), MemberName: p.MemberName}
+	})
+	respond.JSON(w, http.StatusOK, listResponse[pendingQuestJSON]{Items: items})
+}
+
+// decodeEmptyBody accepts no body or exactly {}: approve and reject carry
+// everything in the path and the X-Admin-PIN header. Any field is a 400.
+func decodeEmptyBody(w http.ResponseWriter, r *http.Request) bool {
+	if r.ContentLength == 0 {
+		return true
+	}
+	var req struct{}
+	return decodeJSON(w, r, &req)
+}
+
+// approveResponse is the approved quest and the member it credited, with
+// their new point total.
+type approveResponse struct {
+	Quest  questJSON        `json:"quest"`
+	Member familyMemberJSON `json:"member"`
+}
+
+// Approve completes a pending quest and credits its points to its holder.
+// The admin PIN travels in X-Admin-PIN; the body is empty or {}.
+func (h *QuestHandler) Approve(w http.ResponseWriter, r *http.Request) {
+	hid, qid, ok := parseQuestIDs(w, r)
+	if !ok || !decodeEmptyBody(w, r) {
+		return
+	}
+	quest, member, err := h.svc.Approve(r.Context(), currentUser(r), hid, qid, r.Header.Get("X-Admin-PIN"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, approveResponse{Quest: toQuest(quest), Member: toFamilyMember(member)})
+}
+
+// Reject sends a pending quest back to its holder with no points. The admin
+// PIN travels in X-Admin-PIN; the body is empty or {}.
+func (h *QuestHandler) Reject(w http.ResponseWriter, r *http.Request) {
+	hid, qid, ok := parseQuestIDs(w, r)
+	if !ok || !decodeEmptyBody(w, r) {
+		return
+	}
+	quest, err := h.svc.Reject(r.Context(), currentUser(r), hid, qid, r.Header.Get("X-Admin-PIN"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, toQuest(quest))
 }
 
 // Library lists the global quest library.

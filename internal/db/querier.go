@@ -12,9 +12,21 @@ import (
 )
 
 type Querier interface {
+	// Puts a quest back in the pool. Only its current holder can abandon it, and
+	// not while it waits for approval.
+	AbandonQuest(ctx context.Context, arg AbandonQuestParams) (HouseholdQuest, error)
 	AddHouseholdMember(ctx context.Context, arg AddHouseholdMemberParams) error
 	AddMemberPoints(ctx context.Context, arg AddMemberPointsParams) (FamilyMember, error)
+	// Completes a pending quest. The pending row is locked first, and the
+	// done_at check is re-read under the lock, so of two concurrent approvals
+	// exactly one gets a row. The repeat countdown starts now. credited_member_id
+	// is the holder to credit, read before claimed_by is cleared.
+	ApproveQuest(ctx context.Context, arg ApproveQuestParams) (ApproveQuestRow, error)
 	ClaimHouseholdProvisioning(ctx context.Context, id uuid.UUID) (int64, error)
+	// Assigns an available quest to a family member. The availability check and
+	// the write are one statement, so of two concurrent claims exactly one
+	// matches; the other gets no row.
+	ClaimQuest(ctx context.Context, arg ClaimQuestParams) (HouseholdQuest, error)
 	// Single use: conditional on used_at IS NULL, unexpired, and the flow's
 	// purpose, so a state can't be replayed or used to complete another flow.
 	ConsumeOAuthState(ctx context.Context, arg ConsumeOAuthStateParams) (OauthState, error)
@@ -88,6 +100,9 @@ type Querier interface {
 	ListFamilyMembers(ctx context.Context, householdID uuid.UUID) ([]FamilyMember, error)
 	ListHouseholdQuests(ctx context.Context, arg ListHouseholdQuestsParams) ([]HouseholdQuest, error)
 	ListHouseholdsForUser(ctx context.Context, userID uuid.UUID) ([]ListHouseholdsForUserRow, error)
+	// Quests waiting for approval, oldest first, with the name of the member who
+	// holds each one.
+	ListPendingQuests(ctx context.Context, householdID uuid.UUID) ([]ListPendingQuestsRow, error)
 	// Household quest queries are scoped by household_id. Membership is checked
 	// by the service layer first; the household_id predicate guarantees a quest ID
 	// from another household can never be read or modified through this one.
@@ -97,11 +112,16 @@ type Querier interface {
 	MarkGoogleCalendarConnectionBroken(ctx context.Context, userID uuid.UUID) (int64, error)
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
 	MarkPasswordResetTokenUsed(ctx context.Context, id uuid.UUID) (int64, error)
+	// The holder marks the quest done; it then waits for the administrator.
+	// No points move here.
+	MarkQuestDone(ctx context.Context, arg MarkQuestDoneParams) (HouseholdQuest, error)
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
 	MarkVerificationCodeUsed(ctx context.Context, id uuid.UUID) (int64, error)
 	// Single use: conditional on used_at IS NULL and unexpired, so two concurrent
 	// redemptions can't both succeed.
 	RedeemSignInHandoff(ctx context.Context, codeHash string) (uuid.UUID, error)
+	// Sends a pending quest back to its holder: it stays theirs, unfinished.
+	RejectQuest(ctx context.Context, arg RejectQuestParams) (HouseholdQuest, error)
 	RenameFamilyMember(ctx context.Context, arg RenameFamilyMemberParams) (FamilyMember, error)
 	ResetLoginAttempts(ctx context.Context, id uuid.UUID) error
 	RevokeAllUserRefreshTokens(ctx context.Context, userID uuid.UUID) error

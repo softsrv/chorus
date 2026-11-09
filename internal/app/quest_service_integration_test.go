@@ -5,8 +5,12 @@ package app_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/softsrv/chorus/internal/app"
 	"github.com/softsrv/chorus/internal/db"
@@ -22,7 +26,7 @@ func TestIntegration_QuestCRUD(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	quests := app.NewQuestService(q)
+	quests := app.NewQuestService(q, pool)
 	ctx := context.Background()
 
 	alice := registerVerified(t, pool, authSvc, mailer, "questadmin").User.ID
@@ -145,7 +149,7 @@ func TestIntegration_QuestCopyFromLibrary(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	quests := app.NewQuestService(q)
+	quests := app.NewQuestService(q, pool)
 	ctx := context.Background()
 
 	alice := registerVerified(t, pool, authSvc, mailer, "questcopy").User.ID
@@ -243,7 +247,7 @@ func TestIntegration_QuestLibraryGlobalAndReadOnly(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	quests := app.NewQuestService(q)
+	quests := app.NewQuestService(q, pool)
 	ctx := context.Background()
 
 	// 1. Verify quest_library table has no household_id column (query information_schema)
@@ -332,7 +336,7 @@ func TestIntegration_LibrarySeeded(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	quests := app.NewQuestService(q)
+	quests := app.NewQuestService(q, pool)
 	ctx := context.Background()
 
 	alice := registerVerified(t, pool, authSvc, mailer, "libraryseeded").User.ID
@@ -414,7 +418,7 @@ func TestIntegration_QuestWritesNeedAdminPin(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	quests := app.NewQuestService(q)
+	quests := app.NewQuestService(q, pool)
 	familySvc := app.NewFamilyService(q, 10)
 	ctx := context.Background()
 
@@ -446,5 +450,448 @@ func TestIntegration_QuestWritesNeedAdminPin(t *testing.T) {
 	}
 	if _, err := quests.Update(ctx, alice, h.ID, quest.ID, in, "2468"); err != nil {
 		t.Fatalf("update with right pin: %v", err)
+	}
+}
+
+// TestIntegration_QuestAccept: a verified acting member accepts an available
+// quest; it is then theirs, carries its notes, and no other member sees it as
+// available. A wrong PIN or a member from another household changes nothing.
+func TestIntegration_QuestAccept(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	households := app.NewHouseholdService(q, pool)
+	quests := app.NewQuestService(q, pool)
+	familySvc := app.NewFamilyService(q, 10)
+	ctx := context.Background()
+
+	alice := registerVerified(t, pool, authSvc, mailer, "questaccept").User.ID
+	h, err := households.Create(ctx, alice, app.HouseholdInput{Name: "Accept Family"})
+	if err != nil {
+		t.Fatalf("create household: %v", err)
+	}
+	other, err := households.Create(ctx, alice, app.HouseholdInput{Name: "Other Family"})
+	if err != nil {
+		t.Fatalf("create other household: %v", err)
+	}
+	memberA, err := familySvc.Create(ctx, alice, h.ID, app.FamilyMemberInput{Name: "Ann", PIN: "1111"}, "")
+	if err != nil {
+		t.Fatalf("create member A: %v", err)
+	}
+	memberB, err := familySvc.Create(ctx, alice, h.ID, app.FamilyMemberInput{Name: "Ben"}, "")
+	if err != nil {
+		t.Fatalf("create member B: %v", err)
+	}
+	outsider, err := familySvc.Create(ctx, alice, other.ID, app.FamilyMemberInput{Name: "Otto"}, "")
+	if err != nil {
+		t.Fatalf("create outsider member: %v", err)
+	}
+	quest, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "Feed the cat", Points: num(5), Notes: "Half a scoop"}, "")
+	if err != nil {
+		t.Fatalf("create quest: %v", err)
+	}
+	if !app.QuestAvailable(quest, time.Now()) {
+		t.Fatalf("a new quest is not available: %+v", quest)
+	}
+
+	// A wrong PIN, or a member of another household, cannot accept it.
+	if _, err := quests.Accept(ctx, alice, h.ID, quest.ID, app.MemberAction{MemberID: memberA.ID, PIN: "9999"}); !errors.Is(err, app.ErrWrongPIN) {
+		t.Errorf("accept with wrong pin: %v", err)
+	}
+	if _, err := quests.Accept(ctx, alice, h.ID, quest.ID, app.MemberAction{MemberID: outsider.ID}); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("accept as another household's member: %v", err)
+	}
+	if got, err := quests.Get(ctx, alice, h.ID, quest.ID); err != nil || got.ClaimedBy != nil {
+		t.Fatalf("quest claimed by a refused accept: %+v %v", got, err)
+	}
+
+	accepted, err := quests.Accept(ctx, alice, h.ID, quest.ID, app.MemberAction{MemberID: memberA.ID, PIN: "1111"})
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if accepted.ClaimedBy == nil || *accepted.ClaimedBy != memberA.ID || !accepted.ClaimedAt.Valid ||
+		accepted.Notes != "Half a scoop" || app.QuestAvailable(accepted, time.Now()) {
+		t.Errorf("accepted quest: %+v", accepted)
+	}
+
+	// The list marks it unavailable, so it is in no member's available set.
+	list, _, err := quests.List(ctx, alice, h.ID, app.QuestPage{Limit: 10})
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list: %+v %v", list, err)
+	}
+	if list[0].ClaimedBy == nil || *list[0].ClaimedBy != memberA.ID || app.QuestAvailable(list[0], time.Now()) {
+		t.Errorf("listed quest still available: %+v", list[0])
+	}
+
+	// Another member accepting it is told it is taken, and A keeps it.
+	if _, err := quests.Accept(ctx, alice, h.ID, quest.ID, app.MemberAction{MemberID: memberB.ID}); !errors.Is(err, app.ErrQuestTaken) {
+		t.Errorf("second accept: %v, want ErrQuestTaken", err)
+	}
+	if got, err := quests.Get(ctx, alice, h.ID, quest.ID); err != nil || got.ClaimedBy == nil || *got.ClaimedBy != memberA.ID {
+		t.Errorf("quest after second accept: %+v %v", got, err)
+	}
+}
+
+// TestIntegration_QuestAcceptConcurrent: concurrent accepts of one available
+// quest by different members result in exactly one success (nil error) and N-1
+// ErrQuestTaken errors, and the quest is held by the winner.
+func TestIntegration_QuestAcceptConcurrent(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	households := app.NewHouseholdService(q, pool)
+	quests := app.NewQuestService(q, pool)
+	familySvc := app.NewFamilyService(q, 10)
+	ctx := context.Background()
+
+	alice := registerVerified(t, pool, authSvc, mailer, "questacceptconc").User.ID
+	h, err := households.Create(ctx, alice, app.HouseholdInput{Name: "Accept Conc Family"})
+	if err != nil {
+		t.Fatalf("create household: %v", err)
+	}
+
+	const n = 8
+	members := make([]app.Member, n)
+	for i := range n {
+		m, err := familySvc.Create(ctx, alice, h.ID, app.FamilyMemberInput{Name: fmt.Sprintf("Member %d", i)}, "")
+		if err != nil {
+			t.Fatalf("create member %d: %v", i, err)
+		}
+		members[i] = m
+	}
+
+	quest, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "Feed the cat", Points: num(5), Notes: "Half a scoop"}, "")
+	if err != nil {
+		t.Fatalf("create quest: %v", err)
+	}
+
+	start := make(chan struct{})
+	type result struct {
+		memberID uuid.UUID
+		quest    db.HouseholdQuest
+		err      error
+	}
+	results := make(chan result, n)
+	for i := range n {
+		go func(m app.Member) {
+			<-start
+			qRow, err := quests.Accept(ctx, alice, h.ID, quest.ID, app.MemberAction{MemberID: m.ID})
+			results <- result{memberID: m.ID, quest: qRow, err: err}
+		}(members[i])
+	}
+	close(start)
+
+	var wins, taken int
+	var winnerID uuid.UUID
+	for range n {
+		r := <-results
+		switch {
+		case r.err == nil:
+			wins++
+			winnerID = r.memberID
+		case errors.Is(r.err, app.ErrQuestTaken):
+			taken++
+		default:
+			t.Errorf("concurrent accept: unexpected error %v", r.err)
+		}
+	}
+	if wins != 1 || taken != n-1 {
+		t.Fatalf("concurrent accepts: %d won, %d taken; want 1 and %d", wins, taken, n-1)
+	}
+
+	got, err := quests.Get(ctx, alice, h.ID, quest.ID)
+	if err != nil {
+		t.Fatalf("get quest: %v", err)
+	}
+	if got.ClaimedBy == nil || *got.ClaimedBy != winnerID {
+		t.Errorf("quest claimed_by: got %v, want winner %v", got.ClaimedBy, winnerID)
+	}
+}
+
+// TestIntegration_QuestApproval walks a quest through its lifecycle: a member
+// accepts it, abandons it, another member takes it, marks it done, the
+// administrator sends it back and then approves it. Points move only on
+// approval, exactly once, in the same transaction as the quest update, and the
+// repeat countdown starts at approval.
+func TestIntegration_QuestApproval(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	households := app.NewHouseholdService(q, pool)
+	quests := app.NewQuestService(q, pool)
+	familySvc := app.NewFamilyService(q, 10)
+	ctx := context.Background()
+
+	alice := registerVerified(t, pool, authSvc, mailer, "questapprove").User.ID
+	h, err := households.Create(ctx, alice, app.HouseholdInput{Name: "Approval Family"})
+	if err != nil {
+		t.Fatalf("create household: %v", err)
+	}
+	ann, err := familySvc.Create(ctx, alice, h.ID, app.FamilyMemberInput{Name: "Ann", PIN: "1111"}, "")
+	if err != nil {
+		t.Fatalf("create Ann: %v", err)
+	}
+	ben, err := familySvc.Create(ctx, alice, h.ID, app.FamilyMemberInput{Name: "Ben"}, "")
+	if err != nil {
+		t.Fatalf("create Ben: %v", err)
+	}
+	asAnn := app.MemberAction{MemberID: ann.ID, PIN: "1111"}
+	asBen := app.MemberAction{MemberID: ben.ID}
+	quest, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "Mow the lawn", Points: num(7), RepeatDays: num(3)}, "")
+	if err != nil {
+		t.Fatalf("create quest: %v", err)
+	}
+	points := func(memberID uuid.UUID) int32 {
+		t.Helper()
+		m, err := q.GetFamilyMember(ctx, db.GetFamilyMemberParams{HouseholdID: h.ID, ID: memberID})
+		if err != nil {
+			t.Fatalf("get member: %v", err)
+		}
+		return m.Points
+	}
+	get := func() db.HouseholdQuest {
+		t.Helper()
+		got, err := quests.Get(ctx, alice, h.ID, quest.ID)
+		if err != nil {
+			t.Fatalf("get quest: %v", err)
+		}
+		return got
+	}
+	heldBy := func(label string, want uuid.UUID, done bool) {
+		t.Helper()
+		got := get()
+		if got.ClaimedBy == nil || *got.ClaimedBy != want || got.DoneAt.Valid != done {
+			t.Errorf("%s: claimed_by %v done_at %v; want %v, done=%v", label, got.ClaimedBy, got.DoneAt, want, done)
+		}
+	}
+	pending := func(adminPin string) []db.ListPendingQuestsRow {
+		t.Helper()
+		rows, err := quests.ListPending(ctx, alice, h.ID, adminPin)
+		if err != nil || rows == nil {
+			t.Fatalf("list pending: %v %v", rows, err)
+		}
+		return rows
+	}
+
+	// Declining is client-side: reading the quest writes nothing.
+	if got := get(); got.ClaimedBy != nil || !app.QuestAvailable(got, time.Now()) {
+		t.Fatalf("a read changed the quest: %+v", got)
+	}
+	if len(pending("")) != 0 {
+		t.Error("a new household has quests waiting")
+	}
+	// Nobody holds it, so nobody can mark it done.
+	if _, err := quests.MarkDone(ctx, alice, h.ID, quest.ID, asAnn); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("mark done unclaimed: %v, want ErrNotFound", err)
+	}
+
+	// Ann accepts. Ben can neither abandon nor finish Ann's quest.
+	if _, err := quests.Accept(ctx, alice, h.ID, quest.ID, asAnn); err != nil {
+		t.Fatalf("Ann accepts: %v", err)
+	}
+	if _, err := quests.Abandon(ctx, alice, h.ID, quest.ID, asBen); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("Ben abandons Ann's quest: %v, want ErrNotFound", err)
+	}
+	if _, err := quests.MarkDone(ctx, alice, h.ID, quest.ID, asBen); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("Ben marks Ann's quest done: %v, want ErrNotFound", err)
+	}
+	if _, err := quests.Abandon(ctx, alice, h.ID, quest.ID, app.MemberAction{MemberID: ann.ID, PIN: "9999"}); !errors.Is(err, app.ErrWrongPIN) {
+		t.Errorf("Ann abandons with a wrong PIN: %v, want ErrWrongPIN", err)
+	}
+	heldBy("after refused actions", ann.ID, false)
+
+	// Ann abandons: the quest is back in the pool and Ben can take it.
+	abandoned, err := quests.Abandon(ctx, alice, h.ID, quest.ID, asAnn)
+	if err != nil || abandoned.ClaimedBy != nil || abandoned.ClaimedAt.Valid || !app.QuestAvailable(abandoned, time.Now()) {
+		t.Fatalf("Ann abandons: %+v %v", abandoned, err)
+	}
+	if _, err := quests.Accept(ctx, alice, h.ID, quest.ID, asBen); err != nil {
+		t.Fatalf("Ben accepts after abandon: %v", err)
+	}
+
+	// Ben marks it done: it waits for approval and no points move.
+	done, err := quests.MarkDone(ctx, alice, h.ID, quest.ID, asBen)
+	if err != nil || !done.DoneAt.Valid || done.ClaimedBy == nil || *done.ClaimedBy != ben.ID {
+		t.Fatalf("Ben marks done: %+v %v", done, err)
+	}
+	if p := points(ben.ID); p != 0 {
+		t.Errorf("points after mark done: %d, want 0", p)
+	}
+	if _, err := quests.MarkDone(ctx, alice, h.ID, quest.ID, asBen); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("mark done twice: %v, want ErrNotFound", err)
+	}
+	if rows := pending(""); len(rows) != 1 || rows[0].HouseholdQuest.ID != quest.ID || rows[0].MemberName != "Ben" ||
+		rows[0].HouseholdQuest.Points != 7 || rows[0].HouseholdQuest.ClaimedBy == nil || *rows[0].HouseholdQuest.ClaimedBy != ben.ID {
+		t.Errorf("pending: %+v", rows)
+	}
+	// A quest waiting for approval cannot be abandoned.
+	if _, err := quests.Abandon(ctx, alice, h.ID, quest.ID, asBen); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("abandon while pending: %v, want ErrNotFound", err)
+	}
+	heldBy("after abandon while pending", ben.ID, true)
+
+	// Sent back: still Ben's, not done, no points, nothing waiting.
+	rejected, err := quests.Reject(ctx, alice, h.ID, quest.ID, "")
+	if err != nil || rejected.DoneAt.Valid || rejected.ClaimedBy == nil || *rejected.ClaimedBy != ben.ID {
+		t.Fatalf("reject: %+v %v", rejected, err)
+	}
+	if p := points(ben.ID); p != 0 {
+		t.Errorf("points after reject: %d, want 0", p)
+	}
+	if len(pending("")) != 0 {
+		t.Error("a rejected quest is still waiting")
+	}
+	if _, err := quests.Reject(ctx, alice, h.ID, quest.ID, ""); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("reject a quest that is not pending: %v, want ErrNotFound", err)
+	}
+	if _, _, err := quests.Approve(ctx, alice, h.ID, quest.ID, ""); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("approve a quest that is not pending: %v, want ErrNotFound", err)
+	}
+	if p := points(ben.ID); p != 0 {
+		t.Errorf("points after approving a quest that was not pending: %d, want 0", p)
+	}
+	if _, err := quests.MarkDone(ctx, alice, h.ID, quest.ID, asBen); err != nil {
+		t.Fatalf("mark done again after reject: %v", err)
+	}
+
+	// With an admin PIN set, a missing or wrong PIN changes nothing.
+	if err := familySvc.SetAdminPin(ctx, alice, h.ID, "2468", ""); err != nil {
+		t.Fatalf("set admin pin: %v", err)
+	}
+	if _, _, err := quests.Approve(ctx, alice, h.ID, quest.ID, ""); !errors.Is(err, app.ErrAdminPinRequired) {
+		t.Errorf("approve without admin pin: %v, want ErrAdminPinRequired", err)
+	}
+	if _, _, err := quests.Approve(ctx, alice, h.ID, quest.ID, "0000"); !errors.Is(err, app.ErrWrongPIN) {
+		t.Errorf("approve with wrong admin pin: %v, want ErrWrongPIN", err)
+	}
+	if _, err := quests.Reject(ctx, alice, h.ID, quest.ID, "0000"); !errors.Is(err, app.ErrWrongPIN) {
+		t.Errorf("reject with wrong admin pin: %v, want ErrWrongPIN", err)
+	}
+	if _, err := quests.Reject(ctx, alice, h.ID, quest.ID, ""); !errors.Is(err, app.ErrAdminPinRequired) {
+		t.Errorf("reject without admin pin: %v, want ErrAdminPinRequired", err)
+	}
+	if _, err := quests.ListPending(ctx, alice, h.ID, "0000"); !errors.Is(err, app.ErrWrongPIN) {
+		t.Errorf("pending with wrong admin pin: %v, want ErrWrongPIN", err)
+	}
+	if p := points(ben.ID); p != 0 {
+		t.Errorf("points after refused approvals: %d, want 0", p)
+	}
+	heldBy("after refused approvals", ben.ID, true)
+
+	// A failure after the quest update rolls back both: a trigger makes the
+	// points credit fail, and the quest is still pending with no points.
+	if _, err := pool.Exec(ctx, `CREATE FUNCTION test_fail_points() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN RAISE EXCEPTION 'points credit failed'; END $$`); err != nil {
+		t.Fatalf("create trigger function: %v", err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DROP FUNCTION IF EXISTS test_fail_points() CASCADE`) })
+	if _, err := pool.Exec(ctx, `CREATE TRIGGER test_fail_points BEFORE UPDATE OF points ON family_members
+		FOR EACH ROW WHEN (NEW.id = '`+ben.ID.String()+`') EXECUTE FUNCTION test_fail_points()`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	if _, _, err := quests.Approve(ctx, alice, h.ID, quest.ID, "2468"); err == nil {
+		t.Fatal("approve succeeded although the points credit failed")
+	}
+	if _, err := pool.Exec(ctx, `DROP FUNCTION test_fail_points() CASCADE`); err != nil {
+		t.Fatalf("drop trigger: %v", err)
+	}
+	heldBy("after a failed approval", ben.ID, true)
+	if got := get(); got.CompletedAt.Valid || got.AvailableAt.Valid {
+		t.Errorf("a failed approval left the quest completed: %+v", got)
+	}
+	if p := points(ben.ID); p != 0 {
+		t.Errorf("points after a failed approval: %d, want 0", p)
+	}
+
+	// Two approvals at once: exactly one credits the points.
+	start := make(chan struct{})
+	type result struct {
+		member db.FamilyMember
+		err    error
+	}
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			<-start
+			_, m, err := quests.Approve(ctx, alice, h.ID, quest.ID, "2468")
+			results <- result{m, err}
+		}()
+	}
+	close(start)
+	var wins, notFound int
+	for range 2 {
+		r := <-results
+		switch {
+		case r.err == nil:
+			wins++
+			if r.member.ID != ben.ID || r.member.Points != 7 {
+				t.Errorf("credited member: %+v, want Ben with 7 points", r.member)
+			}
+		case errors.Is(r.err, app.ErrNotFound):
+			notFound++
+		default:
+			t.Errorf("concurrent approve: %v", r.err)
+		}
+	}
+	if wins != 1 || notFound != 1 {
+		t.Errorf("concurrent approvals: %d won, %d not found; want 1 and 1", wins, notFound)
+	}
+	if p := points(ben.ID); p != 7 {
+		t.Errorf("Ben's points after approval: %d, want 7", p)
+	}
+	// Approving again credits nothing more.
+	if _, _, err := quests.Approve(ctx, alice, h.ID, quest.ID, "2468"); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("repeat approve: %v, want ErrNotFound", err)
+	}
+	if p := points(ben.ID); p != 7 {
+		t.Errorf("Ben's points after repeat approve: %d, want 7", p)
+	}
+
+	// Approved: released, completed, and out of the pool for its 3 days.
+	approved := get()
+	if approved.ClaimedBy != nil || approved.ClaimedAt.Valid || approved.DoneAt.Valid || !approved.CompletedAt.Valid ||
+		!approved.AvailableAt.Valid || approved.AvailableAt.Time.Sub(approved.CompletedAt.Time) != 72*time.Hour {
+		t.Fatalf("approved quest: %+v", approved)
+	}
+	if app.QuestAvailable(approved, time.Now()) {
+		t.Error("an approved quest is available before its repeat days pass")
+	}
+	if len(pending("2468")) != 0 {
+		t.Error("an approved quest is still waiting")
+	}
+	if _, err := quests.Accept(ctx, alice, h.ID, quest.ID, asAnn); !errors.Is(err, app.ErrQuestTaken) {
+		t.Errorf("accept during repeat days: %v, want ErrQuestTaken", err)
+	}
+
+	// Once its repeat days have passed it is back in the pool.
+	if _, err := pool.Exec(ctx, `UPDATE household_quests SET available_at = NOW() - interval '1 minute' WHERE id = $1`, quest.ID); err != nil {
+		t.Fatalf("age available_at: %v", err)
+	}
+	list, _, err := quests.List(ctx, alice, h.ID, app.QuestPage{Limit: 10})
+	if err != nil || len(list) != 1 || !app.QuestAvailable(list[0], time.Now()) {
+		t.Fatalf("list after repeat days: %+v %v", list, err)
+	}
+	if _, err := quests.Accept(ctx, alice, h.ID, quest.ID, asAnn); err != nil {
+		t.Fatalf("accept after repeat days: %v", err)
+	}
+
+	// With no admin PIN, being the administrator is enough to approve.
+	if err := familySvc.ClearAdminPin(ctx, alice, h.ID, "2468"); err != nil {
+		t.Fatalf("clear admin pin: %v", err)
+	}
+	if _, err := quests.MarkDone(ctx, alice, h.ID, quest.ID, asAnn); err != nil {
+		t.Fatalf("Ann marks done: %v", err)
+	}
+	if _, m, err := quests.Approve(ctx, alice, h.ID, quest.ID, ""); err != nil || m.ID != ann.ID || m.Points != 7 {
+		t.Errorf("approve with no admin pin set: %+v %v", m, err)
+	}
+	if p := points(ann.ID); p != 7 {
+		t.Errorf("Ann's points: %d, want 7", p)
+	}
+	if p := points(ben.ID); p != 7 {
+		t.Errorf("Ben's points changed on Ann's approval: %d, want 7", p)
 	}
 }

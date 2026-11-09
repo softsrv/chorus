@@ -25,7 +25,7 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	quests := app.NewQuestService(q)
+	quests := app.NewQuestService(q, pool)
 	familySvc := app.NewFamilyService(q, 10)
 	ctx := context.Background()
 
@@ -97,6 +97,42 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	_, checks["get quest via own household"] = quests.Get(ctx, mallory, mh.ID, aliceQuest.ID)
 	_, checks["update quest via own household"] = quests.Update(ctx, mallory, mh.ID, aliceQuest.ID, app.QuestInput{Name: "Smuggled"}, "")
 	checks["delete quest via own household"] = quests.Delete(ctx, mallory, mh.ID, aliceQuest.ID, "")
+	// Quest actions: an outsider cannot accept Alice's quest, and smuggling
+	// Alice's member or quest id through Mallory's own household fails too.
+	malloryMember, err := familySvc.Create(ctx, mallory, mh.ID, app.FamilyMemberInput{Name: "Mallory Member"}, "")
+	if err != nil {
+		t.Fatalf("Create mallory member: %v", err)
+	}
+	_, checks["accept quest"] = quests.Accept(ctx, mallory, h.ID, aliceQuest.ID, app.MemberAction{MemberID: aliceMember.ID, PIN: "1234"})
+	_, checks["accept quest as own member"] = quests.Accept(ctx, mallory, h.ID, aliceQuest.ID, app.MemberAction{MemberID: malloryMember.ID})
+	_, checks["accept quest via own household with alice's member"] = quests.Accept(ctx, mallory, mh.ID, aliceQuest.ID, app.MemberAction{MemberID: aliceMember.ID, PIN: "1234"})
+	_, checks["accept quest via own household"] = quests.Accept(ctx, mallory, mh.ID, aliceQuest.ID, app.MemberAction{MemberID: malloryMember.ID})
+	// Alice's member takes a second quest and marks it done, so an outsider
+	// has a pending quest to try to approve, send back, abandon or list.
+	alicePending, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "Laundry", Points: num(4)}, "")
+	if err != nil {
+		t.Fatalf("Create pending quest: %v", err)
+	}
+	asAlice := app.MemberAction{MemberID: aliceMember.ID, PIN: "1234"}
+	if _, err := quests.Accept(ctx, alice, h.ID, alicePending.ID, asAlice); err != nil {
+		t.Fatalf("Accept pending quest: %v", err)
+	}
+	if _, err := quests.MarkDone(ctx, alice, h.ID, alicePending.ID, asAlice); err != nil {
+		t.Fatalf("MarkDone pending quest: %v", err)
+	}
+	_, checks["abandon quest"] = quests.Abandon(ctx, mallory, h.ID, alicePending.ID, asAlice)
+	_, checks["mark quest done"] = quests.MarkDone(ctx, mallory, h.ID, alicePending.ID, asAlice)
+	_, checks["list pending quests"] = quests.ListPending(ctx, mallory, h.ID, "")
+	_, _, checks["approve quest"] = quests.Approve(ctx, mallory, h.ID, alicePending.ID, "")
+	_, checks["reject quest"] = quests.Reject(ctx, mallory, h.ID, alicePending.ID, "")
+	_, checks["abandon quest via own household"] = quests.Abandon(ctx, mallory, mh.ID, alicePending.ID, asAlice)
+	_, checks["abandon quest via own household as own member"] = quests.Abandon(ctx, mallory, mh.ID, alicePending.ID, app.MemberAction{MemberID: malloryMember.ID})
+	_, checks["mark quest done via own household"] = quests.MarkDone(ctx, mallory, mh.ID, alicePending.ID, asAlice)
+	_, _, checks["approve quest via own household"] = quests.Approve(ctx, mallory, mh.ID, alicePending.ID, "")
+	_, checks["reject quest via own household"] = quests.Reject(ctx, mallory, mh.ID, alicePending.ID, "")
+	if rows, err := quests.ListPending(ctx, mallory, mh.ID, ""); err != nil || len(rows) != 0 {
+		t.Errorf("mallory's own pending list shows other households' quests: %+v, %v", rows, err)
+	}
 	// Family member and admin-pin isolation checks
 	_, checks["list family members"] = familySvc.List(ctx, mallory, h.ID)
 	_, checks["get family member"] = familySvc.Get(ctx, mallory, h.ID, aliceMember.ID)
@@ -161,11 +197,18 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 
 	// Alice's data is intact.
 	if got, err := quests.Get(ctx, alice, h.ID, aliceQuest.ID); err != nil || got.Name != "Dishes" || got.Points != 10 ||
-		got.RepeatDays != 1 || got.Notes != "Wash and dry" {
+		got.RepeatDays != 1 || got.Notes != "Wash and dry" || got.ClaimedBy != nil || got.ClaimedAt.Valid {
 		t.Errorf("alice's quest was modified: %+v, %v", got, err)
 	}
-	if list, _, err := quests.List(ctx, alice, h.ID, app.QuestPage{Limit: 10}); err != nil || len(list) != 1 {
-		t.Errorf("alice's quests after outsider attempts: %d, %v; want exactly 1 (no smuggled create or copy)", len(list), err)
+	if list, _, err := quests.List(ctx, alice, h.ID, app.QuestPage{Limit: 10}); err != nil || len(list) != 2 {
+		t.Errorf("alice's quests after outsider attempts: %d, %v; want exactly 2 (no smuggled create or copy)", len(list), err)
+	}
+	if rows, err := quests.ListPending(ctx, alice, h.ID, ""); err != nil || len(rows) != 1 || rows[0].HouseholdQuest.ID != alicePending.ID ||
+		rows[0].HouseholdQuest.ClaimedBy == nil || *rows[0].HouseholdQuest.ClaimedBy != aliceMember.ID {
+		t.Errorf("alice's pending quest was changed by the outsider: %+v, %v", rows, err)
+	}
+	if m, err := familySvc.Get(ctx, alice, h.ID, aliceMember.ID); err != nil || m.Points != 0 {
+		t.Errorf("alice's member points changed by the outsider: %+v, %v", m, err)
 	}
 	if st, err := family.Status(ctx, alice, h.ID); err != nil || st.CalendarID != "family-y@group.calendar.google.com" || st.SetByID != alice {
 		t.Errorf("alice's family calendar was modified: %+v, %v", st, err)

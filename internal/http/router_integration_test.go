@@ -358,6 +358,177 @@ func TestAPI_EndToEnd(t *testing.T) {
 		}
 	}
 
+	// Accept: a verified acting member takes an available quest; the 200
+	// body carries its notes, claimed_by and available=false, and a second
+	// member is told it is taken.
+	type acceptedBody struct {
+		ID        uuid.UUID  `json:"id"`
+		Notes     string     `json:"notes"`
+		Available bool       `json:"available"`
+		ClaimedBy *uuid.UUID `json:"claimed_by"`
+		ClaimedAt *time.Time `json:"claimed_at"`
+	}
+	var member, member2 struct {
+		ID uuid.UUID `json:"id"`
+	}
+	s.expect(http.StatusCreated, "POST", hp+"/family-members", parent.AccessToken, map[string]string{"name": "Kid", "pin": "4321"}, &member)
+	s.expect(http.StatusCreated, "POST", hp+"/family-members", parent.AccessToken, map[string]string{"name": "Kid two"}, &member2)
+	var acceptQuest acceptedBody
+	s.expect(http.StatusCreated, "POST", hp+"/quests", parent.AccessToken, map[string]any{"name": "Take out trash", "notes": "Blue bin too"}, &acceptQuest)
+	if !acceptQuest.Available || acceptQuest.ClaimedBy != nil {
+		t.Errorf("new quest: %+v, want available and unclaimed", acceptQuest)
+	}
+	ap := hp + "/quests/" + acceptQuest.ID.String() + "/accept"
+	var wrongPin apiError
+	s.expect(http.StatusForbidden, "POST", ap, parent.AccessToken, map[string]any{"member_id": member.ID, "pin": "0000"}, &wrongPin)
+	if wrongPin.Error.Code != "wrong_pin" {
+		t.Errorf("accept with wrong pin: code %q", wrongPin.Error.Code)
+	}
+	s.expect(http.StatusUnprocessableEntity, "POST", ap, parent.AccessToken, map[string]any{"pin": "4321"}, nil)
+	var accepted acceptedBody
+	s.expect(http.StatusOK, "POST", ap, parent.AccessToken, map[string]any{"member_id": member.ID, "pin": "4321"}, &accepted)
+	if accepted.ID != acceptQuest.ID || accepted.Notes != "Blue bin too" || accepted.Available ||
+		accepted.ClaimedBy == nil || *accepted.ClaimedBy != member.ID || accepted.ClaimedAt == nil {
+		t.Errorf("accepted quest: %+v", accepted)
+	}
+	var afterAccept struct {
+		Items []acceptedBody `json:"items"`
+	}
+	s.expect(http.StatusOK, "GET", hp+"/quests", parent.AccessToken, nil, &afterAccept)
+	for _, it := range afterAccept.Items {
+		if it.ID == acceptQuest.ID && (it.Available || it.ClaimedBy == nil || *it.ClaimedBy != member.ID) {
+			t.Errorf("listed accepted quest: %+v", it)
+		}
+	}
+	var taken apiError
+	s.expect(http.StatusConflict, "POST", ap, parent.AccessToken, map[string]any{"member_id": member2.ID}, &taken)
+	if taken.Error.Code != "quest_taken" {
+		t.Errorf("second accept: code %q, want quest_taken", taken.Error.Code)
+	}
+
+	// Approval: nothing waits yet ({items: []}, not null); the holder marks
+	// it done; it is listed with its holder and points; the administrator
+	// sends it back, the holder finishes it again, and approval credits the
+	// points, visible in the family-member list.
+	qbase := hp + "/quests/" + acceptQuest.ID.String()
+	var rawPending map[string]json.RawMessage
+	s.expect(http.StatusOK, "GET", hp+"/quests/pending", parent.AccessToken, nil, &rawPending)
+	if string(rawPending["items"]) != "[]" {
+		t.Errorf("empty pending list: items = %s, want []", rawPending["items"])
+	}
+	s.expect(http.StatusNotFound, "POST", qbase+"/abandon", parent.AccessToken, map[string]any{"member_id": member2.ID}, nil)
+	s.expect(http.StatusNotFound, "POST", qbase+"/done", parent.AccessToken, map[string]any{"member_id": member2.ID}, nil)
+	var doneBody struct {
+		AwaitingApproval bool       `json:"awaiting_approval"`
+		DoneAt           *time.Time `json:"done_at"`
+		ClaimedBy        *uuid.UUID `json:"claimed_by"`
+	}
+	s.expect(http.StatusOK, "POST", qbase+"/done", parent.AccessToken, map[string]any{"member_id": member.ID, "pin": "4321"}, &doneBody)
+	if !doneBody.AwaitingApproval || doneBody.DoneAt == nil || doneBody.ClaimedBy == nil || *doneBody.ClaimedBy != member.ID {
+		t.Errorf("marked done: %+v", doneBody)
+	}
+	s.expect(http.StatusNotFound, "POST", qbase+"/abandon", parent.AccessToken, map[string]any{"member_id": member.ID, "pin": "4321"}, nil)
+	var pendingList struct {
+		Items []struct {
+			ID         uuid.UUID  `json:"id"`
+			Points     int        `json:"points"`
+			ClaimedBy  *uuid.UUID `json:"claimed_by"`
+			MemberName string     `json:"member_name"`
+		} `json:"items"`
+	}
+	s.expect(http.StatusOK, "GET", hp+"/quests/pending", parent.AccessToken, nil, &pendingList)
+	if len(pendingList.Items) != 1 || pendingList.Items[0].ID != acceptQuest.ID || pendingList.Items[0].MemberName != "Kid" ||
+		pendingList.Items[0].Points != 0 || pendingList.Items[0].ClaimedBy == nil || *pendingList.Items[0].ClaimedBy != member.ID {
+		t.Errorf("pending list: %+v", pendingList.Items)
+	}
+	var rejectedBody struct {
+		AwaitingApproval bool       `json:"awaiting_approval"`
+		ClaimedBy        *uuid.UUID `json:"claimed_by"`
+	}
+	s.expect(http.StatusOK, "POST", qbase+"/reject", parent.AccessToken, map[string]any{}, &rejectedBody)
+	if rejectedBody.AwaitingApproval || rejectedBody.ClaimedBy == nil || *rejectedBody.ClaimedBy != member.ID {
+		t.Errorf("rejected: %+v", rejectedBody)
+	}
+	s.expect(http.StatusNotFound, "POST", qbase+"/reject", parent.AccessToken, map[string]any{}, nil)
+	s.expect(http.StatusBadRequest, "POST", qbase+"/approve", parent.AccessToken, map[string]any{"admin_pin": "1234"}, nil)
+	// Give the quest points so the credit is visible.
+	s.expect(http.StatusOK, "PUT", qbase, parent.AccessToken, map[string]any{"name": "Take out trash", "points": 9, "repeat_days": 2, "notes": "Blue bin too"}, nil)
+	s.expect(http.StatusOK, "POST", qbase+"/done", parent.AccessToken, map[string]any{"member_id": member.ID, "pin": "4321"}, nil)
+
+	// With an admin PIN set: a missing or wrong header is a 403, never a
+	// sign-out 401, and changes nothing.
+	s.expect(http.StatusOK, "PUT", hp+"/admin-pin", parent.AccessToken, map[string]string{"pin": "8642"}, nil)
+	var pinErr apiError
+	s.expect(http.StatusForbidden, "POST", qbase+"/approve", parent.AccessToken, map[string]any{}, &pinErr)
+	if pinErr.Error.Code != "admin_pin_required" {
+		t.Errorf("approve without admin pin: code %q", pinErr.Error.Code)
+	}
+	pinErr = apiError{}
+	s.expectWithHeaders(http.StatusForbidden, "POST", qbase+"/approve", parent.AccessToken, map[string]string{"X-Admin-PIN": "0000"}, map[string]any{}, &pinErr)
+	if pinErr.Error.Code != "wrong_pin" {
+		t.Errorf("approve with wrong admin pin: code %q", pinErr.Error.Code)
+	}
+	pinErr = apiError{}
+	s.expectWithHeaders(http.StatusForbidden, "GET", hp+"/quests/pending", parent.AccessToken, map[string]string{"X-Admin-PIN": "0000"}, nil, &pinErr)
+	if pinErr.Error.Code != "wrong_pin" {
+		t.Errorf("pending with wrong admin pin: code %q", pinErr.Error.Code)
+	}
+	s.expectWithHeaders(http.StatusForbidden, "POST", qbase+"/reject", parent.AccessToken, map[string]string{"X-Admin-PIN": "0000"}, map[string]any{}, nil)
+	adminHdr := map[string]string{"X-Admin-PIN": "8642"}
+	pendingList.Items = nil
+	s.expectWithHeaders(http.StatusOK, "GET", hp+"/quests/pending", parent.AccessToken, adminHdr, nil, &pendingList)
+	if len(pendingList.Items) != 1 || pendingList.Items[0].Points != 9 {
+		t.Errorf("pending after refused approvals: %+v", pendingList.Items)
+	}
+
+	var approvedBody struct {
+		Quest struct {
+			ID          uuid.UUID  `json:"id"`
+			Available   bool       `json:"available"`
+			ClaimedBy   *uuid.UUID `json:"claimed_by"`
+			CompletedAt *time.Time `json:"completed_at"`
+			AvailableAt *time.Time `json:"available_at"`
+		} `json:"quest"`
+		Member struct {
+			ID     uuid.UUID `json:"id"`
+			Name   string    `json:"name"`
+			HasPIN bool      `json:"has_pin"`
+			Points int       `json:"points"`
+		} `json:"member"`
+	}
+	s.expectWithHeaders(http.StatusOK, "POST", qbase+"/approve", parent.AccessToken, adminHdr, map[string]any{}, &approvedBody)
+	if approvedBody.Quest.ID != acceptQuest.ID || approvedBody.Quest.Available || approvedBody.Quest.ClaimedBy != nil ||
+		approvedBody.Quest.CompletedAt == nil || approvedBody.Quest.AvailableAt == nil ||
+		approvedBody.Member.ID != member.ID || approvedBody.Member.Name != "Kid" || !approvedBody.Member.HasPIN || approvedBody.Member.Points != 9 {
+		t.Errorf("approved: %+v", approvedBody)
+	}
+	s.expectWithHeaders(http.StatusNotFound, "POST", qbase+"/approve", parent.AccessToken, adminHdr, map[string]any{}, nil)
+	var familyList struct {
+		Items []struct {
+			ID     uuid.UUID `json:"id"`
+			Points int       `json:"points"`
+		} `json:"items"`
+	}
+	s.expect(http.StatusOK, "GET", hp+"/family-members", parent.AccessToken, nil, &familyList)
+	for _, m := range familyList.Items {
+		want := 0
+		if m.ID == member.ID {
+			want = 9
+		}
+		if m.Points != want {
+			t.Errorf("family member %s points = %d, want %d", m.ID, m.Points, want)
+		}
+	}
+	rawPending = nil
+	s.expectWithHeaders(http.StatusOK, "GET", hp+"/quests/pending", parent.AccessToken, adminHdr, nil, &rawPending)
+	if string(rawPending["items"]) != "[]" {
+		t.Errorf("pending after approval: items = %s, want []", rawPending["items"])
+	}
+	// No self-complete route exists.
+	s.expect(http.StatusNotFound, "POST", qbase+"/complete", parent.AccessToken, map[string]any{"member_id": member.ID, "pin": "4321"}, nil)
+	s.expectWithHeaders(http.StatusNoContent, "DELETE", hp+"/admin-pin", parent.AccessToken, adminHdr, nil, nil)
+	s.expect(http.StatusNoContent, "DELETE", hp+"/quests/"+acceptQuest.ID.String(), parent.AccessToken, nil, nil)
+
 	// Library copy keeps the library's values and its id.
 	var library struct {
 		Items []questBody `json:"items"`
@@ -954,6 +1125,77 @@ func TestAPI_PINRateLimit(t *testing.T) {
 	var rlErr apiError
 	ts.expect(http.StatusTooManyRequests, "POST", "/api/v1/households/"+h.ID.String()+"/family-members/"+m.ID.String()+"/verify", u.AccessToken,
 		map[string]string{"pin": "1234"}, &rlErr)
+	if rlErr.Error.Code != "rate_limited" {
+		t.Errorf("expected rate_limited, got %q", rlErr.Error.Code)
+	}
+}
+
+func TestAPI_QuestPINRateLimit(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set; skipping integration test")
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	q := db.New(pool)
+	mail := &mailbox{text: map[string]string{}}
+	authSvc := app.NewAuthService(q, pool, mail, app.AuthServiceConfig{
+		JWTSecret: secret, AccessExpiry: 15 * time.Minute, RefreshExpiry: 24 * time.Hour,
+		BCryptCost: 10, PasswordMinLen: 8, AppBaseURL: "http://chorus.test", AppName: "Chorus",
+	})
+	t.Cleanup(authSvc.Shutdown)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	// Small PIN limit: 2 setup calls (member create + quest create, both PIN-limited) + 3 wrong guesses.
+	const setupCalls, wrongGuesses = 2, 3
+	handler := internalhttp.NewRouter(ctx, internalhttp.RouterConfig{
+		Queries: q, Pool: pool, AuthSvc: authSvc,
+		UserSvc:      app.NewUserService(q),
+		HouseholdSvc: app.NewHouseholdService(q, pool),
+		FamilySvc:    app.NewFamilyService(q, 10),
+		QuestSvc:     app.NewQuestService(q, pool),
+		JWTSecret:    secret,
+		PINRateLimit: setupCalls + wrongGuesses,
+	})
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	ts := &testServer{t: t, srv: srv, mail: mail, pool: pool}
+
+	u := ts.signUp("questrluser")
+	var h struct{ ID uuid.UUID }
+	ts.expect(http.StatusCreated, "POST", "/api/v1/households", u.AccessToken,
+		map[string]string{"name": "Quest RL Home", "timezone": "UTC"}, &h)
+
+	var m struct{ ID uuid.UUID }
+	ts.expect(http.StatusCreated, "POST", "/api/v1/households/"+h.ID.String()+"/family-members", u.AccessToken,
+		map[string]string{"name": "Kid", "pin": "1234"}, &m)
+
+	var quest struct{ ID uuid.UUID }
+	ts.expect(http.StatusCreated, "POST", "/api/v1/households/"+h.ID.String()+"/quests", u.AccessToken,
+		map[string]string{"name": "Mow Lawn"}, &quest)
+
+	ap := "/api/v1/households/" + h.ID.String() + "/quests/" + quest.ID.String() + "/accept"
+
+	// Wrong guesses within the limit are evaluated: 403 wrong_pin.
+	for i := 0; i < wrongGuesses; i++ {
+		var wrongPin apiError
+		ts.expect(http.StatusForbidden, "POST", ap, u.AccessToken,
+			map[string]any{"member_id": m.ID, "pin": "0000"}, &wrongPin)
+		if wrongPin.Error.Code != "wrong_pin" {
+			t.Errorf("expected wrong_pin, got %q", wrongPin.Error.Code)
+		}
+	}
+
+	// Past the limit: 429 Too Many Requests, even with the correct PIN.
+	var rlErr apiError
+	ts.expect(http.StatusTooManyRequests, "POST", ap, u.AccessToken,
+		map[string]any{"member_id": m.ID, "pin": "1234"}, &rlErr)
 	if rlErr.Error.Code != "rate_limited" {
 		t.Errorf("expected rate_limited, got %q", rlErr.Error.Code)
 	}

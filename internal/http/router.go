@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/softsrv/chorus/internal/app"
 	"github.com/softsrv/chorus/internal/db"
 	"github.com/softsrv/chorus/internal/http/handlers"
@@ -13,10 +15,17 @@ import (
 	"github.com/softsrv/chorus/web"
 )
 
+// Pool is the database pool: pinged by the readiness check and used for the
+// transactions the default services run. *pgxpool.Pool satisfies it.
+type Pool interface {
+	handlers.DBPinger
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
 // RouterConfig holds all dependencies required to build the router.
 type RouterConfig struct {
 	Queries           *db.Queries
-	Pool              handlers.DBPinger
+	Pool              Pool
 	AuthSvc           *app.AuthService
 	UserSvc           *app.UserService
 	HouseholdSvc      *app.HouseholdService
@@ -54,7 +63,7 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	familyMemberH := handlers.NewFamilyMemberHandler(familySvc)
 	questSvc := cfg.QuestSvc
 	if questSvc == nil {
-		questSvc = app.NewQuestService(cfg.Queries)
+		questSvc = app.NewQuestService(cfg.Queries, cfg.Pool)
 	}
 	questH := handlers.NewQuestHandler(questSvc)
 	googleH := handlers.NewGoogleHandler(cfg.GoogleSignIn, cfg.TrustedProxyCount)
@@ -155,9 +164,19 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("GET /api/v1/households/{householdID}/quests", verified(questH.List))
 	api.Handle("POST /api/v1/households/{householdID}/quests", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Create))))
 	api.Handle("POST /api/v1/households/{householdID}/quests/from-library", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.CopyFromLibrary))))
+	// The literal "pending" segment is more specific than {questID}, so it
+	// is never read as a quest id.
+	api.Handle("GET /api/v1/households/{householdID}/quests/pending", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Pending))))
 	api.Handle("GET /api/v1/households/{householdID}/quests/{questID}", verified(questH.Get))
 	api.Handle("PUT /api/v1/households/{householdID}/quests/{questID}", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Update))))
 	api.Handle("DELETE /api/v1/households/{householdID}/quests/{questID}", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Delete))))
+	// Member actions carry the member's PIN, so they share the PIN limiter.
+	api.Handle("POST /api/v1/households/{householdID}/quests/{questID}/accept", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Accept))))
+	api.Handle("POST /api/v1/households/{householdID}/quests/{questID}/abandon", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Abandon))))
+	api.Handle("POST /api/v1/households/{householdID}/quests/{questID}/done", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.MarkDone))))
+	// Approval is admin-only and, once an admin PIN is set, needs X-Admin-PIN.
+	api.Handle("POST /api/v1/households/{householdID}/quests/{questID}/approve", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Approve))))
+	api.Handle("POST /api/v1/households/{householdID}/quests/{questID}/reject", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Reject))))
 
 	// ── Family calendar ────────────────────────────────────────────────────
 	// Entries come from the household's chosen Google calendar. Chorus has no

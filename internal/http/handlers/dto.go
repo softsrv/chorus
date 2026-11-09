@@ -121,37 +121,48 @@ func toFamilyMember(m db.FamilyMember) familyMemberJSON {
 	}
 }
 
-// questJSON is a household quest. claimed_by/done_at belong to the quest
-// lifecycle; they are exposed read-only and change only through quest actions.
+// questJSON is a household quest. The lifecycle fields (claimed_by,
+// claimed_at, done_at, completed_at, available_at) are read-only and change
+// only through quest actions. available says the quest is in the pool;
+// awaiting_approval says a member marked it done and the administrator has
+// not yet approved or sent it back.
 type questJSON struct {
-	ID          uuid.UUID  `json:"id"`
-	HouseholdID uuid.UUID  `json:"household_id"`
-	LibraryID   *uuid.UUID `json:"library_id"`
-	Name        string     `json:"name"`
-	Points      int32      `json:"points"`
-	RepeatDays  int32      `json:"repeat_days"`
-	Notes       string     `json:"notes"`
-	ClaimedBy   *uuid.UUID `json:"claimed_by"`
-	DoneAt      *time.Time `json:"done_at"`
-	AvailableAt *time.Time `json:"available_at"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID               uuid.UUID  `json:"id"`
+	HouseholdID      uuid.UUID  `json:"household_id"`
+	LibraryID        *uuid.UUID `json:"library_id"`
+	Name             string     `json:"name"`
+	Points           int32      `json:"points"`
+	RepeatDays       int32      `json:"repeat_days"`
+	Notes            string     `json:"notes"`
+	Available        bool       `json:"available"`
+	ClaimedBy        *uuid.UUID `json:"claimed_by"`
+	ClaimedAt        *time.Time `json:"claimed_at"`
+	DoneAt           *time.Time `json:"done_at"`
+	AwaitingApproval bool       `json:"awaiting_approval"`
+	CompletedAt      *time.Time `json:"completed_at"`
+	AvailableAt      *time.Time `json:"available_at"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
 func toQuest(q db.HouseholdQuest) questJSON {
 	return questJSON{
-		ID:          q.ID,
-		HouseholdID: q.HouseholdID,
-		LibraryID:   q.LibraryID,
-		Name:        q.Name,
-		Points:      q.Points,
-		RepeatDays:  q.RepeatDays,
-		Notes:       q.Notes,
-		ClaimedBy:   q.ClaimedBy,
-		DoneAt:      timePtr(q.DoneAt),
-		AvailableAt: timePtr(q.AvailableAt),
-		CreatedAt:   q.CreatedAt.Time.UTC(),
-		UpdatedAt:   q.UpdatedAt.Time.UTC(),
+		ID:               q.ID,
+		HouseholdID:      q.HouseholdID,
+		LibraryID:        q.LibraryID,
+		Name:             q.Name,
+		Points:           q.Points,
+		RepeatDays:       q.RepeatDays,
+		Notes:            q.Notes,
+		Available:        app.QuestAvailable(q, time.Now()),
+		ClaimedBy:        q.ClaimedBy,
+		ClaimedAt:        timePtr(q.ClaimedAt),
+		DoneAt:           timePtr(q.DoneAt),
+		AwaitingApproval: q.DoneAt.Valid,
+		CompletedAt:      timePtr(q.CompletedAt),
+		AvailableAt:      timePtr(q.AvailableAt),
+		CreatedAt:        q.CreatedAt.Time.UTC(),
+		UpdatedAt:        q.UpdatedAt.Time.UTC(),
 	}
 }
 
