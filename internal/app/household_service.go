@@ -158,13 +158,29 @@ func (s *HouseholdService) Update(ctx context.Context, userID, householdID uuid.
 	return Household{Household: h, Role: RoleAdmin}, nil
 }
 
-// Delete removes a household and everything in it. Admins only.
+// Delete removes a household and everything in it. Admins only. The user is
+// then due a new household at their next sign-in.
 func (s *HouseholdService) Delete(ctx context.Context, userID, householdID uuid.UUID) error {
 	if _, err := requireAdmin(ctx, s.q, userID, householdID); err != nil {
 		return err
 	}
-	if err := s.q.DeleteHousehold(ctx, householdID); err != nil {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	qtx := s.q.WithTx(tx)
+	if err := qtx.DeleteHousehold(ctx, householdID); err != nil {
 		return fmt.Errorf("delete household: %w", err)
+	}
+	// With no create or join, provisioning is the only way back into a
+	// household: re-arm it so the next sign-in gives this user a new one.
+	if err := qtx.ReleaseHouseholdProvisioning(ctx, userID); err != nil {
+		return fmt.Errorf("release household provisioning: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
 }

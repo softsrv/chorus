@@ -382,3 +382,29 @@ test('CLM-12 guard: an unrefreshable 401 still signs out', async () => {
   assert.equal(sessionStorage.getItem(REFRESH_KEY), null);
   assert.ok(signedOut >= 1);
 });
+
+test('a blank points or days field is sent as typed, not 0, and the server\'s 422 shows on the field', async () => {
+  srv.extra[`POST ${HP}/quests`] = () => [422, { error: {
+    code: 'validation_failed', message: 'Check the highlighted fields.',
+    fields: { points: 'is required', repeat_days: 'must be at least 1' },
+  } }];
+  await loadApp();
+  const $form = buttons(env.$app, 'Add quest')[0].parentNode;
+  const input = (name) => walk($form).find((n) => (n.tagName === 'INPUT' || n.tagName === 'TEXTAREA') && n.name === name);
+  input('name').value = 'Water plants';
+  input('points').value = '';
+  input('repeat_days').value = '';
+  await submit($form);
+
+  const post = calls.filter((c) => c.method === 'POST' && c.path === `${HP}/quests`).at(-1);
+  assert.equal(post.body.points, '', 'blank points is not coerced to 0');
+  assert.equal(post.body.repeat_days, '', 'blank days is not coerced to 0');
+  assert.equal(input('points').parentNode.childNodes.at(-1).textContent, 'is required');
+
+  input('points').value = '7';
+  input('repeat_days').value = '2';
+  await submit($form);
+  const ok = calls.filter((c) => c.method === 'POST' && c.path === `${HP}/quests`).at(-1);
+  assert.equal(ok.body.points, 7);
+  assert.equal(ok.body.repeat_days, 2);
+});

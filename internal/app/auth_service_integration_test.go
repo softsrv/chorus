@@ -536,11 +536,16 @@ func TestIntegration_FirstSignInProvisionsHousehold(t *testing.T) {
 		}
 	})
 
-	t.Run("after household deleted a Login creates none", func(t *testing.T) {
+	t.Run("after the household is deleted the next sign-in provisions a new one", func(t *testing.T) {
 		res := registerVerified(t, pool, svc, mailer, "deleted-hh")
-		// Delete the user's household
-		if _, err := pool.Exec(ctx, `DELETE FROM households WHERE id IN (SELECT household_id FROM household_members WHERE user_id = $1)`, res.User.ID); err != nil {
-			t.Fatalf("delete household: %v", err)
+		households := app.NewHouseholdService(db.New(pool), pool)
+
+		var oldID uuid.UUID
+		if err := pool.QueryRow(ctx, "SELECT household_id FROM household_members WHERE user_id = $1", res.User.ID).Scan(&oldID); err != nil {
+			t.Fatalf("find household: %v", err)
+		}
+		if err := households.Delete(ctx, res.User.ID, oldID); err != nil {
+			t.Fatalf("Delete household: %v", err)
 		}
 
 		if _, err := svc.Login(ctx, res.User.Email, "correct-password-123", app.DeviceMeta{}); err != nil {
@@ -548,11 +553,29 @@ func TestIntegration_FirstSignInProvisionsHousehold(t *testing.T) {
 		}
 
 		var count int
+		var newID uuid.UUID
 		if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM household_members WHERE user_id = $1", res.User.ID).Scan(&count); err != nil {
 			t.Fatalf("query count: %v", err)
 		}
-		if count != 0 {
-			t.Errorf("expected 0 households after household deletion and login, got %d", count)
+		if count != 1 {
+			t.Fatalf("expected 1 household after deletion and login, got %d", count)
+		}
+		if err := pool.QueryRow(ctx, "SELECT household_id FROM household_members WHERE user_id = $1", res.User.ID).Scan(&newID); err != nil {
+			t.Fatalf("find new household: %v", err)
+		}
+		if newID == oldID {
+			t.Errorf("expected a new household, got the deleted one")
+		}
+
+		// A second sign-in adds no further household.
+		if _, err := svc.Login(ctx, res.User.Email, "correct-password-123", app.DeviceMeta{}); err != nil {
+			t.Fatalf("second Login: %v", err)
+		}
+		if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM household_members WHERE user_id = $1", res.User.ID).Scan(&count); err != nil {
+			t.Fatalf("query count: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("expected still 1 household, got %d", count)
 		}
 	})
 
