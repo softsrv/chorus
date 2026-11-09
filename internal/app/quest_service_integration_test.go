@@ -553,7 +553,7 @@ func TestIntegration_QuestAcceptConcurrent(t *testing.T) {
 	}
 
 	const n = 8
-	members := make([]db.FamilyMember, n)
+	members := make([]app.Member, n)
 	for i := range n {
 		m, err := familySvc.Create(ctx, alice, h.ID, app.FamilyMemberInput{Name: fmt.Sprintf("Member %d", i)}, "")
 		if err != nil {
@@ -575,7 +575,7 @@ func TestIntegration_QuestAcceptConcurrent(t *testing.T) {
 	}
 	results := make(chan result, n)
 	for i := range n {
-		go func(m db.FamilyMember) {
+		go func(m app.Member) {
 			<-start
 			qRow, err := quests.Accept(ctx, alice, h.ID, quest.ID, app.MemberAction{MemberID: m.ID})
 			results <- result{memberID: m.ID, quest: qRow, err: err}
