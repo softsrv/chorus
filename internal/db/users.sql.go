@@ -25,17 +25,6 @@ func (q *Queries) ClaimHouseholdProvisioning(ctx context.Context, id uuid.UUID) 
 	return result.RowsAffected(), nil
 }
 
-const lockUserProvisioning = `-- name: LockUserProvisioning :one
-SELECT household_provisioned_at FROM users WHERE id = $1 FOR UPDATE
-`
-
-func (q *Queries) LockUserProvisioning(ctx context.Context, id uuid.UUID) (pgtype.Timestamptz, error) {
-	row := q.db.QueryRow(ctx, lockUserProvisioning, id)
-	var household_provisioned_at pgtype.Timestamptz
-	err := row.Scan(&household_provisioned_at)
-	return household_provisioned_at, err
-}
-
 const createGoogleUser = `-- name: CreateGoogleUser :one
 INSERT INTO users (id, email, display_name, password_hash, google_subject, email_verified, created_at, updated_at)
 VALUES ($1, $2, $3, NULL, $4, true, NOW(), NOW())
