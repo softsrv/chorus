@@ -74,20 +74,27 @@ Native apps: store the refresh token in Keychain / Android Keystore, and send `d
 
 ### Households 🔒
 
-Roles: `admin` (manage household, members, invites) and `member`. Every member can manage chores and sees the household's family calendar.
+Each household has exactly one login account (its administrator). Family members exist as household-scoped profiles with a name and optional 4-digit PIN.
 
 | Method & path | Body | Notes |
 |---|---|---|
-| `GET /households` | none | Yours, with your `role` |
+| `GET /households` | none | Yours, with your `role` (`admin`) |
 | `POST /households` | `name, timezone?` | Creator becomes admin. `timezone` is IANA (default `UTC`). |
 | `GET /households/{id}` | none | |
 | `PUT /households/{id}` | `name, timezone` | admin |
-| `DELETE /households/{id}` | none | admin; deletes all chores/events |
-| `GET /households/{id}/members` | none | `{user_id, display_name, role, joined_at}` |
-| `PUT /households/{id}/members/{userId}` | `role` | admin; `409 last_admin` if demoting the last admin |
-| `DELETE /households/{id}/members/{userId}` | none | admin, or yourself to leave. The last admin can't leave while others remain. The last member leaving deletes the household. |
-| `POST /households/{id}/invites` | none | admin. `{code: "XXXX-XXXX-XXXX", expires_at}`, single use, 7 days |
-| `POST /invites/accept` | `code` | Case and dashes don't matter. 10 attempts/hour per user. |
+| `DELETE /households/{id}` | none | admin; deletes all chores/events/members |
+| `GET /households/{id}/family-members` | none | `{items: [{id, name, has_pin, points}]}` |
+| `POST /households/{id}/family-members` | `name, pin?` | admin; optional `X-Admin-PIN` header if set |
+| `GET /households/{id}/family-members/{memberId}` | none | `{id, name, has_pin, points}` |
+| `PUT /households/{id}/family-members/{memberId}` | `name` | admin; optional `X-Admin-PIN` header if set |
+| `DELETE /households/{id}/family-members/{memberId}` | none | admin; optional `X-Admin-PIN` header if set |
+| `PUT /households/{id}/family-members/{memberId}/pin` | `pin` | admin; 4-digit PIN; optional `X-Admin-PIN` header if set |
+| `DELETE /households/{id}/family-members/{memberId}/pin` | none | admin; optional `X-Admin-PIN` header if set |
+| `POST /households/{id}/family-members/{memberId}/verify` | `pin` | verifies member PIN |
+| `GET /households/{id}/admin-pin` | none | `{has_pin: bool}` |
+| `PUT /households/{id}/admin-pin` | `pin` | admin; 4-digit PIN; `X-Admin-PIN` header required if already set |
+| `DELETE /households/{id}/admin-pin` | none | admin; `X-Admin-PIN` header required |
+| `POST /households/{id}/admin-pin/verify` | `pin` | verifies admin PIN |
 
 ### Chores 🔒 — `/households/{id}/chores`
 

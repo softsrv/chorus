@@ -99,10 +99,6 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 		respond.Error(w, http.StatusBadRequest, "invalid_token", "This link or token is invalid or has expired.")
 	case errors.Is(err, app.ErrEmailAlreadyVerified):
 		respond.Error(w, http.StatusConflict, "already_verified", "Email is already verified.")
-	case errors.Is(err, app.ErrLastAdmin):
-		respond.Error(w, http.StatusConflict, "last_admin", "A household with members must keep at least one admin.")
-	case errors.Is(err, app.ErrAlreadyMember):
-		respond.Error(w, http.StatusConflict, "already_member", "You're already a member of this household.")
 	case errors.Is(err, app.ErrGoogleUnavailable):
 		w.Header().Set("Retry-After", "30")
 		respond.Error(w, http.StatusServiceUnavailable, "google_unavailable", "Google Calendar is temporarily unavailable. Try again shortly.")
@@ -112,8 +108,6 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 		respond.Error(w, http.StatusForbidden, "not_editable", "This calendar entry can't be edited.")
 	case errors.Is(err, app.ErrGoogleRejected):
 		respond.Error(w, http.StatusBadGateway, "google_rejected", "Google Calendar rejected the change.")
-	case errors.Is(err, app.ErrInviteInvalid):
-		respond.Error(w, http.StatusBadRequest, "invalid_invite", "Invite code is invalid or has expired.")
 	case errors.Is(err, app.ErrWrongPIN):
 		respond.Error(w, http.StatusForbidden, "wrong_pin", "Wrong PIN.")
 	case errors.Is(err, app.ErrAdminPinRequired):

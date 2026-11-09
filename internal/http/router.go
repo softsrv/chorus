@@ -68,7 +68,6 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	forgotRL := middleware.NewRateLimiter(ctx, 5, time.Hour, ipKey)
 	resetRL := middleware.NewRateLimiter(ctx, 10, time.Hour, ipKey)
 	verifyRL := middleware.NewRateLimiter(ctx, 10, time.Hour, ipKey)
-	inviteRL := middleware.NewRateLimiter(ctx, 10, time.Hour, userKey)
 	pinLimit := cfg.PINRateLimit
 	if pinLimit <= 0 {
 		pinLimit = 120
@@ -129,12 +128,6 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("GET /api/v1/households/{householdID}", verified(householdH.Get))
 	api.Handle("PUT /api/v1/households/{householdID}", verified(householdH.Update))
 	api.Handle("DELETE /api/v1/households/{householdID}", verified(householdH.Delete))
-	api.Handle("GET /api/v1/households/{householdID}/members", verified(householdH.ListMembers))
-	api.Handle("PUT /api/v1/households/{householdID}/members/{userID}", verified(householdH.UpdateMember))
-	api.Handle("DELETE /api/v1/households/{householdID}/members/{userID}", verified(householdH.RemoveMember))
-	api.Handle("POST /api/v1/households/{householdID}/invites", verified(householdH.CreateInvite))
-	// Rate limiter sits inside auth so it can key on the user.
-	api.Handle("POST /api/v1/invites/accept", authMW(middleware.RequireEmailVerified(limit(inviteRL, householdH.AcceptInvite))))
 
 	// ── Family members & Admin PIN ───────────────────────────────────────────
 	api.Handle("GET /api/v1/households/{householdID}/family-members", verified(familyMemberH.List))

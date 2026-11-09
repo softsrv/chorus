@@ -122,6 +122,13 @@ type HouseholdMember struct {
 	JoinedAt    pgtype.Timestamptz `json:"joined_at"`
 }
 
+type HouseholdMembersRetired struct {
+	HouseholdID uuid.UUID          `json:"household_id"`
+	UserID      uuid.UUID          `json:"user_id"`
+	Role        string             `json:"role"`
+	JoinedAt    pgtype.Timestamptz `json:"joined_at"`
+}
+
 type HouseholdQuest struct {
 	ID          uuid.UUID          `json:"id"`
 	HouseholdID uuid.UUID          `json:"household_id"`

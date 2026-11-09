@@ -44,7 +44,6 @@ type Querier interface {
 	DeleteHouseholdCalendar(ctx context.Context, arg DeleteHouseholdCalendarParams) (int64, error)
 	// Deletes every household where the user is the only member.
 	DeleteSoleMemberHouseholds(ctx context.Context, userID uuid.UUID) error
-	DeleteStaleHouseholdInvites(ctx context.Context) (int64, error)
 	DeleteStaleOAuthStates(ctx context.Context) (int64, error)
 	DeleteStalePasswordResetTokens(ctx context.Context) (int64, error)
 	DeleteStaleSignInHandoffs(ctx context.Context) (int64, error)
@@ -62,7 +61,6 @@ type Querier interface {
 	// the household doesn't exist or the user isn't a member; callers treat both
 	// as "not found" so household IDs can't be probed.
 	GetHouseholdForMember(ctx context.Context, arg GetHouseholdForMemberParams) (GetHouseholdForMemberRow, error)
-	GetHouseholdInviteByHashForUpdate(ctx context.Context, tokenHash string) (HouseholdInvite, error)
 	GetHouseholdMember(ctx context.Context, arg GetHouseholdMemberParams) (HouseholdMember, error)
 	GetOldestRecentVerificationCode(ctx context.Context, userID uuid.UUID) (pgtype.Timestamptz, error)
 	GetPasswordResetTokenByHash(ctx context.Context, tokenHash string) (PasswordResetToken, error)
@@ -78,15 +76,11 @@ type Querier interface {
 	GetVerificationCodeByTokenHash(ctx context.Context, tokenHash string) (EmailVerificationCode, error)
 	IncrementFailedLoginAttempts(ctx context.Context, id uuid.UUID) error
 	InsertEmailVerificationCode(ctx context.Context, arg InsertEmailVerificationCodeParams) (EmailVerificationCode, error)
-	InsertHouseholdInvite(ctx context.Context, arg InsertHouseholdInviteParams) (HouseholdInvite, error)
 	InsertOAuthState(ctx context.Context, arg InsertOAuthStateParams) (OauthState, error)
 	InsertPasswordResetToken(ctx context.Context, arg InsertPasswordResetTokenParams) (PasswordResetToken, error)
 	InsertRefreshToken(ctx context.Context, arg InsertRefreshTokenParams) (RefreshToken, error)
 	InsertSignInHandoff(ctx context.Context, arg InsertSignInHandoffParams) (GoogleSignInHandoff, error)
 	ListActiveRefreshTokensByUserID(ctx context.Context, userID uuid.UUID) ([]RefreshToken, error)
-	// Households where the user is the only admin but other members remain.
-	// Used to block account deletion that would orphan a household.
-	ListAdminHouseholdsWithOtherMembers(ctx context.Context, userID uuid.UUID) ([]ListAdminHouseholdsWithOtherMembersRow, error)
 	ListChores(ctx context.Context, arg ListChoresParams) ([]Chore, error)
 	// Events overlapping [range_start, range_end).
 	ListEventsInRange(ctx context.Context, arg ListEventsInRangeParams) ([]Event, error)
@@ -95,12 +89,9 @@ type Querier interface {
 	// predicate guarantees a member ID from another household can never be
 	// read or modified through this one.
 	ListFamilyMembers(ctx context.Context, householdID uuid.UUID) ([]FamilyMember, error)
-	ListHouseholdMembers(ctx context.Context, householdID uuid.UUID) ([]ListHouseholdMembersRow, error)
 	ListHouseholdsForUser(ctx context.Context, userID uuid.UUID) ([]ListHouseholdsForUserRow, error)
 	LockAccount(ctx context.Context, arg LockAccountParams) error
-	LockHouseholdAdmins(ctx context.Context, householdID uuid.UUID) ([]uuid.UUID, error)
 	MarkGoogleCalendarConnectionBroken(ctx context.Context, userID uuid.UUID) (int64, error)
-	MarkHouseholdInviteUsed(ctx context.Context, arg MarkHouseholdInviteUsedParams) error
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
 	MarkPasswordResetTokenUsed(ctx context.Context, id uuid.UUID) (int64, error)
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
@@ -108,7 +99,6 @@ type Querier interface {
 	// Single use: conditional on used_at IS NULL and unexpired, so two concurrent
 	// redemptions can't both succeed.
 	RedeemSignInHandoff(ctx context.Context, codeHash string) (uuid.UUID, error)
-	RemoveHouseholdMember(ctx context.Context, arg RemoveHouseholdMemberParams) (int64, error)
 	RenameFamilyMember(ctx context.Context, arg RenameFamilyMemberParams) (FamilyMember, error)
 	ResetLoginAttempts(ctx context.Context, id uuid.UUID) error
 	RevokeAllUserRefreshTokens(ctx context.Context, userID uuid.UUID) error
@@ -126,7 +116,6 @@ type Querier interface {
 	UpdateEvent(ctx context.Context, arg UpdateEventParams) (Event, error)
 	UpdateGoogleCalendarAccessToken(ctx context.Context, arg UpdateGoogleCalendarAccessTokenParams) (int64, error)
 	UpdateHousehold(ctx context.Context, arg UpdateHouseholdParams) (Household, error)
-	UpdateHouseholdMemberRole(ctx context.Context, arg UpdateHouseholdMemberRoleParams) (int64, error)
 	UpdatePasswordHash(ctx context.Context, arg UpdatePasswordHashParams) error
 	UpdateRefreshTokenLastUsed(ctx context.Context, arg UpdateRefreshTokenLastUsedParams) error
 	UpsertAdminPin(ctx context.Context, arg UpsertAdminPinParams) error

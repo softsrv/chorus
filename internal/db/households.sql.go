@@ -78,20 +78,6 @@ func (q *Queries) DeleteSoleMemberHouseholds(ctx context.Context, userID uuid.UU
 	return err
 }
 
-const deleteStaleHouseholdInvites = `-- name: DeleteStaleHouseholdInvites :execrows
-DELETE FROM household_invites
-WHERE (used_at IS NOT NULL AND used_at < NOW() - INTERVAL '7 days')
-   OR (expires_at < NOW() - INTERVAL '7 days')
-`
-
-func (q *Queries) DeleteStaleHouseholdInvites(ctx context.Context) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteStaleHouseholdInvites)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
 const getHouseholdForMember = `-- name: GetHouseholdForMember :one
 SELECT h.id, h.name, h.timezone, h.created_at, h.updated_at, m.role
 FROM households h
@@ -130,26 +116,6 @@ func (q *Queries) GetHouseholdForMember(ctx context.Context, arg GetHouseholdFor
 	return i, err
 }
 
-const getHouseholdInviteByHashForUpdate = `-- name: GetHouseholdInviteByHashForUpdate :one
-SELECT id, household_id, token_hash, created_by, expires_at, created_at, used_by, used_at FROM household_invites WHERE token_hash = $1 FOR UPDATE
-`
-
-func (q *Queries) GetHouseholdInviteByHashForUpdate(ctx context.Context, tokenHash string) (HouseholdInvite, error) {
-	row := q.db.QueryRow(ctx, getHouseholdInviteByHashForUpdate, tokenHash)
-	var i HouseholdInvite
-	err := row.Scan(
-		&i.ID,
-		&i.HouseholdID,
-		&i.TokenHash,
-		&i.CreatedBy,
-		&i.ExpiresAt,
-		&i.CreatedAt,
-		&i.UsedBy,
-		&i.UsedAt,
-	)
-	return i, err
-}
-
 const getHouseholdMember = `-- name: GetHouseholdMember :one
 SELECT household_id, user_id, role, joined_at FROM household_members WHERE household_id = $1 AND user_id = $2
 `
@@ -169,123 +135,6 @@ func (q *Queries) GetHouseholdMember(ctx context.Context, arg GetHouseholdMember
 		&i.JoinedAt,
 	)
 	return i, err
-}
-
-const insertHouseholdInvite = `-- name: InsertHouseholdInvite :one
-INSERT INTO household_invites (id, household_id, token_hash, created_by, expires_at, created_at)
-VALUES ($1, $2, $3, $4, $5, NOW())
-RETURNING id, household_id, token_hash, created_by, expires_at, created_at, used_by, used_at
-`
-
-type InsertHouseholdInviteParams struct {
-	ID          uuid.UUID          `json:"id"`
-	HouseholdID uuid.UUID          `json:"household_id"`
-	TokenHash   string             `json:"token_hash"`
-	CreatedBy   *uuid.UUID         `json:"created_by"`
-	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
-}
-
-func (q *Queries) InsertHouseholdInvite(ctx context.Context, arg InsertHouseholdInviteParams) (HouseholdInvite, error) {
-	row := q.db.QueryRow(ctx, insertHouseholdInvite,
-		arg.ID,
-		arg.HouseholdID,
-		arg.TokenHash,
-		arg.CreatedBy,
-		arg.ExpiresAt,
-	)
-	var i HouseholdInvite
-	err := row.Scan(
-		&i.ID,
-		&i.HouseholdID,
-		&i.TokenHash,
-		&i.CreatedBy,
-		&i.ExpiresAt,
-		&i.CreatedAt,
-		&i.UsedBy,
-		&i.UsedAt,
-	)
-	return i, err
-}
-
-const listAdminHouseholdsWithOtherMembers = `-- name: ListAdminHouseholdsWithOtherMembers :many
-SELECT h.id, h.name
-FROM households h
-JOIN household_members m ON m.household_id = h.id AND m.user_id = $1 AND m.role = 'admin'
-WHERE NOT EXISTS (
-    SELECT 1 FROM household_members a
-    WHERE a.household_id = h.id AND a.role = 'admin' AND a.user_id <> $1
-)
-AND EXISTS (
-    SELECT 1 FROM household_members o
-    WHERE o.household_id = h.id AND o.user_id <> $1
-)
-`
-
-type ListAdminHouseholdsWithOtherMembersRow struct {
-	ID   uuid.UUID `json:"id"`
-	Name string    `json:"name"`
-}
-
-// Households where the user is the only admin but other members remain.
-// Used to block account deletion that would orphan a household.
-func (q *Queries) ListAdminHouseholdsWithOtherMembers(ctx context.Context, userID uuid.UUID) ([]ListAdminHouseholdsWithOtherMembersRow, error) {
-	rows, err := q.db.Query(ctx, listAdminHouseholdsWithOtherMembers, userID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ListAdminHouseholdsWithOtherMembersRow{}
-	for rows.Next() {
-		var i ListAdminHouseholdsWithOtherMembersRow
-		if err := rows.Scan(&i.ID, &i.Name); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listHouseholdMembers = `-- name: ListHouseholdMembers :many
-SELECT m.user_id, m.role, m.joined_at, u.display_name
-FROM household_members m
-JOIN users u ON u.id = m.user_id
-WHERE m.household_id = $1
-ORDER BY u.display_name, m.user_id
-`
-
-type ListHouseholdMembersRow struct {
-	UserID      uuid.UUID          `json:"user_id"`
-	Role        string             `json:"role"`
-	JoinedAt    pgtype.Timestamptz `json:"joined_at"`
-	DisplayName string             `json:"display_name"`
-}
-
-func (q *Queries) ListHouseholdMembers(ctx context.Context, householdID uuid.UUID) ([]ListHouseholdMembersRow, error) {
-	rows, err := q.db.Query(ctx, listHouseholdMembers, householdID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ListHouseholdMembersRow{}
-	for rows.Next() {
-		var i ListHouseholdMembersRow
-		if err := rows.Scan(
-			&i.UserID,
-			&i.Role,
-			&i.JoinedAt,
-			&i.DisplayName,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
 }
 
 const listHouseholdsForUser = `-- name: ListHouseholdsForUser :many
@@ -332,63 +181,6 @@ func (q *Queries) ListHouseholdsForUser(ctx context.Context, userID uuid.UUID) (
 	return items, nil
 }
 
-const lockHouseholdAdmins = `-- name: LockHouseholdAdmins :many
-SELECT user_id FROM household_members
-WHERE household_id = $1 AND role = 'admin'
-FOR UPDATE
-`
-
-func (q *Queries) LockHouseholdAdmins(ctx context.Context, householdID uuid.UUID) ([]uuid.UUID, error) {
-	rows, err := q.db.Query(ctx, lockHouseholdAdmins, householdID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []uuid.UUID{}
-	for rows.Next() {
-		var user_id uuid.UUID
-		if err := rows.Scan(&user_id); err != nil {
-			return nil, err
-		}
-		items = append(items, user_id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const markHouseholdInviteUsed = `-- name: MarkHouseholdInviteUsed :exec
-UPDATE household_invites SET used_by = $2, used_at = NOW() WHERE id = $1
-`
-
-type MarkHouseholdInviteUsedParams struct {
-	ID     uuid.UUID  `json:"id"`
-	UsedBy *uuid.UUID `json:"used_by"`
-}
-
-func (q *Queries) MarkHouseholdInviteUsed(ctx context.Context, arg MarkHouseholdInviteUsedParams) error {
-	_, err := q.db.Exec(ctx, markHouseholdInviteUsed, arg.ID, arg.UsedBy)
-	return err
-}
-
-const removeHouseholdMember = `-- name: RemoveHouseholdMember :execrows
-DELETE FROM household_members WHERE household_id = $1 AND user_id = $2
-`
-
-type RemoveHouseholdMemberParams struct {
-	HouseholdID uuid.UUID `json:"household_id"`
-	UserID      uuid.UUID `json:"user_id"`
-}
-
-func (q *Queries) RemoveHouseholdMember(ctx context.Context, arg RemoveHouseholdMemberParams) (int64, error) {
-	result, err := q.db.Exec(ctx, removeHouseholdMember, arg.HouseholdID, arg.UserID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
 const updateHousehold = `-- name: UpdateHousehold :one
 UPDATE households SET name = $2, timezone = $3, updated_at = NOW()
 WHERE id = $1
@@ -412,22 +204,4 @@ func (q *Queries) UpdateHousehold(ctx context.Context, arg UpdateHouseholdParams
 		&i.UpdatedAt,
 	)
 	return i, err
-}
-
-const updateHouseholdMemberRole = `-- name: UpdateHouseholdMemberRole :execrows
-UPDATE household_members SET role = $3 WHERE household_id = $1 AND user_id = $2
-`
-
-type UpdateHouseholdMemberRoleParams struct {
-	HouseholdID uuid.UUID `json:"household_id"`
-	UserID      uuid.UUID `json:"user_id"`
-	Role        string    `json:"role"`
-}
-
-func (q *Queries) UpdateHouseholdMemberRole(ctx context.Context, arg UpdateHouseholdMemberRoleParams) (int64, error) {
-	result, err := q.db.Exec(ctx, updateHouseholdMemberRole, arg.HouseholdID, arg.UserID, arg.Role)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
 }

@@ -195,7 +195,6 @@ type apiError struct {
 func TestAPI_EndToEnd(t *testing.T) {
 	s := newTestServer(t)
 	parent := s.signUp("parent")
-	kid := s.signUp("kid")
 
 	// Verify auto-provisioning created an admin household on first sign-in.
 	var initialHouseholds struct {
@@ -222,16 +221,6 @@ func TestAPI_EndToEnd(t *testing.T) {
 	}
 	hp := "/api/v1/households/" + h.ID.String()
 
-	var inv struct{ Code string }
-	s.expect(http.StatusCreated, "POST", hp+"/invites", parent.AccessToken, nil, &inv)
-	s.expect(http.StatusOK, "POST", "/api/v1/invites/accept", kid.AccessToken, map[string]string{"code": inv.Code}, nil)
-
-	var members struct{ Items []map[string]any }
-	s.expect(http.StatusOK, "GET", hp+"/members", kid.AccessToken, nil, &members)
-	if len(members.Items) != 2 {
-		t.Fatalf("members: got %d", len(members.Items))
-	}
-
 	// Chore CRUD.
 	var chore struct {
 		ID         uuid.UUID  `json:"id"`
@@ -241,9 +230,9 @@ func TestAPI_EndToEnd(t *testing.T) {
 		Completed  bool       `json:"completed"`
 	}
 	s.expect(http.StatusCreated, "POST", hp+"/chores", parent.AccessToken, map[string]any{
-		"title": "Take out trash", "assignee_id": kid.User.ID, "due_on": "2026-11-01",
+		"title": "Take out trash", "assignee_id": parent.User.ID, "due_on": "2026-11-01",
 	}, &chore)
-	if chore.DueOn == nil || *chore.DueOn != "2026-11-01" || *chore.AssigneeID != kid.User.ID {
+	if chore.DueOn == nil || *chore.DueOn != "2026-11-01" || *chore.AssigneeID != parent.User.ID {
 		t.Errorf("created chore: %+v", chore)
 	}
 	cp := hp + "/chores/" + chore.ID.String()
@@ -252,12 +241,12 @@ func TestAPI_EndToEnd(t *testing.T) {
 		Items      []map[string]any `json:"items"`
 		NextOffset *int             `json:"next_offset"`
 	}
-	s.expect(http.StatusOK, "GET", hp+"/chores?assignee=me", kid.AccessToken, nil, &mine)
+	s.expect(http.StatusOK, "GET", hp+"/chores?assignee=me", parent.AccessToken, nil, &mine)
 	if len(mine.Items) != 1 || mine.NextOffset != nil {
-		t.Errorf("kid's chores: %+v", mine)
+		t.Errorf("parent's chores: %+v", mine)
 	}
 
-	s.expect(http.StatusOK, "PUT", cp+"/completion", kid.AccessToken, nil, &chore)
+	s.expect(http.StatusOK, "PUT", cp+"/completion", parent.AccessToken, nil, &chore)
 	if !chore.Completed {
 		t.Error("chore should be completed")
 	}
@@ -287,8 +276,8 @@ func TestAPI_EndToEnd(t *testing.T) {
 	s.expect(http.StatusUnprocessableEntity, "GET", hp+"/chores?limit=101", parent.AccessToken, nil, nil)
 	s.expect(http.StatusUnprocessableEntity, "GET", hp+"/chores?limit=0", parent.AccessToken, nil, nil)
 
-	s.expect(http.StatusNoContent, "DELETE", cp, kid.AccessToken, nil, nil)
-	s.expect(http.StatusNotFound, "GET", cp, kid.AccessToken, nil, nil)
+	s.expect(http.StatusNoContent, "DELETE", cp, parent.AccessToken, nil, nil)
+	s.expect(http.StatusNotFound, "GET", cp, parent.AccessToken, nil, nil)
 
 	// Outsiders see nothing.
 	outsider := s.signUp("outsider")
@@ -867,5 +856,46 @@ func TestAPI_PINRateLimit(t *testing.T) {
 		map[string]string{"pin": "1234"}, &rlErr)
 	if rlErr.Error.Code != "rate_limited" {
 		t.Errorf("expected rate_limited, got %q", rlErr.Error.Code)
+	}
+}
+
+func TestAPI_RemovedInviteAndMemberRoutes404(t *testing.T) {
+	s := newTestServer(t)
+	u := s.signUp("removedroutes")
+
+	var h struct{ ID uuid.UUID }
+	s.expect(http.StatusCreated, "POST", "/api/v1/households", u.AccessToken,
+		map[string]string{"name": "Home", "timezone": "UTC"}, &h)
+	hp := "/api/v1/households/" + h.ID.String()
+
+	var e apiError
+	// POST /households/{id}/invites -> 404
+	s.expect(http.StatusNotFound, "POST", hp+"/invites", u.AccessToken, nil, &e)
+	if e.Error.Code != "not_found" {
+		t.Errorf("POST /invites: code %q, want not_found", e.Error.Code)
+	}
+
+	// POST /invites/accept -> 404
+	s.expect(http.StatusNotFound, "POST", "/api/v1/invites/accept", u.AccessToken, map[string]string{"code": "ABCDEFGH"}, &e)
+	if e.Error.Code != "not_found" {
+		t.Errorf("POST /invites/accept: code %q, want not_found", e.Error.Code)
+	}
+
+	// GET /households/{id}/members -> 404
+	s.expect(http.StatusNotFound, "GET", hp+"/members", u.AccessToken, nil, &e)
+	if e.Error.Code != "not_found" {
+		t.Errorf("GET /members: code %q, want not_found", e.Error.Code)
+	}
+
+	// PUT /households/{id}/members/{uid} -> 404
+	s.expect(http.StatusNotFound, "PUT", hp+"/members/"+u.User.ID.String(), u.AccessToken, map[string]string{"role": "member"}, &e)
+	if e.Error.Code != "not_found" {
+		t.Errorf("PUT /members/{uid}: code %q, want not_found", e.Error.Code)
+	}
+
+	// DELETE /households/{id}/members/{uid} -> 404
+	s.expect(http.StatusNotFound, "DELETE", hp+"/members/"+u.User.ID.String(), u.AccessToken, nil, &e)
+	if e.Error.Code != "not_found" {
+		t.Errorf("DELETE /members/{uid}: code %q, want not_found", e.Error.Code)
 	}
 }
