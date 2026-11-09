@@ -179,6 +179,41 @@ func toLibraryQuest(q db.QuestLibrary) libraryQuestJSON {
 	return libraryQuestJSON{ID: q.ID, Name: q.Name, Points: q.Points, RepeatDays: q.RepeatDays, Notes: q.Notes}
 }
 
+// rewardJSON is a household reward. library_id is set when it was adopted
+// from the library.
+type rewardJSON struct {
+	ID          uuid.UUID  `json:"id"`
+	HouseholdID uuid.UUID  `json:"household_id"`
+	LibraryID   *uuid.UUID `json:"library_id"`
+	Description string     `json:"description"`
+	Cost        int32      `json:"cost"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+func toReward(r db.HouseholdReward) rewardJSON {
+	return rewardJSON{
+		ID:          r.ID,
+		HouseholdID: r.HouseholdID,
+		LibraryID:   r.LibraryID,
+		Description: r.Description,
+		Cost:        r.Cost,
+		CreatedAt:   r.CreatedAt.Time.UTC(),
+		UpdatedAt:   r.UpdatedAt.Time.UTC(),
+	}
+}
+
+// libraryRewardJSON is a reward of the global, read-only library.
+type libraryRewardJSON struct {
+	ID          uuid.UUID `json:"id"`
+	Description string    `json:"description"`
+	Cost        int32     `json:"cost"`
+}
+
+func toLibraryReward(r db.RewardLibrary) libraryRewardJSON {
+	return libraryRewardJSON{ID: r.ID, Description: r.Description, Cost: r.Cost}
+}
+
 func mapSlice[T, U any](in []T, f func(T) U) []U {
 	out := make([]U, len(in))
 	for i, v := range in {
