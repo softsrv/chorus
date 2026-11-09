@@ -985,15 +985,12 @@ func TestGoogleCalendar_IsolationAndNoLeak(t *testing.T) {
 	fake := newFakeCalendarGoogle(t)
 	s := newCalendarTestServer(t, fake)
 
-	// Users A and B in one household
+	// Users A and B: separate logins (a household has exactly one login).
 	userA := s.signUp("calclm12a")
 	userB := s.signUp("calclm12b")
 	var h struct{ ID uuid.UUID }
 	s.expect(http.StatusCreated, "POST", "/api/v1/households", userA.AccessToken,
 		map[string]string{"name": "Household 12", "timezone": "UTC"}, &h)
-	var inv struct{ Code string }
-	s.expect(http.StatusCreated, "POST", "/api/v1/households/"+h.ID.String()+"/invites", userA.AccessToken, nil, &inv)
-	s.expect(http.StatusOK, "POST", "/api/v1/invites/accept", userB.AccessToken, map[string]string{"code": inv.Code}, nil)
 
 	knownAccess := "cal-access-token-clm12-secret-xyz"
 	knownRefresh := "cal-refresh-token-clm12-secret-abc"

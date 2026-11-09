@@ -558,8 +558,11 @@ func TestIntegration_FirstSignInProvisionsHousehold(t *testing.T) {
 
 	t.Run("long display name truncated to 100 runes", func(t *testing.T) {
 		email := uniqueEmail("longname")
-		// Display name of 95 characters
-		longName := strings.Repeat("A", 45) + " 🌟 " + strings.Repeat("B", 45)
+		// The longest display name the users CHECK allows: 50 runes, multibyte included.
+		longName := strings.Repeat("A", 24) + "🌟" + strings.Repeat("B", 25)
+		if n := len([]rune(longName)); n != 50 {
+			t.Fatalf("test setup: display name is %d runes, want 50", n)
+		}
 		const password = "correct-password-123"
 		if err := svc.Register(ctx, email, password, longName); err != nil {
 			t.Fatalf("Register: %v", err)
@@ -581,18 +584,20 @@ func TestIntegration_FirstSignInProvisionsHousehold(t *testing.T) {
 		if err != nil {
 			t.Fatalf("query household name: %v", err)
 		}
-
-		expectedRunes := []rune(longName + "'s household")
-		if len(expectedRunes) > 100 {
-			expectedRunes = expectedRunes[:100]
+		// 50 + len("'s household") = 62 runes, under the limit: nothing is cut.
+		if want := longName + "'s household"; hName != want {
+			t.Errorf("household name: got %q, want %q", hName, want)
 		}
-		expectedName := string(expectedRunes)
 
-		if hName != expectedName {
-			t.Errorf("household name: got %q (len %d runes), want %q (len %d runes)", hName, len([]rune(hName)), expectedName, len(expectedRunes))
+		// The 100-rune cut is unreachable from a real user (display_name is
+		// capped at 50), so it is proven on the name builder itself.
+		over := strings.Repeat("é", 95) + "🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟"
+		got := app.DefaultHouseholdName(over)
+		if want := string([]rune(over + "'s household")[:100]); got != want {
+			t.Errorf("DefaultHouseholdName(105 runes): got %q (%d runes), want %q", got, len([]rune(got)), want)
 		}
-		if len([]rune(hName)) > 100 {
-			t.Errorf("household name exceeded 100 runes: got %d", len([]rune(hName)))
+		if n := len([]rune(got)); n != 100 {
+			t.Errorf("DefaultHouseholdName: got %d runes, want 100", n)
 		}
 	})
 

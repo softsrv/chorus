@@ -18,7 +18,7 @@ type householdServicer interface {
 	Delete(ctx context.Context, userID, householdID uuid.UUID) error
 }
 
-// HouseholdHandler serves households, membership, and invites.
+// HouseholdHandler serves households.
 type HouseholdHandler struct {
 	svc householdServicer
 }

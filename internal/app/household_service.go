@@ -30,7 +30,7 @@ type HouseholdInput struct {
 	Timezone string
 }
 
-// HouseholdService manages households, their membership, and invites.
+// HouseholdService manages households and their single admin login.
 type HouseholdService struct {
 	q    *db.Queries
 	pool pgxBeginner
@@ -117,11 +117,7 @@ func provisionFirstHousehold(ctx context.Context, pool pgxBeginner, q *db.Querie
 		return nil
 	}
 
-	name := user.DisplayName + "'s household"
-	runes := []rune(name)
-	if len(runes) > 100 {
-		name = string(runes[:100])
-	}
+	name := defaultHouseholdName(user.DisplayName)
 
 	if _, err := createHouseholdTx(ctx, qtx, user.ID, name, "UTC"); err != nil {
 		return fmt.Errorf("create default household: %w", err)
@@ -131,6 +127,19 @@ func provisionFirstHousehold(ctx context.Context, pool pgxBeginner, q *db.Querie
 		return fmt.Errorf("commit tx: %w", err)
 	}
 	return nil
+}
+
+// maxHouseholdNameRunes is the households.name limit (validateHousehold).
+const maxHouseholdNameRunes = 100
+
+// defaultHouseholdName is the name of a household created at first sign-in:
+// "<display name>'s household", cut to the household name limit in runes.
+func defaultHouseholdName(displayName string) string {
+	runes := []rune(displayName + "'s household")
+	if len(runes) > maxHouseholdNameRunes {
+		runes = runes[:maxHouseholdNameRunes]
+	}
+	return string(runes)
 }
 
 // Update replaces a household's editable fields. Admins only.

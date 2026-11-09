@@ -376,26 +376,15 @@ function renderHome() {
           households.push(h);
           selectHousehold(h);
         },
-      }),
-      el('div', { class: 'divider my-0' }),
-      el('h3', { class: 'font-semibold', text: 'Join with invite code' }),
-      form({
-        fields: [{ name: 'code', label: 'Code', placeholder: 'XXXX-XXXX-XXXX', required: true }],
-        submit: 'Join',
-        onSubmit: async (v) => {
-          const h = await api('POST', '/invites/accept', v);
-          households.push(h);
-          selectHousehold(h);
-        },
       })));
 
-  const main = selected ? householdPanel(selected) : card('Get started', el('p', { text: 'Create a household or join one with an invite code.' }));
+  const main = selected ? householdPanel(selected) : card('Get started', el('p', { text: 'Create a household to get started.' }));
   $app.replaceChildren(el('div', { class: 'grid gap-6 md:grid-cols-[16rem_1fr]' }, sidebar, main));
 }
 
 function householdPanel(h) {
   const $content = el('div');
-  const tabs = [['chores', 'Chores'], ['events', 'Calendar'], ['members', 'Members']];
+  const tabs = [['chores', 'Chores'], ['events', 'Calendar']];
   const header = el('div', { class: 'flex flex-wrap items-center gap-2' },
     el('h2', { class: 'text-2xl font-bold flex-1', text: h.name }),
     el('span', { class: 'text-sm opacity-60', text: h.timezone }),
@@ -413,8 +402,8 @@ function householdPanel(h) {
       onclick: (e) => { e.preventDefault(); tab = id; renderHome(); },
     })));
 
-  const loaders = { chores: choresTab, events: eventsTab, members: membersTab };
-  loaders[tab](h, $content).catch((err) => showError($content, err));
+  const loaders = { chores: choresTab, events: eventsTab };
+  (loaders[tab] || choresTab)(h, $content).catch((err) => showError($content, err));
   return el('div', { class: 'space-y-4 min-w-0' }, header, tabBar, $content);
 }
 
@@ -430,21 +419,15 @@ function confirmClick(prompt, fn) {
   });
 }
 
-async function membersFor(h) {
-  return (await api('GET', `/households/${h.id}/members`)).items;
-}
-
 // ── Chores ────────────────────────────────────────────────────────────────────
 
 let choreStatus = 'open';
 
 async function choresTab(h, $root) {
-  const [members, page] = await Promise.all([
-    membersFor(h),
-    api('GET', `/households/${h.id}/chores?status=${choreStatus}&limit=100`),
-  ]);
-  const nameOf = Object.fromEntries(members.map((m) => [m.user_id, m.display_name]));
-  const assigneeOptions = [['', 'Unassigned'], ...members.map((m) => [m.user_id, m.display_name])];
+  const page = await api('GET', `/households/${h.id}/chores?status=${choreStatus}&limit=100`);
+  // A household has one login, its admin: the only possible chore assignee.
+  const nameOf = { [session.user.id]: session.user.display_name };
+  const assigneeOptions = [['', 'Unassigned'], [session.user.id, session.user.display_name]];
   const rerender = () => { $root.replaceChildren(); choresTab(h, $root).catch((err) => showError($root, err)); };
 
   const choreFields = (c = {}) => [
@@ -564,7 +547,7 @@ async function eventsTab(h, $root) {
         const tagSet = new Set(currentTags);
         const memberRows = members.map((m) => {
           const isTaggable = !!m.taggable;
-          const isChecked = tagSet.has(m.user_id);
+          const isChecked = tagSet.has(m.member_id);
           const cb = el('input', {
             type: 'checkbox',
             class: 'checkbox checkbox-xs',
@@ -572,10 +555,10 @@ async function eventsTab(h, $root) {
             disabled: !isTaggable,
           });
           if (isTaggable) {
-            tagCheckboxes.push({ id: m.user_id, input: cb });
+            tagCheckboxes.push({ id: m.member_id, input: cb });
           }
 
-          let labelText = m.display_name;
+          let labelText = m.name;
           if (!isTaggable) {
             let reasonText = m.reason;
             if (m.reason === 'duplicate_name') reasonText = 'duplicate name';
@@ -624,7 +607,7 @@ async function eventsTab(h, $root) {
         });
 
         $picker.append(
-          el('div', { class: 'font-semibold text-xs', text: 'Tag household members' }),
+          el('div', { class: 'font-semibold text-xs', text: 'Tag family members' }),
           el('div', { class: 'space-y-0.5' }, memberRows),
           el('div', { class: 'flex gap-2 mt-2' }, $saveBtn, $cancelBtn));
       };
@@ -660,49 +643,6 @@ async function eventsTab(h, $root) {
   $root.replaceChildren(card(null,
     el('div', { class: 'flex items-center justify-between' }, el('h3', { class: 'font-semibold', text: 'Calendar' }), nav),
     el('ul', {}, rows.length ? rows : el('li', { class: 'opacity-60 py-2', text: 'No events this month.' }))));
-}
-
-// ── Members ───────────────────────────────────────────────────────────────────
-
-async function membersTab(h, $root) {
-  const members = await membersFor(h);
-  const isAdmin = h.role === 'admin';
-  const me = session.user.id;
-  const rerender = () => { $root.replaceChildren(); membersTab(h, $root).catch((err) => showError($root, err)); };
-  const $inviteResult = el('div');
-
-  const rows = members.map((m) => el('li', { class: 'flex items-center gap-3 py-2 border-b border-base-300' },
-    el('span', { class: 'flex-1', text: m.display_name + (m.user_id === me ? ' (you)' : '') }),
-    el('span', { class: 'badge', text: m.role }),
-    isAdmin && el('button', {
-      class: 'btn btn-ghost btn-xs', text: m.role === 'admin' ? 'Make member' : 'Make admin',
-      onclick: action(async () => {
-        await api('PUT', `/households/${h.id}/members/${m.user_id}`, { role: m.role === 'admin' ? 'member' : 'admin' });
-        if (m.user_id === me) return homeView();
-        rerender();
-      }),
-    }),
-    (isAdmin || m.user_id === me) && el('button', {
-      class: 'btn btn-ghost btn-xs text-error', text: m.user_id === me ? 'Leave' : 'Remove',
-      onclick: confirmClick('Sure?', async () => {
-        await api('DELETE', `/households/${h.id}/members/${m.user_id}`);
-        if (m.user_id === me) return homeView();
-        rerender();
-      }),
-    })));
-
-  $root.replaceChildren(card(null,
-    el('h3', { class: 'font-semibold', text: 'Members' }),
-    el('ul', {}, rows),
-    isAdmin && el('div', { class: 'space-y-2' },
-      el('button', {
-        class: 'btn btn-sm', text: 'Create invite code',
-        onclick: action(async () => {
-          const inv = await api('POST', `/households/${h.id}/invites`);
-          $inviteResult.replaceChildren(alertBox('info', `Code ${inv.code} — single use, expires ${fmtDate(inv.expires_at)}.`));
-        }, $inviteResult),
-      }),
-      $inviteResult)));
 }
 
 // ── Account ───────────────────────────────────────────────────────────────────

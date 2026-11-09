@@ -58,13 +58,3 @@ func (e *ValidationError) Error() string {
 	}
 	return "validation failed: " + strings.Join(parts, "; ")
 }
-
-// HouseholdBlockingError is returned when deleting an account would leave a
-// household with members but no admin. Households lists the affected names.
-type HouseholdBlockingError struct {
-	Households []string
-}
-
-func (e HouseholdBlockingError) Error() string {
-	return "account is the only admin of households with other members: " + strings.Join(e.Households, ", ")
-}

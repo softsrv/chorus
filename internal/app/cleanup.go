@@ -30,7 +30,7 @@ func RunTokenCleanup(ctx context.Context, q *db.Queries) {
 	}
 }
 
-// CleanupTokens deletes expired and stale tokens and invites
+// CleanupTokens deletes expired and stale auth tokens
 // and logs the number of rows removed from each.
 // Exported so tests and debug endpoints can trigger a run directly.
 func CleanupTokens(ctx context.Context, q *db.Queries) {

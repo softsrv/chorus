@@ -821,7 +821,8 @@ func TestAPI_PINRateLimit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	// Build router with small PINRateLimit = 3
+	// Small PIN limit: 1 setup call (member create, also PIN-limited) + 3 wrong guesses.
+	const setupCalls, wrongGuesses = 1, 3
 	handler := internalhttp.NewRouter(ctx, internalhttp.RouterConfig{
 		Queries: q, Pool: pool, AuthSvc: authSvc,
 		UserSvc:      app.NewUserService(q),
@@ -829,7 +830,7 @@ func TestAPI_PINRateLimit(t *testing.T) {
 		ChoreSvc:     app.NewChoreService(q),
 		FamilySvc:    app.NewFamilyService(q, 10),
 		JWTSecret:    secret,
-		PINRateLimit: 3,
+		PINRateLimit: setupCalls + wrongGuesses,
 	})
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
@@ -844,13 +845,13 @@ func TestAPI_PINRateLimit(t *testing.T) {
 	ts.expect(http.StatusCreated, "POST", "/api/v1/households/"+h.ID.String()+"/family-members", u.AccessToken,
 		map[string]string{"name": "Kid", "pin": "1234"}, &m)
 
-	// Make 3 wrong guesses
-	for i := 0; i < 3; i++ {
+	// Wrong guesses within the limit are evaluated: 403 wrong_pin.
+	for i := 0; i < wrongGuesses; i++ {
 		ts.expect(http.StatusForbidden, "POST", "/api/v1/households/"+h.ID.String()+"/family-members/"+m.ID.String()+"/verify", u.AccessToken,
 			map[string]string{"pin": "0000"}, nil)
 	}
 
-	// 4th attempt returns 429 Too Many Requests, even with correct PIN
+	// Past the limit: 429 Too Many Requests, even with the correct PIN.
 	var rlErr apiError
 	ts.expect(http.StatusTooManyRequests, "POST", "/api/v1/households/"+h.ID.String()+"/family-members/"+m.ID.String()+"/verify", u.AccessToken,
 		map[string]string{"pin": "1234"}, &rlErr)

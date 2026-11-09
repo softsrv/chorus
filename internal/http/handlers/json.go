@@ -76,7 +76,6 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	var (
 		vErr  *app.ValidationError
 		rlErr app.RateLimitedError
-		hbErr app.HouseholdBlockingError
 	)
 	switch {
 	case errors.As(err, &vErr):
@@ -84,8 +83,6 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.As(err, &rlErr):
 		w.Header().Set("Retry-After", strconv.Itoa(int(time.Until(rlErr.RetryAt).Seconds())+1))
 		respond.Error(w, http.StatusTooManyRequests, "rate_limited", "Too many requests. Try again later.")
-	case errors.As(err, &hbErr):
-		respond.Error(w, http.StatusConflict, "sole_admin", hbErr.Error()+". Promote another admin first.")
 	case errors.Is(err, app.ErrNotFound), errors.Is(err, app.ErrUserNotFound):
 		respond.Error(w, http.StatusNotFound, "not_found", "Not found.")
 	case errors.Is(err, app.ErrForbidden):

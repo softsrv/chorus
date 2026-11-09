@@ -102,6 +102,9 @@ func (s *ChoreService) Create(ctx context.Context, userID, householdID uuid.UUID
 	if err != nil {
 		return db.Chore{}, err
 	}
+	if err := s.checkAssignee(ctx, householdID, in.AssigneeID); err != nil {
+		return db.Chore{}, err
+	}
 	id, err := uuid.NewV7()
 	if err != nil {
 		return db.Chore{}, fmt.Errorf("generate chore id: %w", err)
@@ -128,6 +131,9 @@ func (s *ChoreService) Update(ctx context.Context, userID, householdID, choreID 
 	}
 	in, err := validateChore(in)
 	if err != nil {
+		return db.Chore{}, err
+	}
+	if err := s.checkAssignee(ctx, householdID, in.AssigneeID); err != nil {
 		return db.Chore{}, err
 	}
 	chore, err := s.q.UpdateChore(ctx, db.UpdateChoreParams{
@@ -182,12 +188,35 @@ func validateChore(in ChoreInput) (ChoreInput, error) {
 	return in, v.err()
 }
 
-// assigneeError maps the chores→household_members foreign-key violation (the
-// assignee isn't in this household) to a validation error.
+// errAssigneeNotMember is the validation error for an assignee who is not a
+// login member of the chore's household.
+func errAssigneeNotMember() error {
+	return &ValidationError{Fields: map[string]string{"assignee_id": "must be a member of this household"}}
+}
+
+// checkAssignee rejects an assignee who is not in householdID. Migration
+// 000011 dropped the chores→household_members foreign key, so the service
+// owns this guard; the lookup is scoped by household_id.
+func (s *ChoreService) checkAssignee(ctx context.Context, householdID uuid.UUID, assigneeID *uuid.UUID) error {
+	if assigneeID == nil {
+		return nil
+	}
+	_, err := s.q.GetHouseholdMember(ctx, db.GetHouseholdMemberParams{HouseholdID: householdID, UserID: *assigneeID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errAssigneeNotMember()
+	}
+	if err != nil {
+		return fmt.Errorf("check assignee: %w", err)
+	}
+	return nil
+}
+
+// assigneeError maps a foreign-key violation (the assignee isn't in this
+// household, on a schema that still has the constraint) to a validation error.
 func assigneeError(err error) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" {
-		return &ValidationError{Fields: map[string]string{"assignee_id": "must be a member of this household"}}
+		return errAssigneeNotMember()
 	}
 	return fmt.Errorf("save chore: %w", err)
 }
