@@ -311,20 +311,25 @@ func (s *calendarServer) member(fake *fakeFamilyGoogle, name string, cals ...fak
 	return m
 }
 
-// household creates a household owned by admin with the others joined, and
-// returns its API path.
-func (s *calendarServer) household(admin familyMember, others ...familyMember) string {
+// household creates a household whose one login is admin, and returns its
+// API path. A household has exactly one login: any other user is an outsider
+// to it.
+func (s *calendarServer) household(admin familyMember) string {
 	s.t.Helper()
 	var h struct{ ID uuid.UUID }
 	s.expect(http.StatusCreated, "POST", "/api/v1/households", admin.AccessToken,
 		map[string]string{"name": "Family", "timezone": "UTC"}, &h)
-	hp := "/api/v1/households/" + h.ID.String()
-	for _, o := range others {
-		var inv struct{ Code string }
-		s.expect(http.StatusCreated, "POST", hp+"/invites", admin.AccessToken, nil, &inv)
-		s.expect(http.StatusOK, "POST", "/api/v1/invites/accept", o.AccessToken, map[string]string{"code": inv.Code}, nil)
+	return "/api/v1/households/" + h.ID.String()
+}
+
+// expectOutsider asserts that token, a login outside the household at hp,
+// gets 404 not_found for method path.
+func (s *calendarServer) expectOutsider(method, path, token string, body any) {
+	s.t.Helper()
+	var e apiError
+	if code := s.do(method, path, token, body, &e); code != http.StatusNotFound || e.Error.Code != "not_found" {
+		s.t.Errorf("outsider %s %s: %d %q, want 404 not_found", method, path, code, e.Error.Code)
 	}
-	return hp
 }
 
 type familyStatus struct {
@@ -547,8 +552,8 @@ func TestFamilyCalendar_OnlyChosenCalendar(t *testing.T) {
 	fake := newFakeFamilyGoogle(t)
 	s := newFamilyTestServer(t, fake)
 	a := s.member(fake, "famonlya", calX, calY)
-	b := s.member(fake, "famonlyb")
-	hp := s.household(a, b)
+	outsider := s.member(fake, "famonlyb")
+	hp := s.household(a)
 	fake.set(func(f *fakeFamilyGoogle) {
 		f.events[calX.ID] = []map[string]any{{"id": "x-private", "summary": "X only",
 			"start": map[string]any{"dateTime": "2026-11-03T10:00:00Z"}, "end": map[string]any{"dateTime": "2026-11-03T11:00:00Z"}}}
@@ -560,12 +565,14 @@ func TestFamilyCalendar_OnlyChosenCalendar(t *testing.T) {
 	}
 
 	before := len(fake.recorded())
-	for _, m := range []familyMember{a, b} {
-		got := s.entries(hp, m.AccessToken, novFrom, novTo)
+	for range 2 {
+		got := s.entries(hp, a.AccessToken, novFrom, novTo)
 		if got.Status != "ok" || len(got.Items) != 1 || got.Items[0].ID != "y-family" {
-			t.Errorf("entries for %s = %+v, want only y-family", m.User.ID, got)
+			t.Errorf("entries = %+v, want only y-family", got)
 		}
 	}
+	// A login outside the household sees nothing and reaches no Google call.
+	s.expectOutsider("GET", hp+"/events?"+rangeQuery(novFrom, novTo), outsider.AccessToken, nil)
 	wantPath := "/calendar/v3/calendars/" + url.PathEscape(calY.ID) + "/events"
 	evReqs := eventRequests(fake.since(before))
 	if len(evReqs) != 2 {
@@ -582,7 +589,7 @@ func TestFamilyCalendar_OnlyChosenCalendar(t *testing.T) {
 		t.Fatalf("set X: %d", code)
 	}
 	before = len(fake.recorded())
-	got := s.entries(hp, b.AccessToken, novFrom, novTo)
+	got := s.entries(hp, a.AccessToken, novFrom, novTo)
 	if len(got.Items) != 1 || got.Items[0].ID != "x-private" {
 		t.Errorf("entries after switching to X = %+v, want x-private", got)
 	}
@@ -640,19 +647,19 @@ func TestFamilyCalendar_NotConfigured(t *testing.T) {
 	fake := newFakeFamilyGoogle(t)
 	s := newFamilyTestServer(t, fake)
 	connected := s.member(fake, "famnotcfga", calX)
-	plain := s.member(fake, "famnotcfgb")
-	hp := s.household(connected, plain)
+	outsider := s.member(fake, "famnotcfgb")
+	hp := s.household(connected)
 
 	before := len(fake.recorded())
-	for _, m := range []familyMember{connected, plain} {
-		if st := s.familyStatus(hp, m.AccessToken); st.Status != "not_configured" || st.CalendarID != "" || st.SetBy != nil {
-			t.Errorf("status = %+v, want bare not_configured", st)
-		}
-		got := s.entries(hp, m.AccessToken, novFrom, novTo)
-		if got.Status != "not_configured" || got.Items == nil || len(got.Items) != 0 {
-			t.Errorf("entries = %+v, want not_configured with []", got)
-		}
+	if st := s.familyStatus(hp, connected.AccessToken); st.Status != "not_configured" || st.CalendarID != "" || st.SetBy != nil {
+		t.Errorf("status = %+v, want bare not_configured", st)
 	}
+	got := s.entries(hp, connected.AccessToken, novFrom, novTo)
+	if got.Status != "not_configured" || got.Items == nil || len(got.Items) != 0 {
+		t.Errorf("entries = %+v, want not_configured with []", got)
+	}
+	s.expectOutsider("GET", hp+"/calendar", outsider.AccessToken, nil)
+	s.expectOutsider("GET", hp+"/events?"+rangeQuery(novFrom, novTo), outsider.AccessToken, nil)
 	if reqs := fake.since(before); len(reqs) != 0 {
 		t.Errorf("stand-in recorded %d requests, want 0: %+v", len(reqs), reqs)
 	}
@@ -688,74 +695,69 @@ func TestFamilyCalendar_EmptyMonth(t *testing.T) {
 	}
 }
 
-// CLM-8: only the member who set the family calendar can change or clear it.
+// CLM-8: only the household's login, who set the family calendar, can change
+// or clear it. With one login per household, the only other login is an
+// outsider: it gets 404 and the stored value stays.
 func TestFamilyCalendar_OnlySetterChanges(t *testing.T) {
 	fake := newFakeFamilyGoogle(t)
 	s := newFamilyTestServer(t, fake)
 	a := s.member(fake, "famsettera", calX, calY)
 	calW := fakeGoogleCal{ID: "w-bob@example.com", Summary: "Bob", Primary: true}
 	b := s.member(fake, "famsetterb", calW)
-	hp := s.household(a, b)
+	hp := s.household(a)
 	if code, _ := s.setFamily(hp, a.AccessToken, calY.ID); code != http.StatusOK {
 		t.Fatalf("set Y: %d", code)
 	}
 	stillAY := func(when string) {
 		t.Helper()
-		st := s.familyStatus(hp, b.AccessToken)
+		st := s.familyStatus(hp, a.AccessToken)
 		if st.CalendarID != calY.ID || st.SetBy == nil || st.SetBy.ID != a.User.ID {
 			t.Errorf("%s: status = %+v, want (A, Y)", when, st)
 		}
 	}
 
-	var e apiError
-	if code := s.do("PUT", hp+"/calendar", b.AccessToken, map[string]string{"calendar_id": calW.ID}, &e); code != http.StatusForbidden || e.Error.Code != "forbidden" {
-		t.Errorf("B sets W: %d %q, want 403 forbidden", code, e.Error.Code)
-	}
+	s.expectOutsider("PUT", hp+"/calendar", b.AccessToken, map[string]string{"calendar_id": calW.ID})
 	stillAY("after B's set")
-	e = apiError{}
-	if code := s.do("DELETE", hp+"/calendar", b.AccessToken, nil, &e); code != http.StatusForbidden || e.Error.Code != "forbidden" {
-		t.Errorf("B clears: %d %q, want 403 forbidden", code, e.Error.Code)
-	}
+	s.expectOutsider("DELETE", hp+"/calendar", b.AccessToken, nil)
 	stillAY("after B's clear")
 
 	if code, st := s.setFamily(hp, a.AccessToken, calX.ID); code != http.StatusOK || st.CalendarID != calX.ID {
 		t.Fatalf("A changes to X: %d %+v", code, st)
 	}
-	if st := s.familyStatus(hp, b.AccessToken); st.CalendarID != calX.ID || st.SetBy.ID != a.User.ID {
+	if st := s.familyStatus(hp, a.AccessToken); st.CalendarID != calX.ID || st.SetBy.ID != a.User.ID {
 		t.Errorf("after A's change: %+v, want (A, X)", st)
 	}
 	s.expect(http.StatusNoContent, "DELETE", hp+"/calendar", a.AccessToken, nil, nil)
-	if st := s.familyStatus(hp, b.AccessToken); st.Status != "not_configured" {
+	if st := s.familyStatus(hp, a.AccessToken); st.Status != "not_configured" {
 		t.Errorf("after A's clear: %+v, want not_configured", st)
 	}
 	if n := s.familyRows(hp); n != 0 {
 		t.Errorf("rows after clear = %d", n)
 	}
-	// Once cleared, anyone connected may set it.
-	if code, st := s.setFamily(hp, b.AccessToken, calW.ID); code != http.StatusOK || st.SetBy.ID != b.User.ID {
-		t.Errorf("B sets after clear: %d %+v", code, st)
+	// Once cleared, an outsider still cannot set it; the login can.
+	s.expectOutsider("PUT", hp+"/calendar", b.AccessToken, map[string]string{"calendar_id": calW.ID})
+	if n := s.familyRows(hp); n != 0 {
+		t.Errorf("rows after outsider set = %d", n)
+	}
+	if code, st := s.setFamily(hp, a.AccessToken, calY.ID); code != http.StatusOK || st.SetBy.ID != a.User.ID {
+		t.Errorf("A sets after clear: %d %+v", code, st)
 	}
 }
 
 // CLM-9: the family calendar is cleared, by the database alone, when its
-// setter disconnects Google, leaves or is removed, or deletes their account.
+// setter disconnects Google or deletes their account.
 func TestFamilyCalendar_ClearedWithSetter(t *testing.T) {
 	// Each case gets its own server: sign-up is rate limited per instance.
 	cases := []struct {
 		name     string
 		calendar bool // whether Google is contacted by the action itself
-		act      func(s *calendarServer, a, b familyMember, hp string)
+		deleted  bool // whether the household goes with the account
+		act      func(s *calendarServer, a familyMember)
 	}{
-		{"disconnect", true, func(s *calendarServer, a, _ familyMember, _ string) {
+		{"disconnect", true, false, func(s *calendarServer, a familyMember) {
 			s.expect(http.StatusOK, "DELETE", "/api/v1/me/google-calendar", a.AccessToken, nil, nil)
 		}},
-		{"leave", false, func(s *calendarServer, a, _ familyMember, hp string) {
-			s.expect(http.StatusNoContent, "DELETE", hp+"/members/"+a.User.ID.String(), a.AccessToken, nil, nil)
-		}},
-		{"removed by admin", false, func(s *calendarServer, a, b familyMember, hp string) {
-			s.expect(http.StatusNoContent, "DELETE", hp+"/members/"+a.User.ID.String(), b.AccessToken, nil, nil)
-		}},
-		{"account deleted", false, func(s *calendarServer, a, _ familyMember, _ string) {
+		{"account deleted", false, true, func(s *calendarServer, a familyMember) {
 			s.expect(http.StatusNoContent, "DELETE", "/api/v1/me", a.AccessToken, map[string]string{"password": "correct-password-123"}, nil)
 		}},
 	}
@@ -763,9 +765,8 @@ func TestFamilyCalendar_ClearedWithSetter(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := newFakeFamilyGoogle(t)
 			s := newFamilyTestServer(t, fake)
-			b := s.member(fake, "famclearb")
 			a := s.member(fake, "famcleara", calY)
-			hp := s.household(b, a) // B is the admin, A a member
+			hp := s.household(a)
 			if code, _ := s.setFamily(hp, a.AccessToken, calY.ID); code != http.StatusOK {
 				t.Fatalf("set Y: %d", code)
 			}
@@ -774,7 +775,7 @@ func TestFamilyCalendar_ClearedWithSetter(t *testing.T) {
 			}
 
 			before := len(fake.recorded())
-			tc.act(s, a, b, hp)
+			tc.act(s, a)
 			reqs := fake.since(before)
 			for _, r := range reqs {
 				// Disconnect itself revokes at Google; nothing else may call it.
@@ -785,12 +786,20 @@ func TestFamilyCalendar_ClearedWithSetter(t *testing.T) {
 			if n := s.familyRows(hp); n != 0 {
 				t.Errorf("rows after %s = %d, want 0", tc.name, n)
 			}
-			before = len(fake.recorded())
-			if st := s.familyStatus(hp, b.AccessToken); st.Status != "not_configured" {
-				t.Errorf("B's status after %s = %+v, want not_configured", tc.name, st)
+			if tc.deleted {
+				var n int
+				id := strings.TrimPrefix(hp, "/api/v1/households/")
+				if err := s.pool.QueryRow(context.Background(), "SELECT COUNT(*) FROM households WHERE id = $1", id).Scan(&n); err != nil || n != 0 {
+					t.Errorf("household after account deletion: count %d err %v, want deleted", n, err)
+				}
+				return
 			}
-			if got := s.entries(hp, b.AccessToken, novFrom, novTo); got.Status != "not_configured" {
-				t.Errorf("B's entries after %s = %+v, want not_configured", tc.name, got)
+			before = len(fake.recorded())
+			if st := s.familyStatus(hp, a.AccessToken); st.Status != "not_configured" {
+				t.Errorf("status after %s = %+v, want not_configured", tc.name, st)
+			}
+			if got := s.entries(hp, a.AccessToken, novFrom, novTo); got.Status != "not_configured" {
+				t.Errorf("entries after %s = %+v, want not_configured", tc.name, got)
 			}
 			if reqs := fake.since(before); len(reqs) != 0 {
 				t.Errorf("not_configured reads made %d Google requests", len(reqs))
@@ -806,8 +815,7 @@ func TestFamilyCalendar_ListingRateLimitNotBroken(t *testing.T) {
 	fake := newFakeFamilyGoogle(t)
 	s := newFamilyTestServer(t, fake)
 	a := s.member(fake, "famratea", calY)
-	b := s.member(fake, "famrateb")
-	hp := s.household(a, b)
+	hp := s.household(a)
 	if code, _ := s.setFamily(hp, a.AccessToken, calY.ID); code != http.StatusOK {
 		t.Fatalf("set Y: %d", code)
 	}
@@ -830,7 +838,7 @@ func TestFamilyCalendar_ListingRateLimitNotBroken(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fake.set(func(f *fakeFamilyGoogle) { f.listStatus, f.listBody = tc.status, tc.body })
 			defer fake.set(func(f *fakeFamilyGoogle) { f.listStatus, f.listBody = 0, "" })
-			resp := s.doResp("GET", hp+"/events?"+rangeQuery(novFrom, novTo), b.AccessToken, nil)
+			resp := s.doResp("GET", hp+"/events?"+rangeQuery(novFrom, novTo), a.AccessToken, nil)
 			if resp.status != tc.want {
 				t.Fatalf("events: %d %s, want %d", resp.status, resp.body, tc.want)
 			}
@@ -864,8 +872,8 @@ func TestFamilyCalendar_BrokenConnection(t *testing.T) {
 	fake := newFakeFamilyGoogle(t)
 	s := newFamilyTestServer(t, fake)
 	a := s.member(fake, "fambrokena", calY)
-	b := s.member(fake, "fambrokenb")
-	hp := s.household(a, b)
+	outsider := s.member(fake, "fambrokenb")
+	hp := s.household(a)
 	fake.set(func(f *fakeFamilyGoogle) {
 		f.events[calY.ID] = []map[string]any{{"id": "e1", "summary": "Soccer",
 			"start": map[string]any{"dateTime": "2026-11-05T18:00:00Z"}, "end": map[string]any{"dateTime": "2026-11-05T19:00:00Z"}}}
@@ -880,7 +888,7 @@ func TestFamilyCalendar_BrokenConnection(t *testing.T) {
 	fake.set(func(f *fakeFamilyGoogle) { f.refreshError = "invalid_grant" })
 
 	before := len(fake.recorded())
-	status, raw := s.doRaw("GET", hp+"/events?"+rangeQuery(novFrom, novTo), b.AccessToken, nil)
+	status, raw := s.doRaw("GET", hp+"/events?"+rangeQuery(novFrom, novTo), a.AccessToken, nil)
 	var got familyEntries
 	_ = json.Unmarshal([]byte(raw), &got)
 	if status != http.StatusOK || got.Status != "broken" || got.Items == nil || len(got.Items) != 0 {
@@ -896,12 +904,13 @@ func TestFamilyCalendar_BrokenConnection(t *testing.T) {
 
 	// Already broken: no refresh, no events, still broken.
 	before = len(fake.recorded())
-	if st := s.familyStatus(hp, b.AccessToken); st.Status != "broken" || st.CalendarID != calY.ID {
+	if st := s.familyStatus(hp, a.AccessToken); st.Status != "broken" || st.CalendarID != calY.ID {
 		t.Errorf("status = %+v, want broken (still Y)", st)
 	}
-	if got := s.entries(hp, b.AccessToken, novFrom, novTo); got.Status != "broken" || len(got.Items) != 0 {
+	if got := s.entries(hp, a.AccessToken, novFrom, novTo); got.Status != "broken" || len(got.Items) != 0 {
 		t.Errorf("entries again = %+v, want broken []", got)
 	}
+	s.expectOutsider("GET", hp+"/events?"+rangeQuery(novFrom, novTo), outsider.AccessToken, nil)
 	if reqs := fake.since(before); len(reqs) != 0 {
 		t.Errorf("broken connection still contacted Google: %+v", reqs)
 	}
@@ -953,15 +962,7 @@ func (s *calendarServer) doResp(method, path, token string, body any) rawRespons
 	return rawResponse{status: resp.StatusCode, body: string(b), retryAfter: resp.Header.Get("Retry-After")}
 }
 
-// rename sets a display name directly (names with ',' can't go through the
-// sign-up email address).
-func (s *calendarServer) rename(id uuid.UUID, name string) {
-	s.t.Helper()
-	if _, err := s.pool.Exec(context.Background(), "UPDATE users SET display_name = $1 WHERE id = $2", name, id); err != nil {
-		s.t.Fatalf("rename: %v", err)
-	}
-}
-
+// tagMemberOut is one tag choice as the listing returns it.
 type tagMemberOut struct {
 	MemberID uuid.UUID `json:"member_id"`
 	Name     string    `json:"name"`
@@ -1053,17 +1054,16 @@ func tagChangeProblems(reqs []googleRequest, before, after map[string]any) []str
 	return problems
 }
 
-// tagFixture is household H with connector Mom (calendar Y, read_write) and
-// member Sam, Y as the family calendar, and entry E "Dentist" on it.
+// tagFixture is household H whose one login is Mom (calendar Y, read_write),
+// with family members Mom and Sam, Y as the family calendar and entry E
+// "Dentist" on it. outsider is a login with its own household, outside H.
 func tagFixture(t *testing.T) (*calendarServer, *fakeFamilyGoogle, familyMember, familyMember, string, uuid.UUID, uuid.UUID) {
 	t.Helper()
 	fake := newFakeFamilyGoogle(t)
 	s := newFamilyTestServer(t, fake)
 	mom := s.member(fake, "tagmom", calY)
-	sam := s.member(fake, "tagsam")
-	s.rename(mom.User.ID, "Mom")
-	s.rename(sam.User.ID, "Sam")
-	hp := s.household(mom, sam)
+	outsider := s.member(fake, "tagoutsider")
+	hp := s.household(mom)
 	hid, err := uuid.Parse(strings.TrimPrefix(hp, "/api/v1/households/"))
 	if err != nil {
 		t.Fatalf("parse household id: %v", err)
@@ -1074,19 +1074,27 @@ func tagFixture(t *testing.T) (*calendarServer, *fakeFamilyGoogle, familyMember,
 	if code, _ := s.setFamily(hp, mom.AccessToken, calY.ID); code != http.StatusOK {
 		t.Fatalf("set Y: %d", code)
 	}
-	return s, fake, mom, sam, hp, momMemberID, samMemberID
+	return s, fake, mom, outsider, hp, momMemberID, samMemberID
 }
 
-// CLM-1, CLM-2, CLM-3, CLM-4: a member tags E through the tag route; Chorus
-// PATCHes only the summary 'Dentist [Mom, Sam]' with the connector's token
-// and answers with Google's title; the listing reads tags from Google's
-// title; untagging ends at 'Dentist'; a title changed at Google shows as is.
+// CLM-1, CLM-2, CLM-3, CLM-4: the household's login tags E with family
+// members through the tag route; Chorus PATCHes only the summary
+// 'Dentist [Mom, Sam]' with the connector's token and answers with Google's
+// title; the listing reads tags from Google's title; untagging ends at
+// 'Dentist'; a title changed at Google shows as is. An outsider login gets
+// 404 with no Google request.
 func TestFamilyCalendar_TagEntry(t *testing.T) {
-	s, fake, mom, sam, hp, momID, samID := tagFixture(t)
+	s, fake, mom, outsider, hp, momID, samID := tagFixture(t)
 	before := fake.entry(calY.ID, "E")
 
 	n := len(fake.recorded())
-	code, raw := s.tag(hp, sam.AccessToken, "E", momID, samID)
+	s.expectOutsider("PUT", tagRoute(hp, "E"), outsider.AccessToken, map[string]any{"tags": []uuid.UUID{momID}})
+	if reqs := fake.since(n); len(reqs) != 0 {
+		t.Errorf("outsider's tag reached Google: %+v", reqs)
+	}
+
+	n = len(fake.recorded())
+	code, raw := s.tag(hp, mom.AccessToken, "E", momID, samID)
 	if code != http.StatusOK {
 		t.Fatalf("tag: %d %s", code, raw)
 	}
@@ -1147,13 +1155,15 @@ func TestFamilyCalendar_TagEntry(t *testing.T) {
 
 	// CLM-3: Chorus keeps no title of its own; a change at Google shows.
 	fake.set(func(f *fakeFamilyGoogle) { f.item(calY.ID, "E")["summary"] = "Dentist moved [sam]" })
-	e = s.taggedEntries(hp, sam.AccessToken).find("E")
+	e = s.taggedEntries(hp, mom.AccessToken).find("E")
 	if e.Title != "Dentist moved [sam]" || !slices.Equal(e.Tags, []uuid.UUID{samID}) {
 		t.Errorf("listed E after Google-side change = %+v, want 'Dentist moved [sam]' tagged Sam", e)
 	}
+	// An outsider cannot read the tagged listing either.
+	s.expectOutsider("GET", hp+"/events?"+rangeQuery(novFrom, novTo), outsider.AccessToken, nil)
 
 	// The tag route is not under the retired /events editing routes.
-	if code := s.do("PUT", hp+"/events/E/tags", sam.AccessToken, map[string]any{"tags": []uuid.UUID{}}, nil); code != http.StatusNotFound && code != http.StatusMethodNotAllowed {
+	if code := s.do("PUT", hp+"/events/E/tags", mom.AccessToken, map[string]any{"tags": []uuid.UUID{}}, nil); code != http.StatusNotFound && code != http.StatusMethodNotAllowed {
 		t.Errorf("PUT /events/E/tags: %d, want 404/405", code)
 	}
 }
@@ -1188,7 +1198,7 @@ func TestFamilyCalendar_TagCheckCatchesFullUpdate(t *testing.T) {
 // 503 with Retry-After, and a 401 is a 403 like the listing's broken. The
 // title at Google and in the listing stays.
 func TestFamilyCalendar_TagGoogleRefusal(t *testing.T) {
-	s, fake, mom, sam, hp, momID, _ := tagFixture(t)
+	s, fake, mom, _, hp, momID, _ := tagFixture(t)
 	const rateLimit403 = `{"error":{"code":403,"message":"INTERNAL-SENTINEL","errors":[{"domain":"usageLimits","reason":"rateLimitExceeded"}]}}`
 	const dailyLimit403 = `{"error":{"code":403,"message":"INTERNAL-SENTINEL","errors":[{"domain":"usageLimits","reason":"dailyLimitExceeded"}]}}`
 	const forbidden403 = `{"error":{"code":403,"message":"INTERNAL-SENTINEL","errors":[{"domain":"global","reason":"insufficientPermissions"}]}}`
@@ -1215,7 +1225,7 @@ func TestFamilyCalendar_TagGoogleRefusal(t *testing.T) {
 		}
 		fake.set(func(f *fakeFamilyGoogle) { f.patchStatus, f.patchBody = tc.googleStatus, body })
 		n := len(fake.recorded())
-		resp := s.tagResp(hp, sam.AccessToken, "E", momID)
+		resp := s.tagResp(hp, mom.AccessToken, "E", momID)
 		status, raw := resp.status, resp.body
 		var e apiError
 		_ = json.Unmarshal([]byte(raw), &e)
@@ -1308,9 +1318,11 @@ func TestFamilyCalendar_CanTag(t *testing.T) {
 	}
 }
 
-// CLM-7: any member may tag (the PATCH uses the connector's token); tagging
-// an outsider, a duplicate-named member or a name with ',' is 422 with no
-// Google request; the members data marks them untaggable.
+// CLM-7: the household's login tags family members (the PATCH uses the
+// connector's token); tagging a member of another household, a
+// duplicate-named member or a name with ',' is 422 with no Google request;
+// the members data marks them untaggable. The other household's login gets
+// 404 on this household's tag route.
 func TestFamilyCalendar_TagMembers(t *testing.T) {
 	fake := newFakeFamilyGoogle(t)
 	s := newFamilyTestServer(t, fake)
@@ -1318,8 +1330,7 @@ func TestFamilyCalendar_TagMembers(t *testing.T) {
 	// and its tokens are valid on both.
 	s2 := newFamilyTestServer(t, fake)
 	a := s.member(fake, "tagconn", calY)
-	b := s.member(fake, "tagplain")
-	hp := s.household(a, b)
+	hp := s.household(a)
 	hid, err := uuid.Parse(strings.TrimPrefix(hp, "/api/v1/households/"))
 	if err != nil {
 		t.Fatalf("parse hid: %v", err)
@@ -1345,16 +1356,23 @@ func TestFamilyCalendar_TagMembers(t *testing.T) {
 	}
 
 	n := len(fake.recorded())
-	if code, raw := s.tag(hp, b.AccessToken, "E", aMemberID); code != http.StatusOK || !strings.Contains(raw, `"title":"Dentist [Alex]"`) {
-		t.Fatalf("B tags A: %d %s", code, raw)
+	if code, raw := s.tag(hp, a.AccessToken, "E", aMemberID); code != http.StatusOK || !strings.Contains(raw, `"title":"Dentist [Alex]"`) {
+		t.Fatalf("A tags Alex: %d %s", code, raw)
 	}
 	if p := mutating(fake.since(n)); len(p) != 1 || p[0].Auth != a.googleAccess {
-		t.Errorf("B's tag PATCH = %+v, want one with A's token", p)
+		t.Errorf("A's tag PATCH = %+v, want one with A's token", p)
+	}
+
+	// The other household's login cannot tag here, even its own member.
+	n = len(fake.recorded())
+	s.expectOutsider("PUT", tagRoute(hp, "E"), cUser.AccessToken, map[string]any{"tags": []uuid.UUID{cMemberID}})
+	if reqs := fake.since(n); len(reqs) != 0 {
+		t.Errorf("outsider login's tag reached Google: %+v", reqs)
 	}
 
 	for name, id := range map[string]uuid.UUID{"outsider C": cMemberID, "D1 (duplicate name)": d1MemberID, "D2 (duplicate name)": d2MemberID, "E (comma)": eMemberID} {
 		n := len(fake.recorded())
-		code, raw := s.tag(hp, b.AccessToken, "E", aMemberID, id)
+		code, raw := s.tag(hp, a.AccessToken, "E", aMemberID, id)
 		var ae apiError
 		_ = json.Unmarshal([]byte(raw), &ae)
 		if code != http.StatusUnprocessableEntity || ae.Error.Fields["tags"] == "" {
@@ -1369,7 +1387,7 @@ func TestFamilyCalendar_TagMembers(t *testing.T) {
 	}
 
 	want := map[uuid.UUID]string{aMemberID: "", bMemberID: "", d1MemberID: "duplicate_name", d2MemberID: "duplicate_name", eMemberID: "reserved_character"}
-	list := s.taggedEntries(hp, b.AccessToken)
+	list := s.taggedEntries(hp, a.AccessToken)
 	if len(list.Members) != len(want) {
 		t.Fatalf("members = %+v, want %d", list.Members, len(want))
 	}
