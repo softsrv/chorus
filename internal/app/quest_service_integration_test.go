@@ -305,6 +305,14 @@ func TestIntegration_QuestLibraryGlobalAndReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bob list library after edit: %v", err)
 	}
+	// Bob's own copy starts from the library's values, not Alice's edit.
+	bobCopy, err := quests.CopyFromLibrary(ctx, bob, hBob.ID, target.ID, "")
+	if err != nil {
+		t.Fatalf("bob copy: %v", err)
+	}
+	if bobCopy.Name != target.Name || bobCopy.Points != target.Points || bobCopy.RepeatDays != target.RepeatDays {
+		t.Fatalf("bob's copy = %+v, want library values %+v", bobCopy, target)
+	}
 	for _, item := range bobLibAfter {
 		if item.ID == target.ID {
 			if item.Name != target.Name || item.Points != target.Points || item.RepeatDays != target.RepeatDays || item.Notes != target.Notes {
