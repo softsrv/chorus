@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/softsrv/chorus/internal/db"
 )
@@ -182,6 +183,9 @@ func (s *QuestService) Accept(ctx context.Context, userID, householdID, questID 
 	quest, err := s.q.ClaimQuest(ctx, db.ClaimQuestParams{HouseholdID: householdID, ID: questID, MemberID: &act.MemberID})
 	if err == nil {
 		return quest, nil
+	}
+	if isForeignKeyViolation(err) {
+		return db.HouseholdQuest{}, ErrNotFound
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return db.HouseholdQuest{}, fmt.Errorf("claim quest: %w", err)
@@ -361,3 +365,10 @@ func notFoundIfNoRows[T any](v T, err error) (T, error) {
 	}
 	return v, nil
 }
+
+// isForeignKeyViolation reports whether err is a Postgres foreign-key violation (SQLSTATE 23503).
+func isForeignKeyViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23503"
+}
+
