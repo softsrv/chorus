@@ -45,12 +45,14 @@ type QuestPage struct {
 // library. Any household member may read the household's quests; only the
 // administrator (behind the admin PIN once one is set) may change them.
 type QuestService struct {
-	q *db.Queries
+	q    *db.Queries
+	pool pgxBeginner
 }
 
-// NewQuestService constructs a QuestService.
-func NewQuestService(q *db.Queries) *QuestService {
-	return &QuestService{q: q}
+// NewQuestService constructs a QuestService. pool runs the approval
+// transaction that completes a quest and credits its points together.
+func NewQuestService(q *db.Queries, pool pgxBeginner) *QuestService {
+	return &QuestService{q: q, pool: pool}
 }
 
 // List returns up to p.Limit quests of the household, and whether more remain
@@ -174,10 +176,7 @@ func QuestAvailable(q db.HouseholdQuest, now time.Time) bool {
 // another member holds, or that is waiting out its repeat days, gives
 // ErrQuestTaken; of two concurrent accepts exactly one succeeds.
 func (s *QuestService) Accept(ctx context.Context, userID, householdID, questID uuid.UUID, act MemberAction) (db.HouseholdQuest, error) {
-	if _, err := getHousehold(ctx, s.q, userID, householdID); err != nil {
-		return db.HouseholdQuest{}, err
-	}
-	if _, err := VerifyMemberPin(ctx, s.q, householdID, act.MemberID, act.PIN); err != nil {
+	if err := s.verifyActingMember(ctx, userID, householdID, act); err != nil {
 		return db.HouseholdQuest{}, err
 	}
 	quest, err := s.q.ClaimQuest(ctx, db.ClaimQuestParams{HouseholdID: householdID, ID: questID, MemberID: &act.MemberID})
@@ -192,6 +191,111 @@ func (s *QuestService) Accept(ctx context.Context, userID, householdID, questID 
 		return db.HouseholdQuest{}, err
 	}
 	return db.HouseholdQuest{}, ErrQuestTaken
+}
+
+// Abandon puts the acting member's quest back in the pool for everyone. Only
+// the quest's holder can abandon it, and not while it waits for approval;
+// any other case is ErrNotFound and changes nothing.
+func (s *QuestService) Abandon(ctx context.Context, userID, householdID, questID uuid.UUID, act MemberAction) (db.HouseholdQuest, error) {
+	if err := s.verifyActingMember(ctx, userID, householdID, act); err != nil {
+		return db.HouseholdQuest{}, err
+	}
+	return notFoundIfNoRows(s.q.AbandonQuest(ctx, db.AbandonQuestParams{HouseholdID: householdID, ID: questID, MemberID: &act.MemberID}))
+}
+
+// MarkDone records that the acting member finished their quest. It then
+// waits for the administrator's approval; no points move until then. A quest
+// the member does not hold, or one already waiting, is ErrNotFound.
+func (s *QuestService) MarkDone(ctx context.Context, userID, householdID, questID uuid.UUID, act MemberAction) (db.HouseholdQuest, error) {
+	if err := s.verifyActingMember(ctx, userID, householdID, act); err != nil {
+		return db.HouseholdQuest{}, err
+	}
+	return notFoundIfNoRows(s.q.MarkQuestDone(ctx, db.MarkQuestDoneParams{HouseholdID: householdID, ID: questID, MemberID: &act.MemberID}))
+}
+
+// ListPending returns the quests waiting for approval, oldest first, each
+// with the name of the member who holds it. Admin only, behind the admin PIN
+// once one is set. None waiting is an empty, non-nil slice.
+func (s *QuestService) ListPending(ctx context.Context, userID, householdID uuid.UUID, adminPin string) ([]db.ListPendingQuestsRow, error) {
+	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.ListPendingQuests(ctx, householdID)
+	if err != nil {
+		return nil, fmt.Errorf("list pending quests: %w", err)
+	}
+	return rows, nil
+}
+
+// Approve completes a pending quest and credits its points to the member who
+// held it, in one transaction: either both happen or neither does. The
+// quest's repeat countdown starts now. Admin only, behind the admin PIN once
+// one is set. A quest that is not pending (never marked done, sent back, or
+// already approved) is ErrNotFound, so a repeated or concurrent approval
+// credits the points once.
+func (s *QuestService) Approve(ctx context.Context, userID, householdID, questID uuid.UUID, adminPin string) (db.HouseholdQuest, db.FamilyMember, error) {
+	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
+		return db.HouseholdQuest{}, db.FamilyMember{}, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return db.HouseholdQuest{}, db.FamilyMember{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	qtx := s.q.WithTx(tx)
+	row, err := notFoundIfNoRows(qtx.ApproveQuest(ctx, db.ApproveQuestParams{HouseholdID: householdID, ID: questID}))
+	if err != nil {
+		return db.HouseholdQuest{}, db.FamilyMember{}, err
+	}
+	if row.CreditedMemberID == nil {
+		// The schema forbids a pending quest without a holder.
+		return db.HouseholdQuest{}, db.FamilyMember{}, fmt.Errorf("approve quest %s: pending quest has no holder", questID)
+	}
+	member, err := qtx.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: householdID, ID: *row.CreditedMemberID, Delta: row.Points})
+	if err != nil {
+		return db.HouseholdQuest{}, db.FamilyMember{}, fmt.Errorf("credit points: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return db.HouseholdQuest{}, db.FamilyMember{}, fmt.Errorf("commit: %w", err)
+	}
+	return db.HouseholdQuest{
+		ID:          row.ID,
+		HouseholdID: row.HouseholdID,
+		LibraryID:   row.LibraryID,
+		Name:        row.Name,
+		Points:      row.Points,
+		RepeatDays:  row.RepeatDays,
+		Notes:       row.Notes,
+		ClaimedBy:   row.ClaimedBy,
+		ClaimedAt:   row.ClaimedAt,
+		DoneAt:      row.DoneAt,
+		CompletedAt: row.CompletedAt,
+		AvailableAt: row.AvailableAt,
+		CreatedAt:   row.CreatedAt,
+		UpdatedAt:   row.UpdatedAt,
+	}, member, nil
+}
+
+// Reject sends a pending quest back to the member who holds it: it stays
+// theirs, no points are added, and they can mark it done again. Admin only,
+// behind the admin PIN once one is set. A quest that is not pending is
+// ErrNotFound.
+func (s *QuestService) Reject(ctx context.Context, userID, householdID, questID uuid.UUID, adminPin string) (db.HouseholdQuest, error) {
+	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
+		return db.HouseholdQuest{}, err
+	}
+	return notFoundIfNoRows(s.q.RejectQuest(ctx, db.RejectQuestParams{HouseholdID: householdID, ID: questID}))
+}
+
+// verifyActingMember checks the user belongs to the household and that the
+// acting member is one of its family members, proven by their PIN.
+func (s *QuestService) verifyActingMember(ctx context.Context, userID, householdID uuid.UUID, act MemberAction) error {
+	if _, err := getHousehold(ctx, s.q, userID, householdID); err != nil {
+		return err
+	}
+	_, err := VerifyMemberPin(ctx, s.q, householdID, act.MemberID, act.PIN)
+	return err
 }
 
 // ListLibrary returns the global quest library. It holds no household data,
