@@ -10,8 +10,9 @@ Chorus is a family chore and calendar app. This repo holds the backend JSON API 
 make dev              # docker compose (Postgres + smtp4dev) → migrate → air + Tailwind watch
 make run              # Run without hot-reload (needs `make services-up` first)
 make test             # Unit tests (-race)
+make test-js          # Web client unit tests (node --test web/jstest/quests.test.mjs; needs Node 22+)
 make test-integration # Migrates chorus_test, then runs integration tests against it
-make check            # vet + unit + integration + govulncheck (what CI runs)
+make check            # vet + unit + web JS unit + integration + govulncheck (what CI runs)
 make vet / fmt / lint
 
 # Database

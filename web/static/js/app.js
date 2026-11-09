@@ -525,6 +525,17 @@ function householdPanel(h) {
 function memberBar(h) {
   const $panel = el('div');
   const $who = el('span', { class: 'text-sm flex-1', text: `Viewing as: ${activeMember ? activeMember.name : 'Administrator'}` });
+  // The active member's points come from the server on every render (never
+  // computed here), so an approval shows up the next time the view is drawn.
+  if (activeMember) {
+    const shown = activeMember;
+    api('GET', `/households/${h.id}/family-members`)
+      .then((r) => {
+        const m = (r.items || []).find((x) => x.id === shown.id);
+        if (m && activeMember === shown) $who.textContent = `Viewing as: ${m.name} · ${m.points} points`;
+      })
+      .catch((err) => console.error('member points', err)); // the name alone stays; the tab surfaces API errors
+  }
 
   const become = (m, pin) => {
     activeMember = { id: m.id, name: m.name, pin };
@@ -554,7 +565,7 @@ function memberBar(h) {
     $panel.replaceChildren(el('div', { class: 'space-y-2' },
       members.length
         ? el('div', { class: 'flex flex-wrap gap-2' },
-          members.map((m) => el('button', { class: 'btn btn-sm', text: m.name, onclick: pick(m) })))
+          members.map((m) => el('button', { class: 'btn btn-sm', text: `${m.name} · ${m.points} points`, onclick: pick(m) })))
         : el('p', { class: 'text-sm opacity-70', text: 'No family members yet.' }),
       $pinArea));
   }, $panel);
@@ -597,14 +608,178 @@ function confirmClick(prompt, fn) {
 
 // ── Quests ────────────────────────────────────────────────────────────────────
 
-async function questsTab(h, $root) {
-  const rerender = () => { $root.replaceChildren(); questsTab(h, $root).catch((err) => showError($root, err)); };
+// Quest list partitions come only from the server's fields: available says the
+// quest is in the pool, claimed_by says who holds it. The client does no date
+// arithmetic; a resting quest shows its available_at as the server sent it.
+function partitionQuests(items, memberId) {
+  const out = { available: [], mine: [], claimed: [], resting: [] };
+  for (const q of items) {
+    if (q.available) out.available.push(q);
+    else if (q.claimed_by && q.claimed_by === memberId) out.mine.push(q);
+    else if (q.claimed_by) out.claimed.push(q);
+    else out.resting.push(q);
+  }
+  return out;
+}
 
-  const [page, library] = await Promise.all([
+const isAdminPinError = (err) => err instanceof ApiError && err.status === 403 &&
+  (err.code === 'wrong_pin' || err.code === 'admin_pin_required');
+
+// questNotice maps an expected quest-action failure to the message shown after
+// the list reloads: a lost accept race (409 quest_taken) or a quest that is
+// gone, outside this household or no longer pending (404).
+function questNotice(err) {
+  if (!(err instanceof ApiError)) return null;
+  if (err.status === 409 && err.code === 'quest_taken') return 'This quest was already taken.';
+  if (err.status === 404) return 'Quest not found.';
+  return null;
+}
+
+const questMeta = (q) => `${q.points} points · ${q.repeat_days} day(s) until available again`;
+
+async function questsTab(h, $root, notice = null) {
+  const rerender = (next = null) => { $root.replaceChildren(); questsTab(h, $root, next).catch((err) => showError($root, err)); };
+
+  const [page, library, family] = await Promise.all([
     api('GET', `/households/${h.id}/quests?limit=100`),
     api('GET', '/quest-library'),
+    api('GET', `/households/${h.id}/family-members`),
   ]);
+  const quests = page.items || [];
+  const members = family.items || [];
+  const nameOf = Object.fromEntries(members.map((m) => [m.id, m.name]));
 
+  const cards = [
+    notice && alertBox('warning', notice),
+    activeMember ? takeCard(h, quests, nameOf, rerender) : card(null,
+      el('h3', { class: 'font-semibold', text: 'Quests' }),
+      el('p', { class: 'text-sm opacity-70', text: 'Choose a family member to take quests.' })),
+    !activeMember && await approvalsCard(h, members, rerender),
+    managementVisible() && manageQuestsCard(h, quests, library, page, rerender),
+  ].filter(Boolean);
+  $root.replaceChildren(el('div', { class: 'space-y-4' }, cards));
+}
+
+// takeCard is the active member's view: Available, Mine and Claimed lists, a
+// quest detail with Accept/Decline, and Abandon/Mark done on their own quests.
+// Every action sends activeMemberAction(); the server decides the outcome and
+// the list is re-read from it afterwards.
+function takeCard(h, quests, nameOf, rerender) {
+  const $err = el('div');
+  const $detail = el('div');
+  const parts = partitionQuests(quests, activeMember.id);
+
+  const act = (verb, q) => action(async () => {
+    const body = activeMemberAction();
+    if (!body) return;
+    try {
+      await api('POST', `/households/${h.id}/quests/${q.id}/${verb}`, body);
+    } catch (err) {
+      if (memberActionFailed(err)) return;
+      const msg = questNotice(err);
+      if (msg) { rerender(msg); return; }
+      throw err;
+    }
+    rerender();
+  }, $err);
+
+  const showDetail = (q) => $detail.replaceChildren(el('div', { class: 'p-3 bg-base-200 rounded space-y-2' },
+    el('div', { class: 'font-semibold', text: q.name }),
+    el('div', { class: 'text-xs opacity-60', text: questMeta(q) }),
+    el('p', { class: 'text-sm whitespace-pre-line', text: q.notes || 'No notes.' }),
+    el('div', { class: 'flex gap-2' },
+      el('button', { class: 'btn btn-primary btn-sm', text: 'Accept', onclick: act('accept', q) }),
+      el('button', { class: 'btn btn-ghost btn-sm', text: 'Decline', onclick: (e) => { e.preventDefault(); $detail.replaceChildren(); } }))));
+
+  const row = (q, ...extra) => el('li', { class: 'flex flex-wrap items-center gap-2 py-2 border-b border-base-300' },
+    el('div', { class: 'flex-1 min-w-0' },
+      el('div', { class: 'font-medium', text: q.name }),
+      el('div', { class: 'text-xs opacity-60', text: questMeta(q) })),
+    ...extra);
+
+  const section = (title, items, render, empty) => el('div', { class: 'space-y-1' },
+    el('h4', { class: 'font-semibold text-sm opacity-80', text: title }),
+    items.length ? el('ul', {}, items.map(render)) : el('p', { class: 'text-xs opacity-60', text: empty }));
+
+  return card(null,
+    el('h3', { class: 'font-semibold', text: `Quests for ${activeMember.name}` }),
+    $err,
+    section('Available', parts.available,
+      (q) => row(q, el('button', { class: 'btn btn-sm', text: 'View', onclick: (e) => { e.preventDefault(); showDetail(q); } })),
+      'No quests available right now.'),
+    $detail,
+    section('Mine', parts.mine, (q) => row(q, ...(q.awaiting_approval
+      ? [el('span', { class: 'badge badge-sm', text: 'Waiting for approval' })]
+      : [
+        el('button', { class: 'btn btn-primary btn-xs', text: 'Mark done', onclick: act('done', q) }),
+        el('button', { class: 'btn btn-ghost btn-xs', text: 'Abandon', onclick: act('abandon', q) }),
+      ])), 'You have no quests yet.'),
+    section('Claimed', parts.claimed,
+      (q) => row(q, el('span', { class: 'text-xs opacity-70', text: `Taken by ${nameOf[q.claimed_by] || 'a former member'}` })),
+      'Nobody else has a quest.'),
+    parts.resting.length > 0 && section('Coming back later', parts.resting,
+      (q) => row(q, q.available_at && el('span', { class: 'text-xs opacity-70', text: `Back ${fmtDate(q.available_at)}` })), ''));
+}
+
+// approvalsCard is the administrator's list of quests marked done. Loading,
+// approving and sending back carry X-Admin-PIN (adminRequest). A 403 for the
+// admin PIN says so, leaves the list as it was and never signs anyone out.
+async function approvalsCard(h, members, rerender) {
+  const $err = el('div');
+  const unlockForm = () => pinForm({
+    label: 'Admin PIN',
+    submit: 'Unlock',
+    onPin: async (pin) => {
+      await api('POST', `/households/${h.id}/admin-pin/verify`, { pin });
+      adminPin = pin;
+      rerender();
+    },
+  });
+  const wrongAdminPin = () => $err.replaceChildren(alertBox('error', 'Wrong administrator PIN.'), unlockForm());
+  const points = el('div', { class: 'flex flex-wrap gap-2' },
+    members.map((m) => el('span', { class: 'badge', text: `${m.name}: ${m.points} points` })));
+  const wrap = (...body) => card(null, el('h3', { class: 'font-semibold', text: 'Approvals' }), $err, ...body,
+    members.length > 0 && el('div', { class: 'divider my-0' }), members.length > 0 && points);
+
+  if (!managementUnlocked()) {
+    return wrap(el('p', { class: 'text-sm opacity-70', text: 'Enter the admin PIN to review approvals.' }), unlockForm());
+  }
+  let pending;
+  try {
+    pending = (await adminRequest('GET', `/households/${h.id}/quests/pending`)).items || [];
+  } catch (err) {
+    if (!isAdminPinError(err)) throw err;
+    wrongAdminPin();
+    return wrap();
+  }
+
+  const act = (verb, q) => action(async () => {
+    try {
+      await adminRequest('POST', `/households/${h.id}/quests/${q.id}/${verb}`, {});
+    } catch (err) {
+      if (isAdminPinError(err)) { wrongAdminPin(); return; }
+      const msg = questNotice(err);
+      if (msg) { rerender(msg); return; }
+      throw err;
+    }
+    rerender();
+  }, $err);
+
+  const rows = pending.map((q) => el('li', { class: 'flex flex-wrap items-center gap-2 py-2 border-b border-base-300' },
+    el('div', { class: 'flex-1 min-w-0' },
+      el('div', { class: 'font-medium', text: q.name }),
+      el('div', { class: 'text-xs opacity-60', text: `${q.member_name} · ${q.points} points` })),
+    el('button', { class: 'btn btn-success btn-xs', text: 'Approve', onclick: act('approve', q) }),
+    el('button', { class: 'btn btn-ghost btn-xs', text: 'Send back', onclick: act('reject', q) })));
+
+  return wrap(rows.length
+    ? el('ul', {}, rows)
+    : el('p', { class: 'text-sm opacity-70', text: 'Nothing waiting for approval.' }));
+}
+
+// manageQuestsCard lists every quest with the admin's add, edit, delete and
+// library controls (shown while management is unlocked).
+function manageQuestsCard(h, quests, library, page, rerender) {
   const unlocked = managementUnlocked();
 
   const toNum = (val) => {
@@ -626,7 +801,8 @@ async function questsTab(h, $root) {
     { name: 'notes', label: 'Notes', type: 'textarea', value: q.notes ?? '' },
   ];
 
-  const rows = (page.items || []).map((q) => {
+  const rows = quests.map((q) => {
+
     const $row = el('li', { class: 'flex flex-wrap items-center gap-2 py-2 border-b border-base-300' },
       el('div', { class: 'flex-1 min-w-0' },
         el('div', { class: 'font-medium', text: q.name }),
@@ -673,8 +849,8 @@ async function questsTab(h, $root) {
       }),
     })));
 
-  $root.replaceChildren(card(null,
-    el('h3', { class: 'font-semibold', text: 'Quests' }),
+  return card(null,
+    el('h3', { class: 'font-semibold', text: 'Manage quests' }),
     rows.length
       ? el('ul', {}, rows)
       : el('p', { class: 'opacity-70 py-2', text: 'No quests yet. Add one below or browse the library.' }),
@@ -684,7 +860,7 @@ async function questsTab(h, $root) {
     el('div', { class: 'divider my-0' }),
     el('div', { class: 'space-y-2' },
       el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Quest Library' }),
-      el('ul', {}, libraryRows))));
+      el('ul', {}, libraryRows)));
 }
 
 // ── Family ────────────────────────────────────────────────────────────────────
