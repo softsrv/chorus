@@ -114,6 +114,10 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 		respond.Error(w, http.StatusBadGateway, "google_rejected", "Google Calendar rejected the change.")
 	case errors.Is(err, app.ErrInviteInvalid):
 		respond.Error(w, http.StatusBadRequest, "invalid_invite", "Invite code is invalid or has expired.")
+	case errors.Is(err, app.ErrWrongPIN):
+		respond.Error(w, http.StatusForbidden, "wrong_pin", "Wrong PIN.")
+	case errors.Is(err, app.ErrAdminPinRequired):
+		respond.Error(w, http.StatusForbidden, "admin_pin_required", "Admin PIN is required.")
 	default:
 		slog.ErrorContext(r.Context(), "unhandled error",
 			"request_id", middleware.GetRequestID(r.Context()),

@@ -63,3 +63,18 @@ func (v *validator) text(field, s string, minLen, maxLen int, multiline bool) st
 func (v *validator) displayName(s string) string {
 	return v.text("display_name", s, 1, 50, false)
 }
+
+// pin validates that s is exactly 4 ASCII digits.
+func (v *validator) pin(s string) string {
+	if len(s) != 4 {
+		v.fail("pin", "must be exactly 4 digits")
+		return s
+	}
+	for i := 0; i < 4; i++ {
+		if s[i] < '0' || s[i] > '9' {
+			v.fail("pin", "must be exactly 4 digits")
+			return s
+		}
+	}
+	return s
+}

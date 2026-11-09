@@ -31,6 +31,11 @@ var (
 	ErrAlreadyMember = errors.New("already a member of this household")
 	// ErrInviteInvalid covers unknown, expired, and already-used invite codes.
 	ErrInviteInvalid = errors.New("invite code is invalid or has expired")
+	// ErrWrongPIN is returned when a member PIN or admin PIN does not match.
+	ErrWrongPIN = errors.New("wrong PIN")
+	// ErrAdminPinRequired is returned when an admin PIN is set on the household
+	// but was not provided in the request.
+	ErrAdminPinRequired = errors.New("admin PIN is required")
 )
 
 // RateLimitedError is returned when an operation is attempted too frequently.
