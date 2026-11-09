@@ -408,3 +408,69 @@ test('a blank points or days field is sent as typed, not 0, and the server\'s 42
   assert.equal(ok.body.points, 7);
   assert.equal(ok.body.repeat_days, 2);
 });
+
+// ── CLM-3: empty states ───────────────────────────────────────────────────────
+
+// noInlineStyle asserts the strict-CSP rule on what was rendered: no element
+// carries a style attribute or an inline style property.
+const noInlineStyle = () => {
+  for (const n of walk(env.$app)) {
+    assert.equal(n.getAttribute('style'), null, `${n.tagName} has a style attribute`);
+    assert.deepEqual(Object.keys(n.style), [], `${n.tagName} has an inline style`);
+  }
+};
+
+const openTab = async (label) => {
+  await click(walk(env.$app).find((n) => n.tagName === 'A' && n.textContent === label));
+  await settle();
+};
+
+test('CLM-3: empty quests tab shows the add/browse prompt with the library browser and add form', async () => {
+  srv.quests = [];
+  srv.extra['GET /quest-library'] = () => [200, { items: [
+    { id: 'ql1', name: 'Make your bed', points: 5, repeat_days: 1, notes: '' },
+  ] }];
+  await loadApp();
+  assert.match(text(), /No quests yet\. Add one below or browse the library\./);
+  assert.equal(buttons(env.$app, 'Add quest').length, 1, 'add form is offered');
+  const lib = section(env.$app, 'Quest Library');
+  assert.ok(lib, 'library browser is shown');
+  assert.match(lib, /Make your bed/);
+  assert.equal(buttons(sectionNode(env.$app, 'Quest Library'), 'Add').length, 1, 'library item can be added');
+  noInlineStyle();
+});
+
+test('CLM-3: empty rewards tab shows the add/browse prompt with the library browser and add form', async () => {
+  srv.extra[`GET ${HP}/rewards`] = () => [200, { items: [] }];
+  srv.extra['GET /reward-library'] = () => [200, { items: [
+    { id: 'rl1', description: 'Pick the movie', cost: 20 },
+  ] }];
+  await loadApp();
+  await openTab('Rewards');
+  assert.match(text(), /No rewards yet\. Add one below or browse the library for ideas\./);
+  assert.equal(buttons(env.$app, 'Add reward').length, 1, 'add form is offered');
+  const lib = section(env.$app, 'Reward Library');
+  assert.ok(lib, 'library browser is shown');
+  assert.match(lib, /Pick the movie/);
+  assert.equal(buttons(sectionNode(env.$app, 'Reward Library'), 'Add').length, 1, 'library item can be adopted');
+  noInlineStyle();
+});
+
+test('CLM-3: empty family tab shows the add-member prompt', async () => {
+  srv.members = [];
+  await loadApp();
+  await openTab('Family');
+  assert.match(text(), /No family members yet\. Add one to get started\./);
+  assert.equal(buttons(env.$app, 'Add member').length, 1, 'add-member form is offered');
+  noInlineStyle();
+});
+
+test('CLM-3: home view with no households shows the New household form as the primary view', async () => {
+  srv.extra['GET /households'] = () => [200, { items: [] }];
+  await loadApp();
+  assert.match(text(), /New household/);
+  assert.doesNotMatch(text(), /invite/i);
+  assert.equal(buttons(env.$app, 'Create').length, 1, 'create form is the main view');
+  assert.equal(walk(env.$app).filter((n) => n.tagName === 'A' && n.textContent === 'Quests').length, 0, 'no household panel');
+  noInlineStyle();
+});
