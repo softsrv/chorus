@@ -263,3 +263,57 @@ func TestIntegration_InvitesAndAdminRules(t *testing.T) {
 		t.Errorf("household should be deleted with its last member (count %d, err %v)", n, err)
 	}
 }
+
+func TestIntegration_DeleteAccountDeletesHousehold(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	households := app.NewHouseholdService(q, pool)
+	ctx := context.Background()
+
+	parent := registerVerified(t, pool, authSvc, mailer, "delparent").User.ID
+
+	h, err := households.Create(ctx, parent, app.HouseholdInput{Name: "Home"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	familyMemberID, err := uuid.NewV7()
+	if err != nil {
+		t.Fatalf("uuid: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		"INSERT INTO family_members (id, household_id, name) VALUES ($1, $2, $3)",
+		familyMemberID, h.ID, "Kid"); err != nil {
+		t.Fatalf("insert family member: %v", err)
+	}
+
+	if err := authSvc.DeleteAccount(ctx, parent, uuid.Nil, "correct-password-123", ""); err != nil {
+		t.Fatalf("DeleteAccount: %v", err)
+	}
+
+	var householdCount int
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM households WHERE id = $1", h.ID).Scan(&householdCount); err != nil {
+		t.Fatalf("count households: %v", err)
+	}
+	if householdCount != 0 {
+		t.Errorf("household still exists: count = %d, want 0", householdCount)
+	}
+
+	var memberCount int
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM family_members WHERE household_id = $1", h.ID).Scan(&memberCount); err != nil {
+		t.Fatalf("count family members: %v", err)
+	}
+	if memberCount != 0 {
+		t.Errorf("family members still exist: count = %d, want 0", memberCount)
+	}
+
+	var userCount int
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM users WHERE id = $1", parent).Scan(&userCount); err != nil {
+		t.Fatalf("count users: %v", err)
+	}
+	if userCount != 0 {
+		t.Errorf("user still exists: count = %d, want 0", userCount)
+	}
+}

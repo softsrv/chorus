@@ -531,17 +531,6 @@ func (s *AuthService) DeleteAccount(ctx context.Context, userID, currentSessionI
 	defer tx.Rollback(ctx) //nolint:errcheck
 
 	qtx := s.q.WithTx(tx)
-	blocking, err := qtx.ListAdminHouseholdsWithOtherMembers(ctx, userID)
-	if err != nil {
-		return fmt.Errorf("check households: %w", err)
-	}
-	if len(blocking) > 0 {
-		names := make([]string, len(blocking))
-		for i, h := range blocking {
-			names[i] = h.Name
-		}
-		return HouseholdBlockingError{Households: names}
-	}
 	if err := qtx.DeleteSoleMemberHouseholds(ctx, userID); err != nil {
 		return fmt.Errorf("delete sole-member households: %w", err)
 	}

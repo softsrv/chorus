@@ -516,24 +516,43 @@ func TestAPI_DeleteAccountPasswordless(t *testing.T) {
 		}
 	})
 
-	t.Run("sole admin of a household with members is blocked", func(t *testing.T) {
+	t.Run("deletes the user's household", func(t *testing.T) {
 		u := s.signUpPasswordless("deladmin")
-		other := s.signUp("delmember")
 		var h struct{ ID uuid.UUID }
 		s.expect(http.StatusCreated, "POST", "/api/v1/households", u.AccessToken,
 			map[string]string{"name": "Google Home", "timezone": "UTC"}, &h)
-		var inv struct{ Code string }
-		s.expect(http.StatusCreated, "POST", "/api/v1/households/"+h.ID.String()+"/invites", u.AccessToken, nil, &inv)
-		s.expect(http.StatusOK, "POST", "/api/v1/invites/accept", other.AccessToken, map[string]string{"code": inv.Code}, nil)
-
-		var e apiError
-		s.expect(http.StatusConflict, "DELETE", "/api/v1/me", u.AccessToken,
-			map[string]string{"email": u.Email}, &e)
-		if e.Error.Code != "sole_admin" {
-			t.Errorf("sole admin: code %q, want sole_admin", e.Error.Code)
+		memberID, err := uuid.NewV7()
+		if err != nil {
+			t.Fatalf("uuid: %v", err)
 		}
-		if !s.userExists(u.ID) {
-			t.Error("sole admin deleted")
+		if _, err := s.pool.Exec(context.Background(),
+			"INSERT INTO family_members (id, household_id, name) VALUES ($1, $2, $3)", memberID, h.ID, "Kid"); err != nil {
+			t.Fatalf("insert family member: %v", err)
+		}
+
+		s.expect(http.StatusNoContent, "DELETE", "/api/v1/me", u.AccessToken,
+			map[string]string{"email": u.Email}, nil)
+
+		if s.userExists(u.ID) {
+			t.Error("user still exists after delete")
+		}
+
+		var householdCount int
+		if err := s.pool.QueryRow(context.Background(),
+			"SELECT COUNT(*) FROM households WHERE id = $1", h.ID).Scan(&householdCount); err != nil {
+			t.Fatalf("count households: %v", err)
+		}
+		if householdCount != 0 {
+			t.Errorf("household still exists: count = %d, want 0", householdCount)
+		}
+
+		var memberCount int
+		if err := s.pool.QueryRow(context.Background(),
+			"SELECT COUNT(*) FROM family_members WHERE household_id = $1", h.ID).Scan(&memberCount); err != nil {
+			t.Fatalf("count family members: %v", err)
+		}
+		if memberCount != 0 {
+			t.Errorf("family members still exist: count = %d, want 0", memberCount)
 		}
 	})
 
