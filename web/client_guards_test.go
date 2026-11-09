@@ -152,8 +152,8 @@ func TestClientJS_QuestsTab(t *testing.T) {
 	app := readStatic(t, "js/app.js")
 
 	t.Run("questsTab defined and routed", func(t *testing.T) {
-		if !strings.Contains(app, "async function questsTab(h, $root)") {
-			t.Error("expected async function questsTab(h, $root)")
+		if !strings.Contains(app, "async function questsTab(h, $root, notice = null)") {
+			t.Error("expected async function questsTab(h, $root, notice = null)")
 		}
 		if !strings.Contains(app, "quests: questsTab") {
 			t.Error("expected loaders to map quests to questsTab")
