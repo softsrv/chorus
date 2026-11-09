@@ -583,6 +583,13 @@ func (s *AuthService) ResendVerification(ctx context.Context, userID uuid.UUID) 
 // ── private helpers ───────────────────────────────────────────────────────────
 
 func (s *AuthService) issueTokenPair(ctx context.Context, user db.User, meta DeviceMeta) (TokenResult, error) {
+	if user.EmailVerified && !user.HouseholdProvisionedAt.Valid {
+		if err := provisionFirstHousehold(ctx, s.pool, s.q, user); err != nil {
+			return TokenResult{}, fmt.Errorf("provision first household: %w", err)
+		}
+		user.HouseholdProvisionedAt = pgtype.Timestamptz{Time: time.Now(), Valid: true}
+	}
+
 	rawRefresh, hashedRefresh, err := auth.GenerateRefreshToken()
 	if err != nil {
 		return TokenResult{}, fmt.Errorf("generate refresh token: %w", err)

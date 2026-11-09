@@ -182,6 +182,19 @@ func TestAPI_EndToEnd(t *testing.T) {
 	parent := s.signUp("parent")
 	kid := s.signUp("kid")
 
+	// Verify auto-provisioning created an admin household on first sign-in.
+	var initialHouseholds struct {
+		Items []struct {
+			ID   uuid.UUID `json:"id"`
+			Name string    `json:"name"`
+			Role string    `json:"role"`
+		} `json:"items"`
+	}
+	s.expect(http.StatusOK, "GET", "/api/v1/households", parent.AccessToken, nil, &initialHouseholds)
+	if len(initialHouseholds.Items) != 1 || initialHouseholds.Items[0].Role != "admin" {
+		t.Errorf("expected 1 admin household after sign-up, got %+v", initialHouseholds.Items)
+	}
+
 	// Household + invite + join.
 	var h struct {
 		ID   uuid.UUID `json:"id"`

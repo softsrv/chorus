@@ -12,10 +12,23 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const claimHouseholdProvisioning = `-- name: ClaimHouseholdProvisioning :execrows
+UPDATE users SET household_provisioned_at = NOW(), updated_at = NOW()
+WHERE id = $1 AND household_provisioned_at IS NULL
+`
+
+func (q *Queries) ClaimHouseholdProvisioning(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, claimHouseholdProvisioning, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const createGoogleUser = `-- name: CreateGoogleUser :one
 INSERT INTO users (id, email, display_name, password_hash, google_subject, email_verified, created_at, updated_at)
 VALUES ($1, $2, $3, NULL, $4, true, NOW(), NOW())
-RETURNING id, email, display_name, password_hash, email_verified, failed_login_attempts, locked_until, created_at, updated_at, google_subject
+RETURNING id, email, display_name, password_hash, email_verified, failed_login_attempts, locked_until, created_at, updated_at, google_subject, household_provisioned_at
 `
 
 type CreateGoogleUserParams struct {
@@ -46,6 +59,7 @@ func (q *Queries) CreateGoogleUser(ctx context.Context, arg CreateGoogleUserPara
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.GoogleSubject,
+		&i.HouseholdProvisionedAt,
 	)
 	return i, err
 }
@@ -53,7 +67,7 @@ func (q *Queries) CreateGoogleUser(ctx context.Context, arg CreateGoogleUserPara
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (id, email, display_name, password_hash, email_verified, created_at, updated_at)
 VALUES ($1, $2, $3, $4, false, NOW(), NOW())
-RETURNING id, email, display_name, password_hash, email_verified, failed_login_attempts, locked_until, created_at, updated_at, google_subject
+RETURNING id, email, display_name, password_hash, email_verified, failed_login_attempts, locked_until, created_at, updated_at, google_subject, household_provisioned_at
 `
 
 type CreateUserParams struct {
@@ -82,6 +96,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.GoogleSubject,
+		&i.HouseholdProvisionedAt,
 	)
 	return i, err
 }
@@ -96,7 +111,7 @@ func (q *Queries) DeleteUserByID(ctx context.Context, id uuid.UUID) error {
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, email, display_name, password_hash, email_verified, failed_login_attempts, locked_until, created_at, updated_at, google_subject FROM users WHERE email = $1 LIMIT 1
+SELECT id, email, display_name, password_hash, email_verified, failed_login_attempts, locked_until, created_at, updated_at, google_subject, household_provisioned_at FROM users WHERE email = $1 LIMIT 1
 `
 
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
@@ -113,12 +128,13 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.GoogleSubject,
+		&i.HouseholdProvisionedAt,
 	)
 	return i, err
 }
 
 const getUserByGoogleSubject = `-- name: GetUserByGoogleSubject :one
-SELECT id, email, display_name, password_hash, email_verified, failed_login_attempts, locked_until, created_at, updated_at, google_subject FROM users WHERE google_subject = $1 LIMIT 1
+SELECT id, email, display_name, password_hash, email_verified, failed_login_attempts, locked_until, created_at, updated_at, google_subject, household_provisioned_at FROM users WHERE google_subject = $1 LIMIT 1
 `
 
 func (q *Queries) GetUserByGoogleSubject(ctx context.Context, googleSubject pgtype.Text) (User, error) {
@@ -135,12 +151,13 @@ func (q *Queries) GetUserByGoogleSubject(ctx context.Context, googleSubject pgty
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.GoogleSubject,
+		&i.HouseholdProvisionedAt,
 	)
 	return i, err
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, email, display_name, password_hash, email_verified, failed_login_attempts, locked_until, created_at, updated_at, google_subject FROM users WHERE id = $1 LIMIT 1
+SELECT id, email, display_name, password_hash, email_verified, failed_login_attempts, locked_until, created_at, updated_at, google_subject, household_provisioned_at FROM users WHERE id = $1 LIMIT 1
 `
 
 func (q *Queries) GetUserByID(ctx context.Context, id uuid.UUID) (User, error) {
@@ -157,12 +174,13 @@ func (q *Queries) GetUserByID(ctx context.Context, id uuid.UUID) (User, error) {
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.GoogleSubject,
+		&i.HouseholdProvisionedAt,
 	)
 	return i, err
 }
 
 const getUserForSession = `-- name: GetUserForSession :one
-SELECT u.id, u.email, u.display_name, u.password_hash, u.email_verified, u.failed_login_attempts, u.locked_until, u.created_at, u.updated_at, u.google_subject FROM users u
+SELECT u.id, u.email, u.display_name, u.password_hash, u.email_verified, u.failed_login_attempts, u.locked_until, u.created_at, u.updated_at, u.google_subject, u.household_provisioned_at FROM users u
 JOIN refresh_tokens rt ON rt.user_id = u.id
 WHERE rt.id = $1
   AND u.id = $2
@@ -192,6 +210,7 @@ func (q *Queries) GetUserForSession(ctx context.Context, arg GetUserForSessionPa
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.GoogleSubject,
+		&i.HouseholdProvisionedAt,
 	)
 	return i, err
 }
@@ -259,7 +278,7 @@ func (q *Queries) SetGoogleSubject(ctx context.Context, arg SetGoogleSubjectPara
 
 const updateDisplayName = `-- name: UpdateDisplayName :one
 UPDATE users SET display_name = $2, updated_at = NOW() WHERE id = $1
-RETURNING id, email, display_name, password_hash, email_verified, failed_login_attempts, locked_until, created_at, updated_at, google_subject
+RETURNING id, email, display_name, password_hash, email_verified, failed_login_attempts, locked_until, created_at, updated_at, google_subject, household_provisioned_at
 `
 
 type UpdateDisplayNameParams struct {
@@ -281,6 +300,7 @@ func (q *Queries) UpdateDisplayName(ctx context.Context, arg UpdateDisplayNamePa
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.GoogleSubject,
+		&i.HouseholdProvisionedAt,
 	)
 	return i, err
 }

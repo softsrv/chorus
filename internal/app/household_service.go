@@ -79,10 +79,6 @@ func (s *HouseholdService) Create(ctx context.Context, userID uuid.UUID, in Hous
 	if err != nil {
 		return Household{}, err
 	}
-	id, err := uuid.NewV7()
-	if err != nil {
-		return Household{}, fmt.Errorf("generate household id: %w", err)
-	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -91,17 +87,61 @@ func (s *HouseholdService) Create(ctx context.Context, userID uuid.UUID, in Hous
 	defer tx.Rollback(ctx) //nolint:errcheck
 
 	qtx := s.q.WithTx(tx)
-	h, err := qtx.CreateHousehold(ctx, db.CreateHouseholdParams{ID: id, Name: in.Name, Timezone: in.Timezone})
+	h, err := createHouseholdTx(ctx, qtx, userID, in.Name, in.Timezone)
 	if err != nil {
-		return Household{}, fmt.Errorf("create household: %w", err)
-	}
-	if err := qtx.AddHouseholdMember(ctx, db.AddHouseholdMemberParams{HouseholdID: id, UserID: userID, Role: RoleAdmin}); err != nil {
-		return Household{}, fmt.Errorf("add creator as admin: %w", err)
+		return Household{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Household{}, fmt.Errorf("commit: %w", err)
 	}
 	return Household{Household: h, Role: RoleAdmin}, nil
+}
+
+func createHouseholdTx(ctx context.Context, qtx *db.Queries, userID uuid.UUID, name, timezone string) (db.Household, error) {
+	id, err := uuid.NewV7()
+	if err != nil {
+		return db.Household{}, fmt.Errorf("generate household id: %w", err)
+	}
+	h, err := qtx.CreateHousehold(ctx, db.CreateHouseholdParams{ID: id, Name: name, Timezone: timezone})
+	if err != nil {
+		return db.Household{}, fmt.Errorf("create household: %w", err)
+	}
+	if err := qtx.AddHouseholdMember(ctx, db.AddHouseholdMemberParams{HouseholdID: id, UserID: userID, Role: RoleAdmin}); err != nil {
+		return db.Household{}, fmt.Errorf("add creator as admin: %w", err)
+	}
+	return h, nil
+}
+
+func provisionFirstHousehold(ctx context.Context, pool pgxBeginner, q *db.Queries, user db.User) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	qtx := q.WithTx(tx)
+	rows, err := qtx.ClaimHouseholdProvisioning(ctx, user.ID)
+	if err != nil {
+		return fmt.Errorf("claim household provisioning: %w", err)
+	}
+	if rows == 0 {
+		return nil
+	}
+
+	name := user.DisplayName + "'s household"
+	runes := []rune(name)
+	if len(runes) > 100 {
+		name = string(runes[:100])
+	}
+
+	if _, err := createHouseholdTx(ctx, qtx, user.ID, name, "UTC"); err != nil {
+		return fmt.Errorf("create default household: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
+	}
+	return nil
 }
 
 // Update replaces a household's editable fields. Admins only.

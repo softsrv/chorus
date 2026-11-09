@@ -13,6 +13,7 @@ import (
 
 type Querier interface {
 	AddHouseholdMember(ctx context.Context, arg AddHouseholdMemberParams) error
+	ClaimHouseholdProvisioning(ctx context.Context, id uuid.UUID) (int64, error)
 	// Single use: conditional on used_at IS NULL, unexpired, and the flow's
 	// purpose, so a state can't be replayed or used to complete another flow.
 	ConsumeOAuthState(ctx context.Context, arg ConsumeOAuthStateParams) (OauthState, error)
