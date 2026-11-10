@@ -218,7 +218,6 @@ func newCalendarTestServer(t *testing.T, fake *fakeCalendarGoogle) *calendarServ
 		Queries: q, Pool: pool, AuthSvc: authSvc,
 		UserSvc:        app.NewUserService(q),
 		HouseholdSvc:   app.NewHouseholdService(q, pool),
-		ChoreSvc:       app.NewChoreService(q),
 		GoogleCalendar: calendar,
 		JWTSecret:      secret,
 	})
@@ -979,21 +978,25 @@ func TestGoogleCalendar_AccountPageServesIndex(t *testing.T) {
 }
 
 // CLM-12: endpoints act only on the authenticated caller and take no user ID.
-// No response ever contains tokens. Another household member cannot see or
-// delete another user's connection. Route patterns have no ID parameter.
+// No response ever contains tokens. Another login cannot see or delete a
+// user's connection, nor reach the household it runs. Route patterns have no
+// ID parameter.
 func TestGoogleCalendar_IsolationAndNoLeak(t *testing.T) {
 	fake := newFakeCalendarGoogle(t)
 	s := newCalendarTestServer(t, fake)
 
-	// Users A and B in one household
+	// A runs a household; B is another login, outside it (a household has
+	// exactly one login).
 	userA := s.signUp("calclm12a")
 	userB := s.signUp("calclm12b")
 	var h struct{ ID uuid.UUID }
 	s.expect(http.StatusCreated, "POST", "/api/v1/households", userA.AccessToken,
 		map[string]string{"name": "Household 12", "timezone": "UTC"}, &h)
-	var inv struct{ Code string }
-	s.expect(http.StatusCreated, "POST", "/api/v1/households/"+h.ID.String()+"/invites", userA.AccessToken, nil, &inv)
-	s.expect(http.StatusOK, "POST", "/api/v1/invites/accept", userB.AccessToken, map[string]string{"code": inv.Code}, nil)
+	var notFound apiError
+	s.expect(http.StatusNotFound, "GET", "/api/v1/households/"+h.ID.String()+"/calendar", userB.AccessToken, nil, &notFound)
+	if notFound.Error.Code != "not_found" {
+		t.Errorf("B reads A's household calendar: code %q, want not_found", notFound.Error.Code)
+	}
 
 	knownAccess := "cal-access-token-clm12-secret-xyz"
 	knownRefresh := "cal-refresh-token-clm12-secret-abc"

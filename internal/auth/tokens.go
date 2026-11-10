@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"strings"
 )
 
 // generateRandomToken is the shared implementation for all 32-byte URL-safe tokens.
@@ -50,47 +49,4 @@ func CompareTokenHash(raw, storedHash string) bool {
 // its SHA-256 hash (for storage).
 func GenerateVerificationToken() (raw, hashed string, err error) {
 	return generateRandomToken("verification token")
-}
-
-// inviteAlphabet is Crockford base32: no I, L, O, or U, so codes survive being
-// read aloud or typed from a phone screen.
-const inviteAlphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-
-// GenerateInviteCode creates a human-typeable household invite code of the form
-// XXXX-XXXX-XXXX (60 bits of entropy) and returns it with its SHA-256 hash.
-// Codes are single-use, expire, and redemption is rate limited, so 60 bits is
-// far beyond guessable.
-func GenerateInviteCode() (raw, hashed string, err error) {
-	b := make([]byte, 12)
-	if _, err = rand.Read(b); err != nil {
-		return "", "", fmt.Errorf("generate invite code: %w", err)
-	}
-	code := make([]byte, 0, 14)
-	for i, v := range b {
-		if i > 0 && i%4 == 0 {
-			code = append(code, '-')
-		}
-		code = append(code, inviteAlphabet[v&31])
-	}
-	raw = string(code)
-	return raw, HashToken(NormalizeInviteCode(raw)), nil
-}
-
-// NormalizeInviteCode canonicalizes user-entered invite codes: uppercase,
-// separators and whitespace removed, and commonly confused letters mapped to
-// the digits Crockford base32 uses for them.
-func NormalizeInviteCode(code string) string {
-	out := make([]byte, 0, len(code))
-	for _, c := range []byte(strings.ToUpper(code)) {
-		switch c {
-		case '-', ' ', '\t':
-			continue
-		case 'O':
-			c = '0'
-		case 'I', 'L':
-			c = '1'
-		}
-		out = append(out, c)
-	}
-	return string(out)
 }

@@ -48,6 +48,16 @@ type Event struct {
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 }
 
+type FamilyMember struct {
+	ID          uuid.UUID          `json:"id"`
+	HouseholdID uuid.UUID          `json:"household_id"`
+	Name        string             `json:"name"`
+	PinHash     pgtype.Text        `json:"pin_hash"`
+	Points      int32              `json:"points"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
 type GoogleCalendarConnection struct {
 	ID              uuid.UUID          `json:"id"`
 	UserID          uuid.UUID          `json:"user_id"`
@@ -75,6 +85,13 @@ type Household struct {
 	Timezone  string             `json:"timezone"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+}
+
+type HouseholdAdminPin struct {
+	HouseholdID uuid.UUID          `json:"household_id"`
+	PinHash     string             `json:"pin_hash"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 }
 
 type HouseholdCalendar struct {
@@ -105,6 +122,40 @@ type HouseholdMember struct {
 	JoinedAt    pgtype.Timestamptz `json:"joined_at"`
 }
 
+type HouseholdMembersRetired struct {
+	HouseholdID uuid.UUID          `json:"household_id"`
+	UserID      uuid.UUID          `json:"user_id"`
+	Role        string             `json:"role"`
+	JoinedAt    pgtype.Timestamptz `json:"joined_at"`
+}
+
+type HouseholdQuest struct {
+	ID          uuid.UUID          `json:"id"`
+	HouseholdID uuid.UUID          `json:"household_id"`
+	LibraryID   *uuid.UUID         `json:"library_id"`
+	Name        string             `json:"name"`
+	Points      int32              `json:"points"`
+	RepeatDays  int32              `json:"repeat_days"`
+	Notes       string             `json:"notes"`
+	ClaimedBy   *uuid.UUID         `json:"claimed_by"`
+	ClaimedAt   pgtype.Timestamptz `json:"claimed_at"`
+	DoneAt      pgtype.Timestamptz `json:"done_at"`
+	CompletedAt pgtype.Timestamptz `json:"completed_at"`
+	AvailableAt pgtype.Timestamptz `json:"available_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+type HouseholdReward struct {
+	ID          uuid.UUID          `json:"id"`
+	HouseholdID uuid.UUID          `json:"household_id"`
+	LibraryID   *uuid.UUID         `json:"library_id"`
+	Description string             `json:"description"`
+	Cost        int32              `json:"cost"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
 type OauthState struct {
 	ID           uuid.UUID          `json:"id"`
 	StateHash    string             `json:"state_hash"`
@@ -125,6 +176,15 @@ type PasswordResetToken struct {
 	UsedAt    pgtype.Timestamptz `json:"used_at"`
 }
 
+type QuestLibrary struct {
+	ID         uuid.UUID          `json:"id"`
+	Name       string             `json:"name"`
+	Points     int32              `json:"points"`
+	RepeatDays int32              `json:"repeat_days"`
+	Notes      string             `json:"notes"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+}
+
 type RefreshToken struct {
 	ID         uuid.UUID          `json:"id"`
 	UserID     uuid.UUID          `json:"user_id"`
@@ -138,15 +198,23 @@ type RefreshToken struct {
 	RevokedAt  pgtype.Timestamptz `json:"revoked_at"`
 }
 
+type RewardLibrary struct {
+	ID          uuid.UUID          `json:"id"`
+	Description string             `json:"description"`
+	Cost        int32              `json:"cost"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type User struct {
-	ID                  uuid.UUID          `json:"id"`
-	Email               string             `json:"email"`
-	DisplayName         string             `json:"display_name"`
-	PasswordHash        pgtype.Text        `json:"password_hash"`
-	EmailVerified       bool               `json:"email_verified"`
-	FailedLoginAttempts int32              `json:"failed_login_attempts"`
-	LockedUntil         pgtype.Timestamptz `json:"locked_until"`
-	CreatedAt           pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
-	GoogleSubject       pgtype.Text        `json:"google_subject"`
+	ID                     uuid.UUID          `json:"id"`
+	Email                  string             `json:"email"`
+	DisplayName            string             `json:"display_name"`
+	PasswordHash           pgtype.Text        `json:"password_hash"`
+	EmailVerified          bool               `json:"email_verified"`
+	FailedLoginAttempts    int32              `json:"failed_login_attempts"`
+	LockedUntil            pgtype.Timestamptz `json:"locked_until"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
+	GoogleSubject          pgtype.Text        `json:"google_subject"`
+	HouseholdProvisionedAt pgtype.Timestamptz `json:"household_provisioned_at"`
 }

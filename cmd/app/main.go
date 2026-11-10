@@ -74,7 +74,9 @@ func main() {
 	})
 	userSvc := app.NewUserService(queries)
 	householdSvc := app.NewHouseholdService(queries, pool)
-	choreSvc := app.NewChoreService(queries)
+	familySvc := app.NewFamilyService(queries, pool, cfg.BCryptCost)
+	questSvc := app.NewQuestService(queries, pool)
+	rewardSvc := app.NewRewardService(queries)
 
 	// Google sign-in is optional: it is enabled only when both the client id
 	// and secret are set, and the app runs normally without them.
@@ -122,7 +124,9 @@ func main() {
 		AuthSvc:           authSvc,
 		UserSvc:           userSvc,
 		HouseholdSvc:      householdSvc,
-		ChoreSvc:          choreSvc,
+		FamilySvc:         familySvc,
+		QuestSvc:          questSvc,
+		RewardSvc:         rewardSvc,
 		FamilyCalendar:    familyCalendar,
 		GoogleSignIn:      googleSignIn,
 		GoogleCalendar:    googleCalendar,

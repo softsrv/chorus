@@ -23,14 +23,14 @@ var (
 	// ErrNotFound covers both "doesn't exist" and "exists but you can't see it"
 	// so that resource IDs from other households can't be probed.
 	ErrNotFound = errors.New("not found")
-	// ErrLastAdmin is returned when an operation would leave a household that
-	// still has members without any admin.
-	ErrLastAdmin = errors.New("household must keep at least one admin")
-	// ErrAlreadyMember is returned when accepting an invite to a household the
-	// user already belongs to.
-	ErrAlreadyMember = errors.New("already a member of this household")
-	// ErrInviteInvalid covers unknown, expired, and already-used invite codes.
-	ErrInviteInvalid = errors.New("invite code is invalid or has expired")
+	// ErrWrongPIN is returned when a member PIN or admin PIN does not match.
+	ErrWrongPIN = errors.New("wrong PIN")
+	// ErrAdminPinRequired is returned when an admin PIN is set on the household
+	// but was not provided in the request.
+	ErrAdminPinRequired = errors.New("admin PIN is required")
+	// ErrQuestTaken is returned when a quest is accepted but is no longer
+	// available: another member holds it, or it is waiting out its repeat days.
+	ErrQuestTaken = errors.New("quest is already taken")
 )
 
 // RateLimitedError is returned when an operation is attempted too frequently.
@@ -60,14 +60,4 @@ func (e *ValidationError) Error() string {
 		parts = append(parts, k+": "+e.Fields[k])
 	}
 	return "validation failed: " + strings.Join(parts, "; ")
-}
-
-// HouseholdBlockingError is returned when deleting an account would leave a
-// household with members but no admin. Households lists the affected names.
-type HouseholdBlockingError struct {
-	Households []string
-}
-
-func (e HouseholdBlockingError) Error() string {
-	return "account is the only admin of households with other members: " + strings.Join(e.Households, ", ")
 }

@@ -1,12 +1,15 @@
 package handlers
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/softsrv/chorus/internal/app"
 	"github.com/softsrv/chorus/internal/http/middleware"
+	"github.com/softsrv/chorus/internal/http/respond"
 )
 
 func TestDecodeJSON(t *testing.T) {
@@ -55,6 +58,46 @@ func TestDecodeJSON(t *testing.T) {
 			}
 			if !tc.wantOK && rr.Code != tc.wantStatus {
 				t.Errorf("status: got %d, want %d (body %s)", rr.Code, tc.wantStatus, rr.Body)
+			}
+		})
+	}
+}
+
+func TestWriteError_PIN(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{"wrong pin", app.ErrWrongPIN, http.StatusForbidden, "wrong_pin"},
+		{"admin pin required", app.ErrAdminPinRequired, http.StatusForbidden, "admin_pin_required"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			rr := httptest.NewRecorder()
+
+			writeError(rr, req, tc.err)
+
+			if rr.Code != tc.wantStatus {
+				t.Errorf("status: got %d, want %d", rr.Code, tc.wantStatus)
+			}
+			if rr.Code == http.StatusUnauthorized {
+				t.Errorf("status must never be 401 Unauthorized for PIN errors")
+			}
+
+			var body respond.ErrorBody
+			if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error.Code != tc.wantCode {
+				t.Errorf("code: got %q, want %q", body.Error.Code, tc.wantCode)
 			}
 		})
 	}

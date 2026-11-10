@@ -531,17 +531,6 @@ func (s *AuthService) DeleteAccount(ctx context.Context, userID, currentSessionI
 	defer tx.Rollback(ctx) //nolint:errcheck
 
 	qtx := s.q.WithTx(tx)
-	blocking, err := qtx.ListAdminHouseholdsWithOtherMembers(ctx, userID)
-	if err != nil {
-		return fmt.Errorf("check households: %w", err)
-	}
-	if len(blocking) > 0 {
-		names := make([]string, len(blocking))
-		for i, h := range blocking {
-			names[i] = h.Name
-		}
-		return HouseholdBlockingError{Households: names}
-	}
 	if err := qtx.DeleteSoleMemberHouseholds(ctx, userID); err != nil {
 		return fmt.Errorf("delete sole-member households: %w", err)
 	}
@@ -583,6 +572,13 @@ func (s *AuthService) ResendVerification(ctx context.Context, userID uuid.UUID) 
 // ── private helpers ───────────────────────────────────────────────────────────
 
 func (s *AuthService) issueTokenPair(ctx context.Context, user db.User, meta DeviceMeta) (TokenResult, error) {
+	if user.EmailVerified {
+		if err := provisionFirstHousehold(ctx, s.pool, s.q, user); err != nil {
+			return TokenResult{}, fmt.Errorf("provision first household: %w", err)
+		}
+		user.HouseholdProvisionedAt = pgtype.Timestamptz{Time: time.Now(), Valid: true}
+	}
+
 	rawRefresh, hashedRefresh, err := auth.GenerateRefreshToken()
 	if err != nil {
 		return TokenResult{}, fmt.Errorf("generate refresh token: %w", err)

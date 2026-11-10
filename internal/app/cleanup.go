@@ -30,7 +30,7 @@ func RunTokenCleanup(ctx context.Context, q *db.Queries) {
 	}
 }
 
-// CleanupTokens deletes expired and stale tokens and invites
+// CleanupTokens deletes expired and stale auth tokens
 // and logs the number of rows removed from each.
 // Exported so tests and debug endpoints can trigger a run directly.
 func CleanupTokens(ctx context.Context, q *db.Queries) {
@@ -48,10 +48,6 @@ func CleanupTokens(ctx context.Context, q *db.Queries) {
 	if err != nil {
 		slog.Error("token cleanup: delete stale verification codes", "error", err)
 	}
-	n4, err := q.DeleteStaleHouseholdInvites(ctx)
-	if err != nil {
-		slog.Error("token cleanup: delete stale household invites", "error", err)
-	}
 	n5, err := q.DeleteStaleOAuthStates(ctx)
 	if err != nil {
 		slog.Error("token cleanup: delete stale oauth states", "error", err)
@@ -65,7 +61,6 @@ func CleanupTokens(ctx context.Context, q *db.Queries) {
 		"refresh_tokens_deleted", n1,
 		"reset_tokens_deleted", n2,
 		"verification_codes_deleted", n3,
-		"household_invites_deleted", n4,
 		"oauth_states_deleted", n5,
 		"google_sign_in_handoffs_deleted", n6,
 	)

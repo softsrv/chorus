@@ -314,7 +314,93 @@ function resetPasswordView(token) {
 const SELECTED_KEY = 'chorus.household';
 let households = [];
 let selected = null;
-let tab = 'chores';
+let tab = 'quests';
+
+// Active member and admin unlock. Module memory only: never written to
+// localStorage, sessionStorage, cookies or the URL, so a reload starts in the
+// administrator's view and asks for any PIN again.
+let activeMember = null; // { id, name, pin } after a successful verify
+let adminPin = null; // the admin PIN once entered, sent as X-Admin-PIN
+let adminPinState = { householdId: null, set: false }; // GET .../admin-pin
+
+// clearMemberState returns to the administrator's view with nothing unlocked.
+function clearMemberState() {
+  activeMember = null;
+  adminPin = null;
+  adminPinState = { householdId: null, set: false };
+}
+
+// activeMemberAction is the one accessor member actions (accept, abandon, mark
+// done) take their body from: { member_id, pin }, or null with no member active.
+function activeMemberAction() {
+  return activeMember ? { member_id: activeMember.id, pin: activeMember.pin } : null;
+}
+
+// adminHeaders is the 4th api() argument for admin-gated requests.
+function adminHeaders() {
+  return adminPin ? { headers: { 'X-Admin-PIN': adminPin } } : {};
+}
+
+// adminRequest sends an admin-gated request. A 403 wrong_pin or
+// admin_pin_required forgets the held admin PIN (it was changed or removed
+// elsewhere) so management locks again; tokens are untouched.
+async function adminRequest(method, path, body) {
+  try {
+    return await api(method, path, body, adminHeaders());
+  } catch (err) {
+    if (err instanceof ApiError && (err.code === 'wrong_pin' || err.code === 'admin_pin_required')) {
+      adminPin = null;
+      if (err.code === 'admin_pin_required') adminPinState.set = true;
+    }
+    throw err;
+  }
+}
+
+// memberActionFailed handles an error from a member action. A 403 wrong_pin
+// clears the active member back to the administrator's view and says so; the
+// session tokens are kept. Returns true when it handled the error.
+function memberActionFailed(err) {
+  if (!(err instanceof ApiError) || err.code !== 'wrong_pin') return false;
+  activeMember = null;
+  toast('That PIN is no longer correct. Pick the member again.', 'error');
+  renderHome();
+  return true;
+}
+
+// managementVisible: the Family tab and management controls are shown in the
+// administrator's view, or to anyone while no admin PIN is set.
+const managementVisible = () => !activeMember || !adminPinState.set;
+// managementUnlocked: admin-gated writes can be sent.
+const managementUnlocked = () => !adminPinState.set || adminPin !== null;
+
+const PIN_RE = /^\d{4}$/;
+
+// checkPin rejects a PIN that is not exactly 4 digits before anything is sent,
+// with the error on the field.
+function checkPin(pin, field = 'pin') {
+  if (!PIN_RE.test(pin)) {
+    throw new ApiError(422, { message: 'Check the highlighted field.', fields: { [field]: 'must be exactly 4 digits' } });
+  }
+}
+
+// pinFailure rewrites PIN errors into clear messages: wrong PIN and rate limit.
+function pinFailure(err) {
+  if (err instanceof ApiError && err.code === 'wrong_pin') return new ApiError(403, { code: 'wrong_pin', message: 'Wrong PIN. Try again.' });
+  if (err instanceof ApiError && err.status === 429) return new ApiError(429, { message: 'Too many attempts, try again later.' });
+  return err;
+}
+
+// pinForm is a one-field PIN form: validated client side, errors under it.
+function pinForm({ label = 'PIN', submit, onPin }) {
+  return form({
+    fields: [{ name: 'pin', label, type: 'password', required: true, autocomplete: 'off', placeholder: '4 digits' }],
+    submit, inline: true,
+    onSubmit: async (v) => {
+      checkPin(v.pin);
+      try { await onPin(v.pin); } catch (err) { throw pinFailure(err); }
+    },
+  });
+}
 
 async function homeView() {
   renderNav();
@@ -323,11 +409,14 @@ async function homeView() {
   households = (await api('GET', '/households')).items;
   let remembered = null;
   try { remembered = localStorage.getItem(SELECTED_KEY); } catch { /* storage disabled */ }
-  selected = households.find((h) => h.id === remembered) || households[0] || null;
+  const next = households.find((h) => h.id === remembered) || households[0] || null;
+  if (next?.id !== selected?.id) clearMemberState();
+  selected = next;
   renderHome();
 }
 
 function selectHousehold(h) {
+  clearMemberState();
   selected = h;
   try { localStorage.setItem(SELECTED_KEY, h ? h.id : ''); } catch { /* storage disabled */ }
   renderHome();
@@ -352,9 +441,30 @@ function unverifiedView() {
       })))));
 }
 
+function newHouseholdForm() {
+  return form({
+    fields: [
+      { name: 'name', label: 'Name', required: true },
+      { name: 'timezone', label: 'Time zone', value: Intl.DateTimeFormat().resolvedOptions().timeZone },
+    ],
+    submit: 'Create',
+    onSubmit: async (v) => {
+      const h = await api('POST', '/households', v);
+      households.push(h);
+      selectHousehold(h);
+    },
+  });
+}
+
 function renderHome() {
+  if (households.length === 0 || !selected) {
+    // No household (normally one is created at first sign-in): the create form
+    // is the main view.
+    $app.replaceChildren(el('div', { class: 'max-w-md mx-auto' }, card('New household', newHouseholdForm())));
+    return;
+  }
+
   const list = el('ul', { class: 'menu bg-base-100 rounded-box w-full' },
-    households.length === 0 && el('li', { class: 'menu-disabled' }, el('span', { text: 'No households yet' })),
     households.map((h) => el('li', {},
       el('a', {
         class: selected?.id === h.id ? 'menu-active' : '', href: '#',
@@ -363,43 +473,34 @@ function renderHome() {
 
   const sidebar = el('div', { class: 'space-y-4' },
     list,
-    card(null,
-      el('h3', { class: 'font-semibold', text: 'New household' }),
-      form({
-        fields: [
-          { name: 'name', label: 'Name', required: true },
-          { name: 'timezone', label: 'Time zone', value: Intl.DateTimeFormat().resolvedOptions().timeZone },
-        ],
-        submit: 'Create',
-        onSubmit: async (v) => {
-          const h = await api('POST', '/households', v);
-          households.push(h);
-          selectHousehold(h);
-        },
-      }),
-      el('div', { class: 'divider my-0' }),
-      el('h3', { class: 'font-semibold', text: 'Join with invite code' }),
-      form({
-        fields: [{ name: 'code', label: 'Code', placeholder: 'XXXX-XXXX-XXXX', required: true }],
-        submit: 'Join',
-        onSubmit: async (v) => {
-          const h = await api('POST', '/invites/accept', v);
-          households.push(h);
-          selectHousehold(h);
-        },
-      })));
+    managementVisible() && card(null, el('h3', { class: 'font-semibold', text: 'New household' }), newHouseholdForm()));
 
-  const main = selected ? householdPanel(selected) : card('Get started', el('p', { text: 'Create a household or join one with an invite code.' }));
-  $app.replaceChildren(el('div', { class: 'grid gap-6 md:grid-cols-[16rem_1fr]' }, sidebar, main));
+  $app.replaceChildren(el('div', { class: 'grid gap-6 md:grid-cols-[16rem_1fr]' }, sidebar, householdPanel(selected)));
 }
 
 function householdPanel(h) {
   const $content = el('div');
-  const tabs = [['chores', 'Chores'], ['events', 'Calendar'], ['members', 'Members']];
+  if (adminPinState.householdId !== h.id) {
+    api('GET', `/households/${h.id}/admin-pin`)
+      .then((r) => {
+        if (selected?.id !== h.id) return;
+        adminPinState = { householdId: h.id, set: !!r.set };
+        renderHome();
+      })
+      .catch((err) => showError($content, err));
+    return el('div', { class: 'space-y-4 min-w-0' },
+      el('h2', { class: 'text-2xl font-bold', text: h.name }),
+      $content);
+  }
+
+  const manage = managementVisible();
+  const tabs = [['quests', 'Quests'], ['rewards', 'Rewards'], manage && ['family', 'Family'], ['events', 'Calendar']].filter(Boolean);
+  if (!tabs.some(([id]) => id === tab)) tab = 'quests';
+
   const header = el('div', { class: 'flex flex-wrap items-center gap-2' },
     el('h2', { class: 'text-2xl font-bold flex-1', text: h.name }),
     el('span', { class: 'text-sm opacity-60', text: h.timezone }),
-    h.role === 'admin' && el('button', {
+    manage && h.role === 'admin' && el('button', {
       class: 'btn btn-error btn-outline btn-sm', text: 'Delete household',
       onclick: confirmClick('Delete household?', async () => {
         await api('DELETE', `/households/${h.id}`);
@@ -413,9 +514,84 @@ function householdPanel(h) {
       onclick: (e) => { e.preventDefault(); tab = id; renderHome(); },
     })));
 
-  const loaders = { chores: choresTab, events: eventsTab, members: membersTab };
-  loaders[tab](h, $content).catch((err) => showError($content, err));
-  return el('div', { class: 'space-y-4 min-w-0' }, header, tabBar, $content);
+  const loaders = { quests: questsTab, rewards: rewardsTab, family: familyTab, events: eventsTab };
+  (loaders[tab] || questsTab)(h, $content).catch((err) => showError($content, err));
+  return el('div', { class: 'space-y-4 min-w-0' }, header, memberBar(h), tabBar, $content);
+}
+
+// memberBar shows whose view this is and switches it: pick a member (with
+// their PIN when they have one), or go back to the administrator's view (with
+// the admin PIN when one is set).
+function memberBar(h) {
+  const $panel = el('div');
+  const $who = el('span', { class: 'text-sm flex-1', text: `Viewing as: ${activeMember ? activeMember.name : 'Administrator'}` });
+  // The active member's points come from the server on every render (never
+  // computed here), so an approval shows up the next time the view is drawn.
+  if (activeMember) {
+    const shown = activeMember;
+    api('GET', `/households/${h.id}/family-members`)
+      .then((r) => {
+        const m = (r.items || []).find((x) => x.id === shown.id);
+        if (m && activeMember === shown) $who.textContent = `Viewing as: ${m.name} · ${m.points} points`;
+      })
+      .catch((err) => console.error('member points', err)); // the name alone stays; the tab surfaces API errors
+  }
+
+  const become = (m, pin) => {
+    activeMember = { id: m.id, name: m.name, pin };
+    adminPin = null; // management locks again while a member is active
+    renderHome();
+  };
+
+  const openPicker = action(async () => {
+    const members = (await api('GET', `/households/${h.id}/family-members`)).items;
+    const $pinArea = el('div');
+    const pick = (m) => action(async () => {
+      if (!m.has_pin) {
+        await api('POST', `/households/${h.id}/family-members/${m.id}/verify`, { pin: '' });
+        become(m, '');
+        return;
+      }
+      $pinArea.replaceChildren(
+        el('p', { class: 'text-sm', text: `PIN for ${m.name}` }),
+        pinForm({
+          submit: 'Switch',
+          onPin: async (pin) => {
+            await api('POST', `/households/${h.id}/family-members/${m.id}/verify`, { pin });
+            become(m, pin);
+          },
+        }));
+    }, $pinArea);
+    $panel.replaceChildren(el('div', { class: 'space-y-2' },
+      members.length
+        ? el('div', { class: 'flex flex-wrap gap-2' },
+          members.map((m) => el('button', { class: 'btn btn-sm', text: `${m.name} · ${m.points} points`, onclick: pick(m) })))
+        : el('p', { class: 'text-sm opacity-70', text: 'No family members yet.' }),
+      $pinArea));
+  }, $panel);
+
+  const backToAdmin = () => {
+    if (!adminPinState.set) { activeMember = null; renderHome(); return; }
+    $panel.replaceChildren(
+      el('p', { class: 'text-sm', text: 'Enter the admin PIN to return to the administrator view.' }),
+      pinForm({
+        label: 'Admin PIN',
+        submit: 'Unlock',
+        onPin: async (pin) => {
+          await api('POST', `/households/${h.id}/admin-pin/verify`, { pin });
+          adminPin = pin;
+          activeMember = null;
+          renderHome();
+        },
+      }));
+  };
+
+  return el('div', { class: 'space-y-2' },
+    el('div', { class: 'flex flex-wrap items-center gap-2' },
+      $who,
+      el('button', { class: 'btn btn-sm', text: 'Switch member', onclick: openPicker }),
+      activeMember && el('button', { class: 'btn btn-sm btn-ghost', text: 'Administrator view', onclick: backToAdmin })),
+    $panel);
 }
 
 // confirmClick turns a button into a two-step confirm (no blocking dialogs).
@@ -430,73 +606,478 @@ function confirmClick(prompt, fn) {
   });
 }
 
-async function membersFor(h) {
-  return (await api('GET', `/households/${h.id}/members`)).items;
+// ── Quests ────────────────────────────────────────────────────────────────────
+
+// Quest list partitions come only from the server's fields: available says the
+// quest is in the pool, claimed_by says who holds it. The client does no date
+// arithmetic; a resting quest shows its available_at as the server sent it.
+function partitionQuests(items, memberId) {
+  const out = { available: [], mine: [], claimed: [], resting: [] };
+  for (const q of items) {
+    if (q.available) out.available.push(q);
+    else if (q.claimed_by && q.claimed_by === memberId) out.mine.push(q);
+    else if (q.claimed_by) out.claimed.push(q);
+    else out.resting.push(q);
+  }
+  return out;
 }
 
-// ── Chores ────────────────────────────────────────────────────────────────────
+const isAdminPinError = (err) => err instanceof ApiError && err.status === 403 &&
+  (err.code === 'wrong_pin' || err.code === 'admin_pin_required');
 
-let choreStatus = 'open';
+// questNotice maps an expected quest-action failure to the message shown after
+// the list reloads: a lost accept race (409 quest_taken) or a quest that is
+// gone, outside this household or no longer pending (404).
+function questNotice(err) {
+  if (!(err instanceof ApiError)) return null;
+  if (err.status === 409 && err.code === 'quest_taken') return 'This quest was already taken.';
+  if (err.status === 404) return 'Quest not found.';
+  return null;
+}
 
-async function choresTab(h, $root) {
-  const [members, page] = await Promise.all([
-    membersFor(h),
-    api('GET', `/households/${h.id}/chores?status=${choreStatus}&limit=100`),
+const questMeta = (q) => `${q.points} points · ${q.repeat_days} day(s) until available again`;
+
+async function questsTab(h, $root, notice = null) {
+  const rerender = (next = null) => { $root.replaceChildren(); questsTab(h, $root, next).catch((err) => showError($root, err)); };
+
+  const [page, library, family] = await Promise.all([
+    api('GET', `/households/${h.id}/quests?limit=100`),
+    api('GET', '/quest-library'),
+    api('GET', `/households/${h.id}/family-members`),
   ]);
-  const nameOf = Object.fromEntries(members.map((m) => [m.user_id, m.display_name]));
-  const assigneeOptions = [['', 'Unassigned'], ...members.map((m) => [m.user_id, m.display_name])];
-  const rerender = () => { $root.replaceChildren(); choresTab(h, $root).catch((err) => showError($root, err)); };
+  const quests = page.items || [];
+  const members = family.items || [];
+  const nameOf = Object.fromEntries(members.map((m) => [m.id, m.name]));
 
-  const choreFields = (c = {}) => [
-    { name: 'title', label: 'Title', required: true, value: c.title },
-    { name: 'assignee_id', label: 'Assignee', type: 'select', options: assigneeOptions, value: c.assignee_id || '' },
-    { name: 'due_on', label: 'Due', type: 'date', value: c.due_on || '' },
+  const cards = [
+    notice && alertBox('warning', notice),
+    activeMember ? takeCard(h, quests, nameOf, rerender) : card(null,
+      el('h3', { class: 'font-semibold', text: 'Quests' }),
+      el('p', { class: 'text-sm opacity-70', text: 'Choose a family member to take quests.' })),
+    !activeMember && await approvalsCard(h, members, rerender),
+    managementVisible() && manageQuestsCard(h, quests, library, page, rerender),
+  ].filter(Boolean);
+  $root.replaceChildren(el('div', { class: 'space-y-4' }, cards));
+}
+
+// takeCard is the active member's view: Available, Mine and Claimed lists, a
+// quest detail with Accept/Decline, and Abandon/Mark done on their own quests.
+// Every action sends activeMemberAction(); the server decides the outcome and
+// the list is re-read from it afterwards.
+function takeCard(h, quests, nameOf, rerender) {
+  const $err = el('div');
+  const $detail = el('div');
+  const parts = partitionQuests(quests, activeMember.id);
+
+  const act = (verb, q) => action(async () => {
+    const body = activeMemberAction();
+    if (!body) return;
+    try {
+      await api('POST', `/households/${h.id}/quests/${q.id}/${verb}`, body);
+    } catch (err) {
+      if (memberActionFailed(err)) return;
+      const msg = questNotice(err);
+      if (msg) { rerender(msg); return; }
+      throw err;
+    }
+    rerender();
+  }, $err);
+
+  const showDetail = (q) => $detail.replaceChildren(el('div', { class: 'p-3 bg-base-200 rounded space-y-2' },
+    el('div', { class: 'font-semibold', text: q.name }),
+    el('div', { class: 'text-xs opacity-60', text: questMeta(q) }),
+    el('p', { class: 'text-sm whitespace-pre-line', text: q.notes || 'No notes.' }),
+    el('div', { class: 'flex gap-2' },
+      el('button', { class: 'btn btn-primary btn-sm', text: 'Accept', onclick: act('accept', q) }),
+      el('button', { class: 'btn btn-ghost btn-sm', text: 'Decline', onclick: (e) => { e.preventDefault(); $detail.replaceChildren(); } }))));
+
+  const row = (q, ...extra) => el('li', { class: 'flex flex-wrap items-center gap-2 py-2 border-b border-base-300' },
+    el('div', { class: 'flex-1 min-w-0' },
+      el('div', { class: 'font-medium', text: q.name }),
+      el('div', { class: 'text-xs opacity-60', text: questMeta(q) })),
+    ...extra);
+
+  const section = (title, items, render, empty) => el('div', { class: 'space-y-1' },
+    el('h4', { class: 'font-semibold text-sm opacity-80', text: title }),
+    items.length ? el('ul', {}, items.map(render)) : el('p', { class: 'text-xs opacity-60', text: empty }));
+
+  return card(null,
+    el('h3', { class: 'font-semibold', text: `Quests for ${activeMember.name}` }),
+    $err,
+    section('Available', parts.available,
+      (q) => row(q, el('button', { class: 'btn btn-sm', text: 'View', onclick: (e) => { e.preventDefault(); showDetail(q); } })),
+      'No quests available right now.'),
+    $detail,
+    section('Mine', parts.mine, (q) => row(q, ...(q.awaiting_approval
+      ? [el('span', { class: 'badge badge-sm', text: 'Waiting for approval' })]
+      : [
+        el('button', { class: 'btn btn-primary btn-xs', text: 'Mark done', onclick: act('done', q) }),
+        el('button', { class: 'btn btn-ghost btn-xs', text: 'Abandon', onclick: act('abandon', q) }),
+      ])), 'You have no quests yet.'),
+    section('Claimed', parts.claimed,
+      (q) => row(q, el('span', { class: 'text-xs opacity-70', text: `Taken by ${nameOf[q.claimed_by] || 'a former member'}` })),
+      'Nobody else has a quest.'),
+    parts.resting.length > 0 && section('Coming back later', parts.resting,
+      (q) => row(q, q.available_at && el('span', { class: 'text-xs opacity-70', text: `Back ${fmtDate(q.available_at)}` })), ''));
+}
+
+// approvalsCard is the administrator's list of quests marked done. Loading,
+// approving and sending back carry X-Admin-PIN (adminRequest). A 403 for the
+// admin PIN says so, leaves the list as it was and never signs anyone out.
+async function approvalsCard(h, members, rerender) {
+  const $err = el('div');
+  const unlockForm = () => pinForm({
+    label: 'Admin PIN',
+    submit: 'Unlock',
+    onPin: async (pin) => {
+      await api('POST', `/households/${h.id}/admin-pin/verify`, { pin });
+      adminPin = pin;
+      rerender();
+    },
+  });
+  const wrongAdminPin = () => $err.replaceChildren(alertBox('error', 'Wrong administrator PIN.'), unlockForm());
+  const points = el('div', { class: 'flex flex-wrap gap-2' },
+    members.map((m) => el('span', { class: 'badge', text: `${m.name}: ${m.points} points` })));
+  const wrap = (...body) => card(null, el('h3', { class: 'font-semibold', text: 'Approvals' }), $err, ...body,
+    members.length > 0 && el('div', { class: 'divider my-0' }), members.length > 0 && points);
+
+  if (!managementUnlocked()) {
+    return wrap(el('p', { class: 'text-sm opacity-70', text: 'Enter the admin PIN to review approvals.' }), unlockForm());
+  }
+  let pending;
+  try {
+    pending = (await adminRequest('GET', `/households/${h.id}/quests/pending`)).items || [];
+  } catch (err) {
+    if (!isAdminPinError(err)) throw err;
+    wrongAdminPin();
+    return wrap();
+  }
+
+  const act = (verb, q) => action(async () => {
+    try {
+      await adminRequest('POST', `/households/${h.id}/quests/${q.id}/${verb}`, {});
+    } catch (err) {
+      if (isAdminPinError(err)) { wrongAdminPin(); return; }
+      const msg = questNotice(err);
+      if (msg) { rerender(msg); return; }
+      throw err;
+    }
+    rerender();
+  }, $err);
+
+  const rows = pending.map((q) => el('li', { class: 'flex flex-wrap items-center gap-2 py-2 border-b border-base-300' },
+    el('div', { class: 'flex-1 min-w-0' },
+      el('div', { class: 'font-medium', text: q.name }),
+      el('div', { class: 'text-xs opacity-60', text: `${q.member_name} · ${q.points} points` })),
+    el('button', { class: 'btn btn-success btn-xs', text: 'Approve', onclick: act('approve', q) }),
+    el('button', { class: 'btn btn-ghost btn-xs', text: 'Send back', onclick: act('reject', q) })));
+
+  return wrap(rows.length
+    ? el('ul', {}, rows)
+    : el('p', { class: 'text-sm opacity-70', text: 'Nothing waiting for approval.' }));
+}
+
+// manageQuestsCard lists every quest with the admin's add, edit, delete and
+// library controls (shown while management is unlocked).
+function manageQuestsCard(h, quests, library, page, rerender) {
+  const unlocked = managementUnlocked();
+
+  // A blank field is sent as typed, never as 0: the server owns validation
+  // and reports an error on the field.
+  const toNum = (val) => {
+    if (typeof val === 'string' && val.trim() === '') return val;
+    const n = Number(val);
+    return Number.isNaN(n) ? val : n;
+  };
+
+  const toBody = (v) => ({
+    name: v.name,
+    points: toNum(v.points),
+    repeat_days: toNum(v.repeat_days),
+    notes: v.notes,
+  });
+
+  const questFields = (q = {}) => [
+    { name: 'name', label: 'Name', required: true, value: q.name },
+    { name: 'points', label: 'Points', type: 'number', value: q.points ?? '' },
+    { name: 'repeat_days', label: 'Days until available again', type: 'number', value: q.repeat_days ?? '' },
+    { name: 'notes', label: 'Notes', type: 'textarea', value: q.notes ?? '' },
   ];
-  const toBody = (v) => ({ title: v.title, assignee_id: v.assignee_id || null, due_on: v.due_on || null });
 
-  const filter = el('div', { class: 'join' },
-    ['open', 'done', 'all'].map((s) => el('button', {
-      class: `btn btn-sm join-item ${s === choreStatus ? 'btn-active' : ''}`, text: s,
-      onclick: () => { choreStatus = s; rerender(); },
-    })));
+  const rows = quests.map((q) => {
 
-  const rows = page.items.map((c) => {
-    const $row = el('li', { class: 'flex items-center gap-3 py-2 border-b border-base-300' },
-      el('input', {
-        type: 'checkbox', class: 'checkbox', checked: c.completed, title: c.completed ? 'Reopen' : 'Complete',
-        onchange: action(async () => {
-          await api(c.completed ? 'DELETE' : 'PUT', `/households/${h.id}/chores/${c.id}/completion`);
-          rerender();
-        }),
-      }),
+    const $row = el('li', { class: 'flex flex-wrap items-center gap-2 py-2 border-b border-base-300' },
       el('div', { class: 'flex-1 min-w-0' },
-        el('div', { class: c.completed ? 'line-through opacity-60' : '', text: c.title }),
-        el('div', { class: 'text-xs opacity-60' },
-          c.assignee_id ? `→ ${nameOf[c.assignee_id] || 'former member'}` : 'Unassigned',
-          c.due_on ? ` · due ${c.due_on}` : '')),
-      el('button', {
+        el('div', { class: 'font-medium', text: q.name }),
+        el('div', { class: 'text-xs opacity-60', text: `${q.points} points · ${q.repeat_days} day(s)` }),
+        q.notes ? el('div', { class: 'text-xs opacity-70 mt-1', text: q.notes }) : null),
+      unlocked && el('button', {
         class: 'btn btn-ghost btn-xs', text: 'Edit',
         onclick: () => $row.replaceWith(el('li', { class: 'py-2' }, form({
-          fields: choreFields(c), submit: 'Save', inline: true,
-          onSubmit: async (v) => { await api('PUT', `/households/${h.id}/chores/${c.id}`, { ...toBody(v), description: c.description }); rerender(); },
+          fields: questFields(q), submit: 'Save', inline: true,
+          onSubmit: async (v) => {
+            await adminRequest('PUT', `/households/${h.id}/quests/${q.id}`, toBody(v));
+            rerender();
+          },
         }))),
       }),
-      el('button', {
+      unlocked && el('button', {
         class: 'btn btn-ghost btn-xs text-error', text: 'Delete',
-        onclick: confirmClick('Sure?', async () => { await api('DELETE', `/households/${h.id}/chores/${c.id}`); rerender(); }),
+        onclick: confirmClick('Sure?', async () => {
+          await adminRequest('DELETE', `/households/${h.id}/quests/${q.id}`);
+          rerender();
+        }),
       }));
     return $row;
   });
 
-  $root.replaceChildren(card(null,
-    el('div', { class: 'flex items-center justify-between' }, el('h3', { class: 'font-semibold', text: 'Chores' }), filter),
-    el('ul', {}, rows.length ? rows : el('li', { class: 'opacity-60 py-2', text: 'Nothing here.' })),
-    page.next_offset !== null && el('p', { class: 'text-xs opacity-60', text: 'Showing the first 100.' }),
-    el('div', { class: 'divider my-0' }),
-    form({
-      fields: choreFields(), submit: 'Add chore', inline: true,
-      onSubmit: async (v) => { await api('POST', `/households/${h.id}/chores`, toBody(v)); rerender(); },
+  const addForm = unlocked && form({
+    fields: questFields(), submit: 'Add quest', inline: true,
+    onSubmit: async (v) => {
+      await adminRequest('POST', `/households/${h.id}/quests`, toBody(v));
+      rerender();
+    },
+  });
+
+  const libraryRows = (library.items || []).map((item) => el('li', { class: 'flex items-center justify-between py-1.5 border-b border-base-300 text-sm' },
+    el('div', { class: 'flex-1 min-w-0' },
+      el('span', { class: 'font-medium', text: item.name }),
+      el('span', { class: 'text-xs opacity-60 ml-2', text: `${item.points} points · ${item.repeat_days} day(s)` }),
+      item.notes ? el('div', { class: 'text-xs opacity-70', text: item.notes }) : null),
+    unlocked && el('button', {
+      class: 'btn btn-ghost btn-xs', text: 'Add',
+      onclick: action(async () => {
+        await adminRequest('POST', `/households/${h.id}/quests/from-library`, { library_id: item.id });
+        rerender();
+      }),
     })));
+
+  return card(null,
+    el('h3', { class: 'font-semibold', text: 'Manage quests' }),
+    rows.length
+      ? el('ul', {}, rows)
+      : el('p', { class: 'opacity-70 py-2', text: 'No quests yet. Add one below or browse the library.' }),
+    page.next_offset !== null && page.next_offset !== undefined && el('p', { class: 'text-xs opacity-60', text: 'Showing the first 100.' }),
+    addForm && el('div', { class: 'divider my-0' }),
+    addForm,
+    el('div', { class: 'divider my-0' }),
+    el('div', { class: 'space-y-2' },
+      el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Quest Library' }),
+      el('ul', {}, libraryRows)));
+}
+
+// ── Rewards ───────────────────────────────────────────────────────────────────
+
+// rewardCost turns the cost input into the request value without judging it: a
+// numeric string is sent as a number, anything else (blank, "abc") as typed, so
+// the server decides what is invalid and reports it on the cost field.
+function rewardCost(val) {
+  if (String(val).trim() === '') return val;
+  const n = Number(val);
+  return Number.isNaN(n) ? val : n;
+}
+
+// rewardsTab lists the household's rewards as description and cost. Rewards are
+// a list only: no control here changes anyone's points. Add, edit, delete and
+// library Add show while management is unlocked, and every write carries
+// X-Admin-PIN (adminRequest).
+async function rewardsTab(h, $root) {
+  const rerender = () => { $root.replaceChildren(); rewardsTab(h, $root).catch((err) => showError($root, err)); };
+  const visible = managementVisible();
+  const unlocked = visible && managementUnlocked();
+  const base = `/households/${h.id}/rewards`;
+
+  const [page, library] = await Promise.all([
+    api('GET', base),
+    visible ? api('GET', '/reward-library') : { items: [] },
+  ]);
+  const rewards = page.items || [];
+  const costText = (r) => `${r.cost} points`;
+  const toBody = (v) => ({ description: v.description, cost: rewardCost(v.cost) });
+  const rewardFields = (r = {}) => [
+    { name: 'description', label: 'Description', required: true, value: r.description },
+    { name: 'cost', label: 'Cost (points)', type: 'number', value: r.cost ?? '' },
+  ];
+
+  const rows = rewards.map((r) => {
+    const $row = el('li', { class: 'flex flex-wrap items-center gap-2 py-2 border-b border-base-300' },
+      el('div', { class: 'flex-1 min-w-0' },
+        el('div', { class: 'font-medium', text: r.description }),
+        el('div', { class: 'text-xs opacity-60', text: costText(r) })),
+      unlocked && el('button', {
+        class: 'btn btn-ghost btn-xs', text: 'Edit',
+        onclick: () => $row.replaceWith(el('li', { class: 'py-2' }, form({
+          fields: rewardFields(r), submit: 'Save', inline: true,
+          onSubmit: async (v) => { await adminRequest('PUT', `${base}/${r.id}`, toBody(v)); rerender(); },
+        }))),
+      }),
+      unlocked && el('button', {
+        class: 'btn btn-ghost btn-xs text-error', text: 'Delete',
+        onclick: confirmClick('Sure?', async () => { await adminRequest('DELETE', `${base}/${r.id}`); rerender(); }),
+      }));
+    return $row;
+  });
+
+  const addForm = unlocked && form({
+    fields: rewardFields(), submit: 'Add reward', inline: true,
+    onSubmit: async (v) => { await adminRequest('POST', base, toBody(v)); rerender(); },
+  });
+
+  // In the administrator's view with the admin PIN set but not entered, the
+  // list is read-only until the PIN unlocks management.
+  const unlockForm = visible && !unlocked && pinForm({
+    label: 'Admin PIN',
+    submit: 'Unlock',
+    onPin: async (pin) => {
+      await api('POST', `/households/${h.id}/admin-pin/verify`, { pin });
+      adminPin = pin;
+      rerender();
+    },
+  });
+
+  const libraryRows = (library.items || []).map((item) => el('li', { class: 'flex items-center justify-between py-1.5 border-b border-base-300 text-sm' },
+    el('div', { class: 'flex-1 min-w-0' },
+      el('span', { class: 'font-medium', text: item.description }),
+      el('span', { class: 'text-xs opacity-60 ml-2', text: costText(item) })),
+    unlocked && el('button', {
+      class: 'btn btn-ghost btn-xs', text: 'Add',
+      onclick: action(async () => {
+        await adminRequest('POST', `${base}/from-library`, { library_id: item.id });
+        rerender();
+      }),
+    })));
+
+  $root.replaceChildren(card(null,
+    el('h3', { class: 'font-semibold', text: 'Rewards' }),
+    rows.length
+      ? el('ul', {}, rows)
+      : el('p', { class: 'opacity-70 py-2', text: 'No rewards yet. Add one below or browse the library for ideas.' }),
+    unlockForm && el('p', { class: 'text-sm opacity-70', text: 'Enter the admin PIN to manage rewards.' }),
+    unlockForm,
+    addForm && el('div', { class: 'divider my-0' }),
+    addForm,
+    visible && el('div', { class: 'divider my-0' }),
+    visible && el('div', { class: 'space-y-2' },
+      el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Reward Library' }),
+      el('ul', {}, libraryRows))));
+}
+
+// ── Family ────────────────────────────────────────────────────────────────────
+
+async function familyTab(h, $root) {
+  const rerender = () => familyTab(h, $root).catch((err) => showError($root, err));
+
+  if (!managementUnlocked()) {
+    $root.replaceChildren(card(null,
+      el('h3', { class: 'font-semibold', text: 'Family' }),
+      el('p', { class: 'text-sm opacity-70', text: 'Enter the admin PIN to manage the family.' }),
+      pinForm({
+        label: 'Admin PIN',
+        submit: 'Unlock',
+        onPin: async (pin) => {
+          await api('POST', `/households/${h.id}/admin-pin/verify`, { pin });
+          adminPin = pin;
+          rerender();
+        },
+      })));
+    return;
+  }
+
+  const base = `/households/${h.id}/family-members`;
+  const members = (await api('GET', base)).items;
+
+  const rows = members.map((m) => {
+    const $row = el('li', { class: 'flex flex-wrap items-center gap-2 py-2 border-b border-base-300' },
+      el('div', { class: 'flex-1 min-w-0' },
+        el('div', { text: m.name }),
+        el('div', { class: 'text-xs opacity-60', text: `${m.points} points` })),
+      el('span', { class: 'badge badge-sm', text: m.has_pin ? 'PIN' : 'No PIN' }),
+      el('button', {
+        class: 'btn btn-ghost btn-xs', text: 'Rename',
+        onclick: () => $row.replaceWith(el('li', { class: 'py-2' }, form({
+          fields: [{ name: 'name', label: 'Name', required: true, value: m.name }],
+          submit: 'Save', inline: true,
+          onSubmit: async (v) => { await adminRequest('PUT', `${base}/${m.id}`, { name: v.name }); rerender(); },
+        }))),
+      }),
+      el('button', {
+        class: 'btn btn-ghost btn-xs', text: m.has_pin ? 'Change PIN' : 'Set PIN',
+        onclick: () => $row.replaceWith(el('li', { class: 'py-2' },
+          el('p', { class: 'text-sm', text: `New PIN for ${m.name}` }),
+          pinForm({
+            submit: 'Save PIN',
+            onPin: async (pin) => { await adminRequest('PUT', `${base}/${m.id}/pin`, { pin }); rerender(); },
+          }))),
+      }),
+      m.has_pin && el('button', {
+        class: 'btn btn-ghost btn-xs', text: 'Clear PIN',
+        onclick: confirmClick('Sure?', async () => { await adminRequest('DELETE', `${base}/${m.id}/pin`); rerender(); }),
+      }),
+      el('button', {
+        class: 'btn btn-ghost btn-xs text-error', text: 'Remove',
+        onclick: confirmClick('Sure?', async () => { await adminRequest('DELETE', `${base}/${m.id}`); rerender(); }),
+      }));
+    return $row;
+  });
+
+  const addForm = form({
+    fields: [
+      { name: 'name', label: 'Name', required: true },
+      { name: 'pin', label: 'PIN (optional, 4 digits)', type: 'password', autocomplete: 'off' },
+    ],
+    submit: 'Add member', inline: true,
+    onSubmit: async (v) => {
+      const body = { name: v.name };
+      if (v.pin !== '') { checkPin(v.pin); body.pin = v.pin; }
+      await adminRequest('POST', base, body);
+      rerender();
+    },
+  });
+
+  $root.replaceChildren(
+    card(null,
+      el('h3', { class: 'font-semibold', text: 'Family' }),
+      rows.length
+        ? el('ul', {}, rows)
+        : el('p', { class: 'opacity-70', text: 'No family members yet. Add one to get started.' }),
+      el('div', { class: 'divider my-0' }),
+      addForm),
+    el('div', { class: 'h-4' }),
+    adminPinCard(h, rerender));
+}
+
+// adminPinCard sets, changes or removes the admin PIN. The PIN itself is never
+// shown back: only whether one is set.
+function adminPinCard(h, rerender) {
+  const $err = el('div');
+  return card(null,
+    el('h3', { class: 'font-semibold', text: 'Admin PIN' }),
+    el('p', { class: 'text-sm', text: adminPinState.set ? 'Admin PIN set' : 'No admin PIN' }),
+    $err,
+    pinForm({
+      label: adminPinState.set ? 'New admin PIN' : 'Admin PIN',
+      submit: adminPinState.set ? 'Change admin PIN' : 'Set admin PIN',
+      onPin: async (pin) => {
+        await adminRequest('PUT', `/households/${h.id}/admin-pin`, { pin });
+        adminPinState.set = true;
+        adminPin = pin;
+        rerender();
+      },
+    }),
+    adminPinState.set && el('button', {
+      class: 'btn btn-ghost btn-sm text-error', text: 'Remove admin PIN',
+      onclick: confirmClick('Sure?', async () => {
+        try {
+          await adminRequest('DELETE', `/households/${h.id}/admin-pin`);
+        } catch (err) {
+          showError($err, pinFailure(err));
+          return;
+        }
+        adminPinState.set = false;
+        adminPin = null;
+        rerender();
+      }),
+    }));
 }
 
 // ── Events ────────────────────────────────────────────────────────────────────
@@ -564,7 +1145,7 @@ async function eventsTab(h, $root) {
         const tagSet = new Set(currentTags);
         const memberRows = members.map((m) => {
           const isTaggable = !!m.taggable;
-          const isChecked = tagSet.has(m.user_id);
+          const isChecked = tagSet.has(m.member_id);
           const cb = el('input', {
             type: 'checkbox',
             class: 'checkbox checkbox-xs',
@@ -572,10 +1153,10 @@ async function eventsTab(h, $root) {
             disabled: !isTaggable,
           });
           if (isTaggable) {
-            tagCheckboxes.push({ id: m.user_id, input: cb });
+            tagCheckboxes.push({ id: m.member_id, input: cb });
           }
 
-          let labelText = m.display_name;
+          let labelText = m.name;
           if (!isTaggable) {
             let reasonText = m.reason;
             if (m.reason === 'duplicate_name') reasonText = 'duplicate name';
@@ -624,7 +1205,7 @@ async function eventsTab(h, $root) {
         });
 
         $picker.append(
-          el('div', { class: 'font-semibold text-xs', text: 'Tag household members' }),
+          el('div', { class: 'font-semibold text-xs', text: 'Tag family members' }),
           el('div', { class: 'space-y-0.5' }, memberRows),
           el('div', { class: 'flex gap-2 mt-2' }, $saveBtn, $cancelBtn));
       };
@@ -660,49 +1241,6 @@ async function eventsTab(h, $root) {
   $root.replaceChildren(card(null,
     el('div', { class: 'flex items-center justify-between' }, el('h3', { class: 'font-semibold', text: 'Calendar' }), nav),
     el('ul', {}, rows.length ? rows : el('li', { class: 'opacity-60 py-2', text: 'No events this month.' }))));
-}
-
-// ── Members ───────────────────────────────────────────────────────────────────
-
-async function membersTab(h, $root) {
-  const members = await membersFor(h);
-  const isAdmin = h.role === 'admin';
-  const me = session.user.id;
-  const rerender = () => { $root.replaceChildren(); membersTab(h, $root).catch((err) => showError($root, err)); };
-  const $inviteResult = el('div');
-
-  const rows = members.map((m) => el('li', { class: 'flex items-center gap-3 py-2 border-b border-base-300' },
-    el('span', { class: 'flex-1', text: m.display_name + (m.user_id === me ? ' (you)' : '') }),
-    el('span', { class: 'badge', text: m.role }),
-    isAdmin && el('button', {
-      class: 'btn btn-ghost btn-xs', text: m.role === 'admin' ? 'Make member' : 'Make admin',
-      onclick: action(async () => {
-        await api('PUT', `/households/${h.id}/members/${m.user_id}`, { role: m.role === 'admin' ? 'member' : 'admin' });
-        if (m.user_id === me) return homeView();
-        rerender();
-      }),
-    }),
-    (isAdmin || m.user_id === me) && el('button', {
-      class: 'btn btn-ghost btn-xs text-error', text: m.user_id === me ? 'Leave' : 'Remove',
-      onclick: confirmClick('Sure?', async () => {
-        await api('DELETE', `/households/${h.id}/members/${m.user_id}`);
-        if (m.user_id === me) return homeView();
-        rerender();
-      }),
-    })));
-
-  $root.replaceChildren(card(null,
-    el('h3', { class: 'font-semibold', text: 'Members' }),
-    el('ul', {}, rows),
-    isAdmin && el('div', { class: 'space-y-2' },
-      el('button', {
-        class: 'btn btn-sm', text: 'Create invite code',
-        onclick: action(async () => {
-          const inv = await api('POST', `/households/${h.id}/invites`);
-          $inviteResult.replaceChildren(alertBox('info', `Code ${inv.code} — single use, expires ${fmtDate(inv.expires_at)}.`));
-        }, $inviteResult),
-      }),
-      $inviteResult)));
 }
 
 // ── Account ───────────────────────────────────────────────────────────────────
@@ -949,7 +1487,7 @@ async function accountView() {
       : card('Password', el('p', { class: 'text-sm opacity-70', text: 'You sign in with Google; no password is set.' })),
     card('Signed-in devices', $sessionsErr, el('ul', {}, sessionRows)),
     card('Delete account',
-      el('p', { class: 'text-sm', text: 'Permanently deletes your account. Households where you are the only member are deleted too.' }),
+      el('p', { class: 'text-sm', text: 'Permanently deletes your account, and with it your household and its family members.' }),
       hasPassword
         ? form({
             fields: [{ name: 'password', label: 'Confirm password', type: 'password', required: true, autocomplete: 'current-password' }],

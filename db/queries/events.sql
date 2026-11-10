@@ -1,4 +1,4 @@
--- Every event query is scoped by household_id; see chores.sql.
+-- Every event query is scoped by household_id; see quests.sql.
 
 -- name: CreateEvent :one
 INSERT INTO events (id, household_id, title, description, location, starts_at, ends_at, all_day, created_by, created_at, updated_at)

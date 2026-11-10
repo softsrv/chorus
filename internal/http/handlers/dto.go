@@ -14,8 +14,6 @@ import (
 // from the sqlc models so schema changes can't silently change the API (or
 // leak columns such as password_hash).
 
-const dateLayout = "2006-01-02"
-
 type listResponse[T any] struct {
 	Items []T `json:"items"`
 }
@@ -107,47 +105,113 @@ func toHousehold(h app.Household) householdJSON {
 	}
 }
 
-type memberJSON struct {
-	UserID      uuid.UUID `json:"user_id"`
-	DisplayName string    `json:"display_name"`
-	Role        string    `json:"role"`
-	JoinedAt    time.Time `json:"joined_at"`
+type familyMemberJSON struct {
+	ID     uuid.UUID `json:"id"`
+	Name   string    `json:"name"`
+	HasPIN bool      `json:"has_pin"`
+	Points int32     `json:"points"`
 }
 
-func toMember(m db.ListHouseholdMembersRow) memberJSON {
-	return memberJSON{UserID: m.UserID, DisplayName: m.DisplayName, Role: m.Role, JoinedAt: m.JoinedAt.Time.UTC()}
+func toFamilyMember(m db.FamilyMember) familyMemberJSON {
+	return familyMemberJSON{
+		ID:     m.ID,
+		Name:   m.Name,
+		HasPIN: m.PinHash.Valid && m.PinHash.String != "",
+		Points: m.Points,
+	}
 }
 
-type choreJSON struct {
+// questJSON is a household quest. The lifecycle fields (claimed_by,
+// claimed_at, done_at, completed_at, available_at) are read-only and change
+// only through quest actions. available says the quest is in the pool;
+// awaiting_approval says a member marked it done and the administrator has
+// not yet approved or sent it back.
+type questJSON struct {
+	ID               uuid.UUID  `json:"id"`
+	HouseholdID      uuid.UUID  `json:"household_id"`
+	LibraryID        *uuid.UUID `json:"library_id"`
+	Name             string     `json:"name"`
+	Points           int32      `json:"points"`
+	RepeatDays       int32      `json:"repeat_days"`
+	Notes            string     `json:"notes"`
+	Available        bool       `json:"available"`
+	ClaimedBy        *uuid.UUID `json:"claimed_by"`
+	ClaimedAt        *time.Time `json:"claimed_at"`
+	DoneAt           *time.Time `json:"done_at"`
+	AwaitingApproval bool       `json:"awaiting_approval"`
+	CompletedAt      *time.Time `json:"completed_at"`
+	AvailableAt      *time.Time `json:"available_at"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+}
+
+func toQuest(q db.HouseholdQuest) questJSON {
+	return questJSON{
+		ID:               q.ID,
+		HouseholdID:      q.HouseholdID,
+		LibraryID:        q.LibraryID,
+		Name:             q.Name,
+		Points:           q.Points,
+		RepeatDays:       q.RepeatDays,
+		Notes:            q.Notes,
+		Available:        app.QuestAvailable(q, time.Now()),
+		ClaimedBy:        q.ClaimedBy,
+		ClaimedAt:        timePtr(q.ClaimedAt),
+		DoneAt:           timePtr(q.DoneAt),
+		AwaitingApproval: q.DoneAt.Valid,
+		CompletedAt:      timePtr(q.CompletedAt),
+		AvailableAt:      timePtr(q.AvailableAt),
+		CreatedAt:        q.CreatedAt.Time.UTC(),
+		UpdatedAt:        q.UpdatedAt.Time.UTC(),
+	}
+}
+
+// libraryQuestJSON is a quest of the global, read-only library.
+type libraryQuestJSON struct {
+	ID         uuid.UUID `json:"id"`
+	Name       string    `json:"name"`
+	Points     int32     `json:"points"`
+	RepeatDays int32     `json:"repeat_days"`
+	Notes      string    `json:"notes"`
+}
+
+func toLibraryQuest(q db.QuestLibrary) libraryQuestJSON {
+	return libraryQuestJSON{ID: q.ID, Name: q.Name, Points: q.Points, RepeatDays: q.RepeatDays, Notes: q.Notes}
+}
+
+// rewardJSON is a household reward. library_id is set when it was adopted
+// from the library.
+type rewardJSON struct {
 	ID          uuid.UUID  `json:"id"`
 	HouseholdID uuid.UUID  `json:"household_id"`
-	Title       string     `json:"title"`
+	LibraryID   *uuid.UUID `json:"library_id"`
 	Description string     `json:"description"`
-	AssigneeID  *uuid.UUID `json:"assignee_id"`
-	DueOn       *string    `json:"due_on"`
-	Completed   bool       `json:"completed"`
-	CompletedAt *time.Time `json:"completed_at"`
-	CompletedBy *uuid.UUID `json:"completed_by"`
-	CreatedBy   *uuid.UUID `json:"created_by"`
+	Cost        int32      `json:"cost"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
-func toChore(c db.Chore) choreJSON {
-	return choreJSON{
-		ID:          c.ID,
-		HouseholdID: c.HouseholdID,
-		Title:       c.Title,
-		Description: c.Description,
-		AssigneeID:  c.AssigneeID,
-		DueOn:       dateString(c.DueOn),
-		Completed:   c.CompletedAt.Valid,
-		CompletedAt: timePtr(c.CompletedAt),
-		CompletedBy: c.CompletedBy,
-		CreatedBy:   c.CreatedBy,
-		CreatedAt:   c.CreatedAt.Time.UTC(),
-		UpdatedAt:   c.UpdatedAt.Time.UTC(),
+func toReward(r db.HouseholdReward) rewardJSON {
+	return rewardJSON{
+		ID:          r.ID,
+		HouseholdID: r.HouseholdID,
+		LibraryID:   r.LibraryID,
+		Description: r.Description,
+		Cost:        r.Cost,
+		CreatedAt:   r.CreatedAt.Time.UTC(),
+		UpdatedAt:   r.UpdatedAt.Time.UTC(),
 	}
+}
+
+// libraryRewardJSON is a reward of the global, read-only library.
+type libraryRewardJSON struct {
+	ID          uuid.UUID `json:"id"`
+	Description string    `json:"description"`
+	Cost        int32     `json:"cost"`
+}
+
+func toLibraryReward(r db.RewardLibrary) libraryRewardJSON {
+	return libraryRewardJSON{ID: r.ID, Description: r.Description, Cost: r.Cost}
 }
 
 func mapSlice[T, U any](in []T, f func(T) U) []U {
@@ -156,14 +220,6 @@ func mapSlice[T, U any](in []T, f func(T) U) []U {
 		out[i] = f(v)
 	}
 	return out
-}
-
-func dateString(d pgtype.Date) *string {
-	if !d.Valid {
-		return nil
-	}
-	s := d.Time.Format(dateLayout)
-	return &s
 }
 
 func timePtr(t pgtype.Timestamptz) *time.Time {

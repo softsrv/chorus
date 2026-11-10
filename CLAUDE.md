@@ -11,8 +11,9 @@ make dev              # Postgres + smtp4dev → migrate → app container (air) 
 make app              # Just the app container, foreground, hot reload (Ctrl-C stops it)
 make run              # One-off app container without hot reload
 make test             # Unit tests (-race)
+make test-js          # Web client unit tests (node --test web/jstest/quests.test.mjs; needs Node 22+)
 make test-integration # Migrates chorus_test, then runs integration tests against it
-make check            # vet + unit + integration + govulncheck (what CI runs)
+make check            # vet + unit + web JS unit + integration + govulncheck (what CI runs)
 make vet / fmt / lint
 
 # Database
@@ -65,7 +66,7 @@ docs/API.md                     API contract for client developers
 
 ### Households
 
-Roles `admin`/`member`. Last-admin invariants (`ErrLastAdmin`) are enforced under row locks (`withAdminLock`). Invites are single-use Crockford-base32 codes (hash stored), 7-day expiry, redeemed under `FOR UPDATE`. The `chores → household_members` composite FK unassigns chores when the assignee leaves.
+A household has exactly one login account, its administrator. Family members belong to the household as names and optional 4-digit PINs. Multi-login members and invites are retired. Household Delete and first-sign-in provisioning serialize on the users row lock, so a sign-in overlapping a delete still ends with a household.
 
 ### Middleware chain (outermost → innermost)
 
@@ -73,7 +74,7 @@ Roles `admin`/`member`. Last-admin invariants (`ErrLastAdmin`) are enforced unde
 
 ## Database
 
-Migrations run manually (`make migrate-up`), never on startup. After editing `db/queries/*.sql`, run `make sqlc-generate` (CI fails if `internal/db` is stale). Daily 03:00 job (`app.RunTokenCleanup`) purges stale tokens and invites.
+Migrations run manually (`make migrate-up`), never on startup. After editing `db/queries/*.sql`, run `make sqlc-generate` (CI fails if `internal/db` is stale). Daily 03:00 job (`app.RunTokenCleanup`) purges stale tokens.
 
 ## Environment
 

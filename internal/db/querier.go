@@ -12,41 +12,57 @@ import (
 )
 
 type Querier interface {
+	// Puts a quest back in the pool. Only its current holder can abandon it, and
+	// not while it waits for approval.
+	AbandonQuest(ctx context.Context, arg AbandonQuestParams) (HouseholdQuest, error)
 	AddHouseholdMember(ctx context.Context, arg AddHouseholdMemberParams) error
+	AddMemberPoints(ctx context.Context, arg AddMemberPointsParams) (FamilyMember, error)
+	// Completes a pending quest. The pending row is locked first, and the
+	// done_at check is re-read under the lock, so of two concurrent approvals
+	// exactly one gets a row. The repeat countdown starts now. credited_member_id
+	// is the holder to credit, read before claimed_by is cleared.
+	ApproveQuest(ctx context.Context, arg ApproveQuestParams) (ApproveQuestRow, error)
+	ClaimHouseholdProvisioning(ctx context.Context, id uuid.UUID) (int64, error)
+	// Assigns an available quest to a family member. The availability check and
+	// the write are one statement, so of two concurrent claims exactly one
+	// matches; the other gets no row.
+	ClaimQuest(ctx context.Context, arg ClaimQuestParams) (HouseholdQuest, error)
 	// Single use: conditional on used_at IS NULL, unexpired, and the flow's
 	// purpose, so a state can't be replayed or used to complete another flow.
 	ConsumeOAuthState(ctx context.Context, arg ConsumeOAuthStateParams) (OauthState, error)
 	CountRecentPasswordResetsByEmail(ctx context.Context, email string) (int64, error)
 	CountRecentVerificationCodesByUserID(ctx context.Context, userID uuid.UUID) (int64, error)
-	// Every chore query is scoped by household_id. Membership is checked by the
-	// service layer first; the household_id predicate guarantees a chore ID from
-	// another household can never be read or modified through this one.
-	CreateChore(ctx context.Context, arg CreateChoreParams) (Chore, error)
-	// Every event query is scoped by household_id; see chores.sql.
+	// Every event query is scoped by household_id; see quests.sql.
 	CreateEvent(ctx context.Context, arg CreateEventParams) (Event, error)
+	CreateFamilyMember(ctx context.Context, arg CreateFamilyMemberParams) (FamilyMember, error)
 	// Creates a passwordless account for a Google sign-in. Google has verified the
 	// email, so the account starts verified.
 	CreateGoogleUser(ctx context.Context, arg CreateGoogleUserParams) (User, error)
 	CreateHousehold(ctx context.Context, arg CreateHouseholdParams) (Household, error)
+	CreateHouseholdQuest(ctx context.Context, arg CreateHouseholdQuestParams) (HouseholdQuest, error)
+	CreateHouseholdReward(ctx context.Context, arg CreateHouseholdRewardParams) (HouseholdReward, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
-	DeleteChore(ctx context.Context, arg DeleteChoreParams) (int64, error)
+	DeleteAdminPin(ctx context.Context, householdID uuid.UUID) (int64, error)
 	DeleteEvent(ctx context.Context, arg DeleteEventParams) (int64, error)
 	DeleteExpiredRefreshTokens(ctx context.Context) (int64, error)
+	DeleteFamilyMember(ctx context.Context, arg DeleteFamilyMemberParams) (int64, error)
 	// Returns the deleted row so its token can be revoked at Google afterwards.
 	DeleteGoogleCalendarConnectionByUser(ctx context.Context, userID uuid.UUID) (GoogleCalendarConnection, error)
 	DeleteHousehold(ctx context.Context, id uuid.UUID) error
 	// Only the member who set it can clear it.
 	DeleteHouseholdCalendar(ctx context.Context, arg DeleteHouseholdCalendarParams) (int64, error)
+	DeleteHouseholdQuest(ctx context.Context, arg DeleteHouseholdQuestParams) (int64, error)
+	DeleteHouseholdReward(ctx context.Context, arg DeleteHouseholdRewardParams) (int64, error)
 	// Deletes every household where the user is the only member.
 	DeleteSoleMemberHouseholds(ctx context.Context, userID uuid.UUID) error
-	DeleteStaleHouseholdInvites(ctx context.Context) (int64, error)
 	DeleteStaleOAuthStates(ctx context.Context) (int64, error)
 	DeleteStalePasswordResetTokens(ctx context.Context) (int64, error)
 	DeleteStaleSignInHandoffs(ctx context.Context) (int64, error)
 	DeleteStaleVerificationCodes(ctx context.Context) (int64, error)
 	DeleteUserByID(ctx context.Context, id uuid.UUID) error
-	GetChore(ctx context.Context, arg GetChoreParams) (Chore, error)
+	GetAdminPin(ctx context.Context, householdID uuid.UUID) (HouseholdAdminPin, error)
 	GetEvent(ctx context.Context, arg GetEventParams) (Event, error)
+	GetFamilyMember(ctx context.Context, arg GetFamilyMemberParams) (FamilyMember, error)
 	GetGoogleCalendarConnectionByUser(ctx context.Context, userID uuid.UUID) (GoogleCalendarConnection, error)
 	// Every family-calendar query is scoped by household_id; callers check
 	// membership with getHousehold first.
@@ -55,12 +71,15 @@ type Querier interface {
 	// the household doesn't exist or the user isn't a member; callers treat both
 	// as "not found" so household IDs can't be probed.
 	GetHouseholdForMember(ctx context.Context, arg GetHouseholdForMemberParams) (GetHouseholdForMemberRow, error)
-	GetHouseholdInviteByHashForUpdate(ctx context.Context, tokenHash string) (HouseholdInvite, error)
 	GetHouseholdMember(ctx context.Context, arg GetHouseholdMemberParams) (HouseholdMember, error)
+	GetHouseholdQuest(ctx context.Context, arg GetHouseholdQuestParams) (HouseholdQuest, error)
+	GetHouseholdReward(ctx context.Context, arg GetHouseholdRewardParams) (HouseholdReward, error)
 	GetOldestRecentVerificationCode(ctx context.Context, userID uuid.UUID) (pgtype.Timestamptz, error)
 	GetPasswordResetTokenByHash(ctx context.Context, tokenHash string) (PasswordResetToken, error)
+	GetQuestLibraryItem(ctx context.Context, id uuid.UUID) (QuestLibrary, error)
 	GetRefreshTokenByHash(ctx context.Context, tokenHash string) (RefreshToken, error)
 	GetRefreshTokenByID(ctx context.Context, id uuid.UUID) (RefreshToken, error)
+	GetRewardLibraryItem(ctx context.Context, id uuid.UUID) (RewardLibrary, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByGoogleSubject(ctx context.Context, googleSubject pgtype.Text) (User, error)
 	GetUserByID(ctx context.Context, id uuid.UUID) (User, error)
@@ -71,50 +90,80 @@ type Querier interface {
 	GetVerificationCodeByTokenHash(ctx context.Context, tokenHash string) (EmailVerificationCode, error)
 	IncrementFailedLoginAttempts(ctx context.Context, id uuid.UUID) error
 	InsertEmailVerificationCode(ctx context.Context, arg InsertEmailVerificationCodeParams) (EmailVerificationCode, error)
-	InsertHouseholdInvite(ctx context.Context, arg InsertHouseholdInviteParams) (HouseholdInvite, error)
 	InsertOAuthState(ctx context.Context, arg InsertOAuthStateParams) (OauthState, error)
 	InsertPasswordResetToken(ctx context.Context, arg InsertPasswordResetTokenParams) (PasswordResetToken, error)
 	InsertRefreshToken(ctx context.Context, arg InsertRefreshTokenParams) (RefreshToken, error)
 	InsertSignInHandoff(ctx context.Context, arg InsertSignInHandoffParams) (GoogleSignInHandoff, error)
 	ListActiveRefreshTokensByUserID(ctx context.Context, userID uuid.UUID) ([]RefreshToken, error)
-	// Households where the user is the only admin but other members remain.
-	// Used to block account deletion that would orphan a household.
-	ListAdminHouseholdsWithOtherMembers(ctx context.Context, userID uuid.UUID) ([]ListAdminHouseholdsWithOtherMembersRow, error)
-	ListChores(ctx context.Context, arg ListChoresParams) ([]Chore, error)
 	// Events overlapping [range_start, range_end).
 	ListEventsInRange(ctx context.Context, arg ListEventsInRangeParams) ([]Event, error)
-	ListHouseholdMembers(ctx context.Context, householdID uuid.UUID) ([]ListHouseholdMembersRow, error)
+	// Every family member query is scoped by household_id. Membership / admin
+	// authorization is checked by the service layer first; the household_id
+	// predicate guarantees a member ID from another household can never be
+	// read or modified through this one.
+	ListFamilyMembers(ctx context.Context, householdID uuid.UUID) ([]FamilyMember, error)
+	ListHouseholdQuests(ctx context.Context, arg ListHouseholdQuestsParams) ([]HouseholdQuest, error)
+	ListHouseholdRewards(ctx context.Context, householdID uuid.UUID) ([]HouseholdReward, error)
 	ListHouseholdsForUser(ctx context.Context, userID uuid.UUID) ([]ListHouseholdsForUserRow, error)
+	// Quests waiting for approval, oldest first, with the name of the member who
+	// holds each one.
+	ListPendingQuests(ctx context.Context, householdID uuid.UUID) ([]ListPendingQuestsRow, error)
+	// Household quest queries are scoped by household_id. Membership is checked
+	// by the service layer first; the household_id predicate guarantees a quest ID
+	// from another household can never be read or modified through this one.
+	// The quest library is global and read-only: there are no write queries on it.
+	ListQuestLibrary(ctx context.Context) ([]QuestLibrary, error)
+	// Household reward queries are scoped by household_id. Membership is checked
+	// by the service layer first; the household_id predicate guarantees a reward
+	// ID from another household can never be read or modified through this one.
+	// The reward library is global and read-only: there are no write queries on
+	// it. No query here touches family_members, so no reward operation can change
+	// anyone's points.
+	ListRewardLibrary(ctx context.Context) ([]RewardLibrary, error)
 	LockAccount(ctx context.Context, arg LockAccountParams) error
-	LockHouseholdAdmins(ctx context.Context, householdID uuid.UUID) ([]uuid.UUID, error)
+	// Locks the member row for the rest of the transaction. The lock conflicts
+	// with the key-share lock a foreign-key check takes, so rows that would point
+	// at this member wait until the transaction ends.
+	LockFamilyMember(ctx context.Context, arg LockFamilyMemberParams) (uuid.UUID, error)
+	LockUserProvisioning(ctx context.Context, id uuid.UUID) (pgtype.Timestamptz, error)
 	MarkGoogleCalendarConnectionBroken(ctx context.Context, userID uuid.UUID) (int64, error)
-	MarkHouseholdInviteUsed(ctx context.Context, arg MarkHouseholdInviteUsedParams) error
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
 	MarkPasswordResetTokenUsed(ctx context.Context, id uuid.UUID) (int64, error)
+	// The holder marks the quest done; it then waits for the administrator.
+	// No points move here.
+	MarkQuestDone(ctx context.Context, arg MarkQuestDoneParams) (HouseholdQuest, error)
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
 	MarkVerificationCodeUsed(ctx context.Context, id uuid.UUID) (int64, error)
 	// Single use: conditional on used_at IS NULL and unexpired, so two concurrent
 	// redemptions can't both succeed.
 	RedeemSignInHandoff(ctx context.Context, codeHash string) (uuid.UUID, error)
-	RemoveHouseholdMember(ctx context.Context, arg RemoveHouseholdMemberParams) (int64, error)
+	// Sends a pending quest back to its holder: it stays theirs, unfinished.
+	RejectQuest(ctx context.Context, arg RejectQuestParams) (HouseholdQuest, error)
+	// Re-arms first-sign-in provisioning for a user who has no household left.
+	ReleaseHouseholdProvisioning(ctx context.Context, id uuid.UUID) error
+	// Returns every quest the member holds to the pool, a quest awaiting approval
+	// included. done_at is cleared with the holder, so the done_at-needs-a-holder
+	// CHECK holds. No points move.
+	ReleaseMemberQuests(ctx context.Context, arg ReleaseMemberQuestsParams) error
+	RenameFamilyMember(ctx context.Context, arg RenameFamilyMemberParams) (FamilyMember, error)
 	ResetLoginAttempts(ctx context.Context, id uuid.UUID) error
 	RevokeAllUserRefreshTokens(ctx context.Context, userID uuid.UUID) error
 	RevokeOtherUserRefreshTokens(ctx context.Context, arg RevokeOtherUserRefreshTokensParams) error
 	RevokeRefreshToken(ctx context.Context, id uuid.UUID) error
-	SetChoreCompleted(ctx context.Context, arg SetChoreCompletedParams) (Chore, error)
-	SetChoreOpen(ctx context.Context, arg SetChoreOpenParams) (Chore, error)
 	SetEmailVerified(ctx context.Context, id uuid.UUID) error
+	SetFamilyMemberPin(ctx context.Context, arg SetFamilyMemberPinParams) (FamilyMember, error)
 	// Links a Google account to an existing user. Conditional on google_subject IS
 	// NULL so an account already linked to a Google identity is never relinked.
 	SetGoogleSubject(ctx context.Context, arg SetGoogleSubjectParams) (int64, error)
-	UpdateChore(ctx context.Context, arg UpdateChoreParams) (Chore, error)
 	UpdateDisplayName(ctx context.Context, arg UpdateDisplayNameParams) (User, error)
 	UpdateEvent(ctx context.Context, arg UpdateEventParams) (Event, error)
 	UpdateGoogleCalendarAccessToken(ctx context.Context, arg UpdateGoogleCalendarAccessTokenParams) (int64, error)
 	UpdateHousehold(ctx context.Context, arg UpdateHouseholdParams) (Household, error)
-	UpdateHouseholdMemberRole(ctx context.Context, arg UpdateHouseholdMemberRoleParams) (int64, error)
+	UpdateHouseholdQuest(ctx context.Context, arg UpdateHouseholdQuestParams) (HouseholdQuest, error)
+	UpdateHouseholdReward(ctx context.Context, arg UpdateHouseholdRewardParams) (HouseholdReward, error)
 	UpdatePasswordHash(ctx context.Context, arg UpdatePasswordHashParams) error
 	UpdateRefreshTokenLastUsed(ctx context.Context, arg UpdateRefreshTokenLastUsedParams) error
+	UpsertAdminPin(ctx context.Context, arg UpsertAdminPinParams) error
 	// One connection per user: a reconnect replaces the tokens and access level
 	// and clears the broken flag.
 	UpsertGoogleCalendarConnection(ctx context.Context, arg UpsertGoogleCalendarConnectionParams) (GoogleCalendarConnection, error)

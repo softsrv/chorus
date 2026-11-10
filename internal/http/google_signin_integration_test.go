@@ -145,7 +145,6 @@ func newGoogleTestServer(t *testing.T, fake *fakeGoogle) *testServer {
 		Queries: q, Pool: pool, AuthSvc: authSvc,
 		UserSvc:      app.NewUserService(q),
 		HouseholdSvc: app.NewHouseholdService(q, pool),
-		ChoreSvc:     app.NewChoreService(q),
 		GoogleSignIn: google,
 		JWTSecret:    secret,
 	})
@@ -309,6 +308,18 @@ func TestGoogle_NewUserSignIn(t *testing.T) {
 	s.expect(http.StatusOK, "GET", "/api/v1/me/sessions", tok.AccessToken, nil, &sessions)
 	if len(sessions.Items) != 1 || sessions.Items[0].DeviceName != "Sam's Laptop" || !sessions.Items[0].Current {
 		t.Errorf("sessions = %+v, want exactly one current session named \"Sam's Laptop\"", sessions.Items)
+	}
+
+	var households struct {
+		Items []struct {
+			ID   uuid.UUID `json:"id"`
+			Name string    `json:"name"`
+			Role string    `json:"role"`
+		} `json:"items"`
+	}
+	s.expect(http.StatusOK, "GET", "/api/v1/households", tok.AccessToken, nil, &households)
+	if len(households.Items) != 1 || households.Items[0].Role != "admin" {
+		t.Errorf("expected 1 admin household after Google sign-in, got %+v", households.Items)
 	}
 }
 

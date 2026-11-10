@@ -34,39 +34,6 @@ VALUES ($1, $2, $3, NOW());
 -- name: GetHouseholdMember :one
 SELECT * FROM household_members WHERE household_id = $1 AND user_id = $2;
 
--- name: ListHouseholdMembers :many
-SELECT m.user_id, m.role, m.joined_at, u.display_name
-FROM household_members m
-JOIN users u ON u.id = m.user_id
-WHERE m.household_id = $1
-ORDER BY u.display_name, m.user_id;
-
--- name: LockHouseholdAdmins :many
-SELECT user_id FROM household_members
-WHERE household_id = $1 AND role = 'admin'
-FOR UPDATE;
-
--- name: UpdateHouseholdMemberRole :execrows
-UPDATE household_members SET role = $3 WHERE household_id = $1 AND user_id = $2;
-
--- name: RemoveHouseholdMember :execrows
-DELETE FROM household_members WHERE household_id = $1 AND user_id = $2;
-
--- name: ListAdminHouseholdsWithOtherMembers :many
--- Households where the user is the only admin but other members remain.
--- Used to block account deletion that would orphan a household.
-SELECT h.id, h.name
-FROM households h
-JOIN household_members m ON m.household_id = h.id AND m.user_id = $1 AND m.role = 'admin'
-WHERE NOT EXISTS (
-    SELECT 1 FROM household_members a
-    WHERE a.household_id = h.id AND a.role = 'admin' AND a.user_id <> $1
-)
-AND EXISTS (
-    SELECT 1 FROM household_members o
-    WHERE o.household_id = h.id AND o.user_id <> $1
-);
-
 -- name: DeleteSoleMemberHouseholds :exec
 -- Deletes every household where the user is the only member.
 DELETE FROM households h
@@ -76,19 +43,3 @@ WHERE EXISTS (
 AND NOT EXISTS (
     SELECT 1 FROM household_members o WHERE o.household_id = h.id AND o.user_id <> $1
 );
-
--- name: InsertHouseholdInvite :one
-INSERT INTO household_invites (id, household_id, token_hash, created_by, expires_at, created_at)
-VALUES ($1, $2, $3, $4, $5, NOW())
-RETURNING *;
-
--- name: GetHouseholdInviteByHashForUpdate :one
-SELECT * FROM household_invites WHERE token_hash = $1 FOR UPDATE;
-
--- name: MarkHouseholdInviteUsed :exec
-UPDATE household_invites SET used_by = $2, used_at = NOW() WHERE id = $1;
-
--- name: DeleteStaleHouseholdInvites :execrows
-DELETE FROM household_invites
-WHERE (used_at IS NOT NULL AND used_at < NOW() - INTERVAL '7 days')
-   OR (expires_at < NOW() - INTERVAL '7 days');
