@@ -7,8 +7,9 @@ Chorus is a family chore and calendar app. This repo holds the backend JSON API 
 ## Commands
 
 ```bash
-make dev              # docker compose (Postgres + smtp4dev) → migrate → air + Tailwind watch
-make run              # Run without hot-reload (needs `make services-up` first)
+make dev              # Postgres + smtp4dev → migrate → app container (air) + Tailwind watch on host
+make app              # Just the app container, foreground, hot reload (Ctrl-C stops it)
+make run              # One-off app container without hot reload
 make test             # Unit tests (-race)
 make test-integration # Migrates chorus_test, then runs integration tests against it
 make check            # vet + unit + integration + govulncheck (what CI runs)
@@ -26,7 +27,7 @@ make prod             # Multi-stage, distroless, non-root image
 
 Single test: `go test -tags integration -run TestAPI_EndToEnd ./internal/http/` (needs `TEST_DATABASE_URL`; `set -a; . ./.env; set +a` loads it).
 
-Local services: Postgres on `localhost:5433` (databases `chorus` and `chorus_test`), smtp4dev SMTP on `:2525` with its web UI at http://localhost:5080. Verification and reset emails land there.
+Local stack (`docker-compose.yml`): the app runs in the `app` container (dev image `deploy/dev.Dockerfile`, Go + air, repo bind-mounted at `/src`) on http://localhost:8080. It reaches `postgres` and `smtp4dev` by service name over the internal `backend` network; compose overrides `DATABASE_URL`/`SMTP_HOST`/`SMTP_PORT` for it, so `.env` keeps host-side values. Published to the host (127.0.0.1 only): Postgres on `:5433` (databases `chorus` and `chorus_test`, used by host-side migrate and integration tests) and the smtp4dev web UI at http://localhost:5080, where verification and reset emails land. smtp4dev's SMTP port is not published.
 
 ## Architecture
 
