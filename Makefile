@@ -7,18 +7,20 @@ export
 
 .PHONY: dev run build test test-js test-integration test-cover fmt vet lint vulncheck check \
         services-up services-down services-reset \
-        daisyui-install tailwind tailwind-watch air \
+        daisyui-install tailwind tailwind-watch app \
         migrate-up migrate-down migrate-create migrate-status migrate-test \
         sqlc-generate docker-build prod clean
 
 ## ── Development ─────────────────────────────────────────────────────────────
 
-# Full hot-reload: Postgres + smtp4dev containers, then Go (air) + Tailwind watch.
+# Full hot-reload: Postgres + smtp4dev, migrate, then the app container (air
+# watching the bind-mounted source) + Tailwind watch on the host.
 dev: services-up migrate-up tailwind
-	$(MAKE) -j2 air tailwind-watch
+	$(MAKE) -j2 app tailwind-watch
 
+# Postgres + smtp4dev only (the app container is started by dev/run).
 services-up:
-	docker compose up -d --wait
+	docker compose up -d --wait postgres smtp4dev
 
 services-down:
 	docker compose down
@@ -27,11 +29,13 @@ services-down:
 services-reset:
 	docker compose down -v
 
-air:
-	air
+# App container in the foreground with hot reload; Ctrl-C stops it.
+app:
+	docker compose up --build app
 
+# One-off app container without hot reload.
 run:
-	go run ./cmd/app
+	docker compose run --rm --build --service-ports app go run ./cmd/app
 
 build:
 	go build -ldflags="-s -w" -o $(BIN_DIR)/$(APP_NAME) ./cmd/app

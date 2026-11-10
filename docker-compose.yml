@@ -1,8 +1,39 @@
-# Local development services. The app itself runs on the host (make dev) so
-# air can hot-reload it.
+# Local development stack. The app runs in a container with the source tree
+# bind-mounted and air hot-reloading it; Tailwind watch, migrations, and tests
+# run on the host.
+#
+# Networks:
+#   backend  internal: app <-> postgres <-> smtp4dev, by service name.
+#   default  only for the ports published to the host below (all 127.0.0.1).
+# smtp4dev's SMTP port is never published, so only the app can send it mail.
 name: chorus
 
 services:
+  app:
+    build:
+      context: ./deploy
+      dockerfile: dev.Dockerfile
+    env_file: .env
+    environment:
+      # Container-network addresses override the host-side values in .env
+      # (which migrate and the integration tests still use).
+      DATABASE_URL: postgres://chorus:chorus@postgres:5432/chorus?sslmode=disable
+      SMTP_HOST: smtp4dev
+      SMTP_PORT: "25"
+      PORT: "8080"
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - .:/src                            # hot reload: air watches the mounted source
+      - gomod:/go/pkg/mod                 # keep module + build caches across restarts
+      - gocache:/root/.cache/go-build
+    depends_on:
+      postgres:
+        condition: service_healthy
+      smtp4dev:
+        condition: service_started
+    networks: [backend, default]
+
   postgres:
     image: postgres:18-alpine
     environment:
@@ -10,7 +41,7 @@ services:
       POSTGRES_PASSWORD: chorus
       POSTGRES_DB: chorus
     ports:
-      - "127.0.0.1:5433:5432"
+      - "127.0.0.1:5433:5432"   # host access for make migrate-* and integration tests
     volumes:
       - pgdata:/var/lib/postgresql
       # Creates the chorus_test database used by integration tests.
@@ -20,12 +51,19 @@ services:
       interval: 2s
       timeout: 3s
       retries: 20
+    networks: [backend, default]
 
   smtp4dev:
     image: rnwood/smtp4dev:latest
     ports:
-      - "127.0.0.1:2525:25"   # SMTP
-      - "127.0.0.1:5080:80"   # web UI: read verification / reset emails here
+      - "127.0.0.1:5080:80"     # web UI: read verification / reset emails here
+    networks: [backend, default]
+
+networks:
+  backend:
+    internal: true
 
 volumes:
   pgdata:
+  gomod:
+  gocache:

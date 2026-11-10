@@ -6,7 +6,7 @@ Built on the softsrv starter: Go, Postgres (pgx + sqlc), golang-migrate, Tailwin
 
 ## Quick start
 
-Requires Go, Docker, and the `migrate`, `sqlc`, `air`, and `tailwindcss` CLIs.
+Requires Go, Docker, and the `migrate`, `sqlc`, and `tailwindcss` CLIs. The app runs in a container (`air` hot-reloads the bind-mounted source), so you don't need `air` installed locally.
 
 ```bash
 cp .env.example .env
