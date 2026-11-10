@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  ci:
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -48,7 +48,7 @@ jobs:
   # Builds the image on every run so Dockerfile breakage shows up in PRs, and
   # pushes it to Docker Hub only for commits to main that passed the tests.
   docker:
-    needs: test
+    needs: ci
     runs-on: ubuntu-latest
     env:
       PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
