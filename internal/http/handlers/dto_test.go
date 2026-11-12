@@ -119,3 +119,58 @@ func TestFamilyMemberJSON(t *testing.T) {
 		})
 	}
 }
+
+func TestPointsAwardJSON(t *testing.T) {
+	t.Parallel()
+
+	awardID := uuid.MustParse("018f25b3-8b77-7000-8000-000000000003")
+	earnedAt := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+
+	appAward := app.PointsAward{
+		ID:        awardID,
+		Kind:      "quest",
+		Reason:    "Wash the car",
+		Points:    40,
+		EarnedAt:  earnedAt,
+		CreatedAt: earnedAt.Add(time.Second),
+	}
+
+	dto := toPointsAward(appAward)
+
+	if dto.ID != appAward.ID {
+		t.Errorf("ID mismatch: got %v, want %v", dto.ID, appAward.ID)
+	}
+	if dto.Kind != appAward.Kind {
+		t.Errorf("Kind mismatch: got %q, want %q", dto.Kind, appAward.Kind)
+	}
+	if dto.Reason != appAward.Reason {
+		t.Errorf("Reason mismatch: got %q, want %q", dto.Reason, appAward.Reason)
+	}
+	if dto.Points != appAward.Points {
+		t.Errorf("Points mismatch: got %d, want %d", dto.Points, appAward.Points)
+	}
+	if !dto.EarnedAt.Equal(appAward.EarnedAt) {
+		t.Errorf("EarnedAt mismatch: got %v, want %v", dto.EarnedAt, appAward.EarnedAt)
+	}
+
+	data, err := json.Marshal(dto)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+
+	expectedKeys := []string{"id", "kind", "reason", "points", "earned_at"}
+	if len(raw) != len(expectedKeys) {
+		t.Errorf("expected exactly %d keys in JSON, got %d: %+v", len(expectedKeys), len(raw), raw)
+	}
+	for _, k := range expectedKeys {
+		if _, ok := raw[k]; !ok {
+			t.Errorf("missing expected key %q in JSON: %+v", k, raw)
+		}
+	}
+}
+
