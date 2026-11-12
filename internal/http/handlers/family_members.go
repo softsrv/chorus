@@ -313,3 +313,33 @@ func (h *FamilyMemberHandler) VerifyAdminPin(w http.ResponseWriter, r *http.Requ
 	}
 	respond.JSON(w, http.StatusOK, map[string]any{})
 }
+
+// PointsHistory returns a member's points awards newest first.
+// GET /api/v1/households/{householdID}/family-members/{memberID}/points-history
+func (h *FamilyMemberHandler) PointsHistory(w http.ResponseWriter, r *http.Request) {
+	hid, mid, ok := parseMemberIDs(w, r)
+	if !ok {
+		return
+	}
+	limit, err := queryInt(r, "limit", defaultPageSize)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	offset, err := queryInt(r, "offset", 0)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	memberPin := r.Header.Get("X-Member-PIN")
+	adminPin := r.Header.Get("X-Admin-PIN")
+	awards, err := h.svc.PointsHistory(r.Context(), currentUser(r), hid, mid, memberPin, adminPin, int32(limit), int32(offset))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, listResponse[pointsAwardJSON]{
+		Items: mapSlice(awards, toPointsAward),
+	})
+}
+

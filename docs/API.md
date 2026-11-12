@@ -74,7 +74,7 @@ Native apps: store the refresh token in Keychain / Android Keystore, and send `d
 
 ### Households 🔒
 
-Each household has exactly one login account (its administrator); invites and login members no longer exist. Family members are household-scoped profiles with a name, an optional 4-digit PIN and points. A member is `{id, household_id, name, has_pin, points, created_at, updated_at}`; PINs are stored only as bcrypt hashes and never returned. While an admin PIN is set, every member-management write needs it in the `X-Admin-PIN` header (`403 admin_pin_required` if missing, `403 wrong_pin` if wrong, nothing changes). PIN routes are rate limited per login (120 per 10 minutes, then `429`). The first verified sign-in of an account with no household creates one, named "<display name>'s household", with that account as admin.
+Each household has exactly one login account (its administrator); invites and login members no longer exist. Family members are household-scoped profiles with a name, an optional 4-digit PIN and points. A member is `{id, household_id, name, has_pin, points, created_at, updated_at}`; PINs are stored only as bcrypt hashes and never returned. While an admin PIN is set, every member-management write needs it in the `X-Admin-PIN` header (`403 admin_pin_required` if missing, `403 wrong_pin` if wrong, nothing changes). PIN routes are rate limited per login (120 per 10 minutes, then `429`). The first verified sign-in of an account with no household creates one, named "<display name>'s household", with that account as admin. Points award: `{id, kind, reason, points, earned_at}`. `kind` is `quest`, `combo`, or `streak`; `reason` is the quest name (e.g. `Feed the cat`), combo name, or `streak: <quest name> <streak number>`.
 
 | Method & path | Body | Notes |
 |---|---|---|
@@ -91,6 +91,7 @@ Each household has exactly one login account (its administrator); invites and lo
 | `PUT /households/{id}/family-members/{memberId}/pin` | `pin` | admin; 4-digit PIN; optional `X-Admin-PIN` header if set |
 | `DELETE /households/{id}/family-members/{memberId}/pin` | none | admin; optional `X-Admin-PIN` header if set |
 | `POST /households/{id}/family-members/{memberId}/verify` | `pin` (empty for a member with no PIN) | `200` member, or `403 wrong_pin`. Sets no cookie or token: each later member action carries `member_id` and `pin` |
+| `GET /households/{id}/family-members/{memberId}/points-history` | `?limit=1..100` (default 50), `?offset=` | Member or admin; sends `X-Member-PIN` or `X-Admin-PIN` header. `{items: [points award]}` newest first; `{items: []}` when none; `403 wrong_pin` |
 | `GET /households/{id}/admin-pin` | none | `{set: bool}` |
 | `PUT /households/{id}/admin-pin` | `pin` | admin; 4-digit PIN; `X-Admin-PIN` header (current PIN) required if already set; `{set: true}` |
 | `DELETE /households/{id}/admin-pin` | none | admin; `X-Admin-PIN` header required; `204` |

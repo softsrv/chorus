@@ -525,6 +525,66 @@ func TestAPI_EndToEnd(t *testing.T) {
 	if string(rawPending["items"]) != "[]" {
 		t.Errorf("pending after approval: items = %s, want []", rawPending["items"])
 	}
+
+	// Points history (CLM-6):
+	// A second quest approval for member so two awards are present.
+	var quest2 acceptedBody
+	s.expect(http.StatusCreated, "POST", hp+"/quests", parent.AccessToken, map[string]any{"name": "Dishes", "points": 5}, &quest2)
+	q2base := hp + "/quests/" + quest2.ID.String()
+	s.expect(http.StatusOK, "POST", q2base+"/accept", parent.AccessToken, map[string]any{"member_id": member.ID, "pin": "4321"}, nil)
+	s.expect(http.StatusOK, "POST", q2base+"/done", parent.AccessToken, map[string]any{"member_id": member.ID, "pin": "4321"}, nil)
+	s.expectWithHeaders(http.StatusOK, "POST", q2base+"/approve", parent.AccessToken, adminHdr, map[string]any{}, nil)
+	s.expect(http.StatusNoContent, "DELETE", q2base, parent.AccessToken, nil, nil)
+
+	histPath := hp + "/family-members/" + member.ID.String() + "/points-history"
+
+	// Wrong X-Member-PIN returns 403 wrong_pin.
+	var histPinErr apiError
+	s.expectWithHeaders(http.StatusForbidden, "GET", histPath, parent.AccessToken, map[string]string{"X-Member-PIN": "0000"}, nil, &histPinErr)
+	if histPinErr.Error.Code != "wrong_pin" {
+		t.Errorf("history with wrong pin: code %q", histPinErr.Error.Code)
+	}
+
+	// GET after two approvals returns 200 with items newest first and all award fields.
+	var hist struct {
+		Items []struct {
+			ID       uuid.UUID `json:"id"`
+			Kind     string    `json:"kind"`
+			Reason   string    `json:"reason"`
+			Points   int       `json:"points"`
+			EarnedAt time.Time `json:"earned_at"`
+		} `json:"items"`
+	}
+	s.expectWithHeaders(http.StatusOK, "GET", histPath, parent.AccessToken, map[string]string{"X-Member-PIN": "4321"}, nil, &hist)
+	if len(hist.Items) != 2 {
+		t.Fatalf("points history count: got %d, want 2", len(hist.Items))
+	}
+	if hist.Items[0].Reason != "Dishes" || hist.Items[0].Points != 5 || hist.Items[0].Kind != "quest" {
+		t.Errorf("newest award mismatch: %+v", hist.Items[0])
+	}
+	if hist.Items[1].Reason != "Take out trash" || hist.Items[1].Points != 9 || hist.Items[1].Kind != "quest" {
+		t.Errorf("older award mismatch: %+v", hist.Items[1])
+	}
+	if hist.Items[0].ID == uuid.Nil || hist.Items[0].EarnedAt.IsZero() {
+		t.Errorf("expected populated award fields: %+v", hist.Items[0])
+	}
+
+	// GET for a member with no awards returns {items: []}.
+	var emptyHist struct {
+		Items []map[string]any `json:"items"`
+	}
+	s.expect(http.StatusOK, "GET", hp+"/family-members/"+member2.ID.String()+"/points-history", parent.AccessToken, nil, &emptyHist)
+	if emptyHist.Items == nil || len(emptyHist.Items) != 0 {
+		t.Errorf("empty member history: %+v, want []", emptyHist.Items)
+	}
+
+	// GET for unknown member in household returns 404 (identical to random uuid).
+	var randHistErr apiError
+	s.expect(http.StatusNotFound, "GET", hp+"/family-members/"+uuid.NewString()+"/points-history", parent.AccessToken, nil, &randHistErr)
+	if randHistErr.Error.Code != "not_found" {
+		t.Errorf("random member points-history: code %q, want not_found", randHistErr.Error.Code)
+	}
+
 	// No self-complete route exists.
 	s.expect(http.StatusNotFound, "POST", qbase+"/complete", parent.AccessToken, map[string]any{"member_id": member.ID, "pin": "4321"}, nil)
 	s.expectWithHeaders(http.StatusNoContent, "DELETE", hp+"/admin-pin", parent.AccessToken, adminHdr, nil, nil)
@@ -735,6 +795,7 @@ func TestAPI_EndToEnd(t *testing.T) {
 	s.expect(http.StatusNotFound, "GET", hp+"/calendar", outsider.AccessToken, nil, nil)
 	s.expect(http.StatusNotFound, "GET", hp+"/quests", outsider.AccessToken, nil, nil)
 	s.expect(http.StatusNotFound, "GET", hp+"/quests/"+copied.ID.String(), outsider.AccessToken, nil, nil)
+	s.expect(http.StatusNotFound, "GET", histPath, outsider.AccessToken, nil, nil)
 	s.expect(http.StatusNotFound, "GET", hp+"/rewards", outsider.AccessToken, nil, nil)
 	s.expect(http.StatusNotFound, "GET", krp, outsider.AccessToken, nil, nil)
 	s.expect(http.StatusNotFound, "POST", hp+"/rewards", outsider.AccessToken, map[string]any{"description": "Evil", "cost": 1}, nil)
