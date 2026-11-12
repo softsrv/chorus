@@ -635,7 +635,7 @@ function questNotice(err) {
   return null;
 }
 
-const questMeta = (q) => `${q.points} points · ${q.repeat_days} day(s) until available again`;
+const questMeta = (q) => `${q.points} points · resets at midnight after ${q.repeat_days} day(s)`;
 
 async function questsTab(h, $root, notice = null) {
   const rerender = (next = null) => { $root.replaceChildren(); questsTab(h, $root, next).catch((err) => showError($root, err)); };
@@ -800,7 +800,7 @@ function manageQuestsCard(h, quests, library, page, rerender) {
   const questFields = (q = {}) => [
     { name: 'name', label: 'Name', required: true, value: q.name },
     { name: 'points', label: 'Points', type: 'number', value: q.points ?? '' },
-    { name: 'repeat_days', label: 'Days until available again', type: 'number', value: q.repeat_days ?? '' },
+    { name: 'repeat_days', label: 'Repeats after (days, back at midnight)', type: 'number', value: q.repeat_days ?? '' },
     { name: 'notes', label: 'Notes', type: 'textarea', value: q.notes ?? '' },
   ];
 

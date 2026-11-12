@@ -178,7 +178,7 @@ type MemberAction struct {
 }
 
 // QuestAvailable reports whether a quest is in the pool: nobody holds it and
-// its repeat days since the last approval have passed.
+// its available_at (a local midnight in the household's timezone) has arrived.
 func QuestAvailable(q db.HouseholdQuest, now time.Time) bool {
 	return q.ClaimedBy == nil && (!q.AvailableAt.Valid || !q.AvailableAt.Time.After(now))
 }
@@ -244,7 +244,8 @@ func (s *QuestService) ListPending(ctx context.Context, userID, householdID uuid
 
 // Approve completes a pending quest and credits its points to the member who
 // held it, in one transaction: either both happen or neither does. The
-// quest's repeat countdown starts now. Admin only, behind the admin PIN once
+// quest comes back at local midnight in the household's timezone, repeat_days
+// days after the day it was marked done. Admin only, behind the admin PIN once
 // one is set. A quest that is not pending (never marked done, sent back, or
 // already approved) is ErrNotFound, so a repeated or concurrent approval
 // credits the points once.
