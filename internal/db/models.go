@@ -25,6 +25,38 @@ type Chore struct {
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 }
 
+type Combo struct {
+	ID          uuid.UUID          `json:"id"`
+	HouseholdID uuid.UUID          `json:"household_id"`
+	Name        string             `json:"name"`
+	BonusPoints int32              `json:"bonus_points"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ComboAward struct {
+	ID          uuid.UUID          `json:"id"`
+	HouseholdID uuid.UUID          `json:"household_id"`
+	ComboID     *uuid.UUID         `json:"combo_id"`
+	MemberID    uuid.UUID          `json:"member_id"`
+	ComboName   string             `json:"combo_name"`
+	Points      int32              `json:"points"`
+	AwardDay    pgtype.Date        `json:"award_day"`
+	AwardedAt   pgtype.Timestamptz `json:"awarded_at"`
+}
+
+type ComboAwardCompletion struct {
+	ComboAwardID      uuid.UUID `json:"combo_award_id"`
+	ComboID           uuid.UUID `json:"combo_id"`
+	QuestCompletionID uuid.UUID `json:"quest_completion_id"`
+}
+
+type ComboQuest struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	ComboID     uuid.UUID `json:"combo_id"`
+	QuestID     uuid.UUID `json:"quest_id"`
+}
+
 type EmailVerificationCode struct {
 	ID        uuid.UUID          `json:"id"`
 	UserID    uuid.UUID          `json:"user_id"`
@@ -174,6 +206,15 @@ type PasswordResetToken struct {
 	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 	UsedAt    pgtype.Timestamptz `json:"used_at"`
+}
+
+type QuestCompletion struct {
+	ID          uuid.UUID          `json:"id"`
+	HouseholdID uuid.UUID          `json:"household_id"`
+	QuestID     uuid.UUID          `json:"quest_id"`
+	MemberID    uuid.UUID          `json:"member_id"`
+	DoneAt      pgtype.Timestamptz `json:"done_at"`
+	ApprovedAt  pgtype.Timestamptz `json:"approved_at"`
 }
 
 type QuestLibrary struct {

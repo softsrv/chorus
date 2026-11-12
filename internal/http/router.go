@@ -33,6 +33,7 @@ type RouterConfig struct {
 	FamilySvc         *app.FamilyService  // nil = built from Queries
 	QuestSvc          *app.QuestService   // nil = built from Queries
 	RewardSvc         *app.RewardService  // nil = built from Queries
+	ComboSvc          *app.ComboService   // nil = built from Queries + Pool
 	GoogleSignIn      *app.GoogleSignIn   // nil = Google sign-in disabled
 	GoogleCalendar    *app.GoogleCalendar // nil = Google Calendar unavailable
 	JWTSecret         string
@@ -72,6 +73,11 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 		rewardSvc = app.NewRewardService(cfg.Queries)
 	}
 	rewardH := handlers.NewRewardHandler(rewardSvc)
+	comboSvc := cfg.ComboSvc
+	if comboSvc == nil {
+		comboSvc = app.NewComboService(cfg.Queries, cfg.Pool)
+	}
+	comboH := handlers.NewComboHandler(comboSvc)
 	googleH := handlers.NewGoogleHandler(cfg.GoogleSignIn, cfg.TrustedProxyCount)
 	calendarH := handlers.NewGoogleCalendarHandler(cfg.GoogleCalendar)
 
@@ -195,6 +201,13 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("GET /api/v1/households/{householdID}/rewards/{rewardID}", verified(rewardH.Get))
 	api.Handle("PUT /api/v1/households/{householdID}/rewards/{rewardID}", authMW(middleware.RequireEmailVerified(limit(pinRL, rewardH.Update))))
 	api.Handle("DELETE /api/v1/households/{householdID}/rewards/{rewardID}", authMW(middleware.RequireEmailVerified(limit(pinRL, rewardH.Delete))))
+
+	// ── Combos ────────────────────────────────────────────────────────────────
+	api.Handle("GET /api/v1/households/{householdID}/combos", verified(comboH.List))
+	api.Handle("POST /api/v1/households/{householdID}/combos", authMW(middleware.RequireEmailVerified(limit(pinRL, comboH.Create))))
+	api.Handle("GET /api/v1/households/{householdID}/combos/{comboID}", verified(comboH.Get))
+	api.Handle("PUT /api/v1/households/{householdID}/combos/{comboID}", authMW(middleware.RequireEmailVerified(limit(pinRL, comboH.Update))))
+	api.Handle("DELETE /api/v1/households/{householdID}/combos/{comboID}", authMW(middleware.RequireEmailVerified(limit(pinRL, comboH.Delete))))
 
 	// ── Family calendar ────────────────────────────────────────────────────
 	// Entries come from the household's chosen Google calendar. Chorus has no

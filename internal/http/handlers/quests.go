@@ -28,7 +28,7 @@ type questServicer interface {
 	Abandon(ctx context.Context, userID, householdID, questID uuid.UUID, act app.MemberAction) (db.HouseholdQuest, error)
 	MarkDone(ctx context.Context, userID, householdID, questID uuid.UUID, act app.MemberAction) (db.HouseholdQuest, error)
 	ListPending(ctx context.Context, userID, householdID uuid.UUID, adminPin string) ([]db.ListPendingQuestsRow, error)
-	Approve(ctx context.Context, userID, householdID, questID uuid.UUID, adminPin string) (db.HouseholdQuest, db.FamilyMember, error)
+	Approve(ctx context.Context, userID, householdID, questID uuid.UUID, adminPin string) (db.HouseholdQuest, db.FamilyMember, []app.ComboBonus, error)
 	Reject(ctx context.Context, userID, householdID, questID uuid.UUID, adminPin string) (db.HouseholdQuest, error)
 }
 
@@ -320,26 +320,33 @@ func decodeEmptyBody(w http.ResponseWriter, r *http.Request) bool {
 	return decodeJSON(w, r, &req)
 }
 
-// approveResponse is the approved quest and the member it credited, with
-// their new point total.
+// approveResponse is the approved quest, the member it credited with their
+// new point total (bonuses included), and every combo bonus the approval
+// paid; combo_bonuses is [] when none.
 type approveResponse struct {
-	Quest  questJSON        `json:"quest"`
-	Member familyMemberJSON `json:"member"`
+	Quest        questJSON        `json:"quest"`
+	Member       familyMemberJSON `json:"member"`
+	ComboBonuses []comboAwardJSON `json:"combo_bonuses"`
 }
 
-// Approve completes a pending quest and credits its points to its holder.
+// Approve completes a pending quest and credits its points, and any combo
+// bonuses it finishes, to its holder.
 // The admin PIN travels in X-Admin-PIN; the body is empty or {}.
 func (h *QuestHandler) Approve(w http.ResponseWriter, r *http.Request) {
 	hid, qid, ok := parseQuestIDs(w, r)
 	if !ok || !decodeEmptyBody(w, r) {
 		return
 	}
-	quest, member, err := h.svc.Approve(r.Context(), currentUser(r), hid, qid, r.Header.Get("X-Admin-PIN"))
+	quest, member, bonuses, err := h.svc.Approve(r.Context(), currentUser(r), hid, qid, r.Header.Get("X-Admin-PIN"))
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
-	respond.JSON(w, http.StatusOK, approveResponse{Quest: toQuest(quest), Member: toFamilyMember(member)})
+	respond.JSON(w, http.StatusOK, approveResponse{
+		Quest:        toQuest(quest),
+		Member:       toFamilyMember(member),
+		ComboBonuses: mapSlice(bonuses, toComboAward),
+	})
 }
 
 // Reject sends a pending quest back to its holder with no points. The admin

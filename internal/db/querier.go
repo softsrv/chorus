@@ -20,8 +20,15 @@ type Querier interface {
 	// Completes a pending quest. The pending row is locked first, and the
 	// done_at check is re-read under the lock, so of two concurrent approvals
 	// exactly one gets a row. The repeat countdown starts now. credited_member_id
-	// is the holder to credit, read before claimed_by is cleared.
+	// is the holder to credit, read before claimed_by is cleared; credited_done_at
+	// is when they marked it done, read before done_at is cleared (it decides the
+	// household day the completion counts toward for combos).
 	ApproveQuest(ctx context.Context, arg ApproveQuestParams) (ApproveQuestRow, error)
+	// Counts one completion per chore of the combo toward the award: for each
+	// chore, the member's earliest completion on award_day (household-local) not
+	// yet counted toward this combo. No ON CONFLICT: a completion counted twice
+	// toward one combo is a unique violation that rolls the approval back.
+	ClaimComboCompletions(ctx context.Context, arg ClaimComboCompletionsParams) (int64, error)
 	ClaimHouseholdProvisioning(ctx context.Context, id uuid.UUID) (int64, error)
 	// Assigns an available quest to a family member. The availability check and
 	// the write are one statement, so of two concurrent claims exactly one
@@ -30,6 +37,7 @@ type Querier interface {
 	// Single use: conditional on used_at IS NULL, unexpired, and the flow's
 	// purpose, so a state can't be replayed or used to complete another flow.
 	ConsumeOAuthState(ctx context.Context, arg ConsumeOAuthStateParams) (OauthState, error)
+	CountHouseholdQuestsByIDs(ctx context.Context, arg CountHouseholdQuestsByIDsParams) (int64, error)
 	CountRecentPasswordResetsByEmail(ctx context.Context, email string) (int64, error)
 	CountRecentVerificationCodesByUserID(ctx context.Context, userID uuid.UUID) (int64, error)
 	// Every event query is scoped by household_id; see quests.sql.
@@ -39,10 +47,12 @@ type Querier interface {
 	// email, so the account starts verified.
 	CreateGoogleUser(ctx context.Context, arg CreateGoogleUserParams) (User, error)
 	CreateHousehold(ctx context.Context, arg CreateHouseholdParams) (Household, error)
+	CreateHouseholdCombo(ctx context.Context, arg CreateHouseholdComboParams) (Combo, error)
 	CreateHouseholdQuest(ctx context.Context, arg CreateHouseholdQuestParams) (HouseholdQuest, error)
 	CreateHouseholdReward(ctx context.Context, arg CreateHouseholdRewardParams) (HouseholdReward, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	DeleteAdminPin(ctx context.Context, householdID uuid.UUID) (int64, error)
+	DeleteComboQuests(ctx context.Context, arg DeleteComboQuestsParams) error
 	DeleteEvent(ctx context.Context, arg DeleteEventParams) (int64, error)
 	DeleteExpiredRefreshTokens(ctx context.Context) (int64, error)
 	DeleteFamilyMember(ctx context.Context, arg DeleteFamilyMemberParams) (int64, error)
@@ -51,6 +61,7 @@ type Querier interface {
 	DeleteHousehold(ctx context.Context, id uuid.UUID) error
 	// Only the member who set it can clear it.
 	DeleteHouseholdCalendar(ctx context.Context, arg DeleteHouseholdCalendarParams) (int64, error)
+	DeleteHouseholdCombo(ctx context.Context, arg DeleteHouseholdComboParams) (int64, error)
 	DeleteHouseholdQuest(ctx context.Context, arg DeleteHouseholdQuestParams) (int64, error)
 	DeleteHouseholdReward(ctx context.Context, arg DeleteHouseholdRewardParams) (int64, error)
 	// Deletes every household where the user is the only member.
@@ -67,6 +78,7 @@ type Querier interface {
 	// Every family-calendar query is scoped by household_id; callers check
 	// membership with getHousehold first.
 	GetHouseholdCalendar(ctx context.Context, householdID uuid.UUID) (GetHouseholdCalendarRow, error)
+	GetHouseholdCombo(ctx context.Context, arg GetHouseholdComboParams) (Combo, error)
 	// Returns the household together with the caller's role. No row means either
 	// the household doesn't exist or the user isn't a member; callers treat both
 	// as "not found" so household IDs can't be probed.
@@ -89,12 +101,26 @@ type Querier interface {
 	GetUserForSession(ctx context.Context, arg GetUserForSessionParams) (User, error)
 	GetVerificationCodeByTokenHash(ctx context.Context, tokenHash string) (EmailVerificationCode, error)
 	IncrementFailedLoginAttempts(ctx context.Context, id uuid.UUID) error
+	// One paid bonus. combo_name and points are snapshots, so a later edit or
+	// delete of the combo leaves the award as it was paid.
+	InsertComboAward(ctx context.Context, arg InsertComboAwardParams) (ComboAward, error)
+	InsertComboQuest(ctx context.Context, arg InsertComboQuestParams) error
 	InsertEmailVerificationCode(ctx context.Context, arg InsertEmailVerificationCodeParams) (EmailVerificationCode, error)
 	InsertOAuthState(ctx context.Context, arg InsertOAuthStateParams) (OauthState, error)
 	InsertPasswordResetToken(ctx context.Context, arg InsertPasswordResetTokenParams) (PasswordResetToken, error)
+	// Records one approved completion: who did the chore and when they marked it
+	// done. Combos are judged from these rows.
+	InsertQuestCompletion(ctx context.Context, arg InsertQuestCompletionParams) (QuestCompletion, error)
 	InsertRefreshToken(ctx context.Context, arg InsertRefreshTokenParams) (RefreshToken, error)
 	InsertSignInHandoff(ctx context.Context, arg InsertSignInHandoffParams) (GoogleSignInHandoff, error)
 	ListActiveRefreshTokensByUserID(ctx context.Context, userID uuid.UUID) ([]RefreshToken, error)
+	ListComboQuests(ctx context.Context, arg ListComboQuestsParams) ([]uuid.UUID, error)
+	// The combos containing the quest that the member has just finished: the
+	// combo still has two or more chores, and every one of them has a completion
+	// by the member, not yet counted toward this combo, whose done_at falls on the
+	// same household-local day (households.timezone) as done_at. award_day is
+	// that day; chore_count is how many completions paying it will claim.
+	ListCombosCompletedByMemberOnDay(ctx context.Context, arg ListCombosCompletedByMemberOnDayParams) ([]ListCombosCompletedByMemberOnDayRow, error)
 	// Events overlapping [range_start, range_end).
 	ListEventsInRange(ctx context.Context, arg ListEventsInRangeParams) ([]Event, error)
 	// Every family member query is scoped by household_id. Membership / admin
@@ -102,6 +128,11 @@ type Querier interface {
 	// predicate guarantees a member ID from another household can never be
 	// read or modified through this one.
 	ListFamilyMembers(ctx context.Context, householdID uuid.UUID) ([]FamilyMember, error)
+	ListHouseholdComboQuests(ctx context.Context, householdID uuid.UUID) ([]ListHouseholdComboQuestsRow, error)
+	// Household combo queries are scoped by household_id. Membership is checked
+	// by the service layer first; the household_id predicate guarantees a combo
+	// or chore ID from another household can never be read or modified through this one.
+	ListHouseholdCombos(ctx context.Context, householdID uuid.UUID) ([]Combo, error)
 	ListHouseholdQuests(ctx context.Context, arg ListHouseholdQuestsParams) ([]HouseholdQuest, error)
 	ListHouseholdRewards(ctx context.Context, householdID uuid.UUID) ([]HouseholdReward, error)
 	ListHouseholdsForUser(ctx context.Context, userID uuid.UUID) ([]ListHouseholdsForUserRow, error)
@@ -121,6 +152,10 @@ type Querier interface {
 	// anyone's points.
 	ListRewardLibrary(ctx context.Context) ([]RewardLibrary, error)
 	LockAccount(ctx context.Context, arg LockAccountParams) error
+	// Locks, in one statement and in id order, every combo of the household that
+	// contains the quest. Concurrent approvals touching the same combo serialize
+	// here, so the achievement check that follows sees the other's completion.
+	LockCombosForQuest(ctx context.Context, arg LockCombosForQuestParams) ([]uuid.UUID, error)
 	// Locks the member row for the rest of the transaction. The lock conflicts
 	// with the key-share lock a foreign-key check takes, so rows that would point
 	// at this member wait until the transaction ends.
@@ -159,6 +194,7 @@ type Querier interface {
 	UpdateEvent(ctx context.Context, arg UpdateEventParams) (Event, error)
 	UpdateGoogleCalendarAccessToken(ctx context.Context, arg UpdateGoogleCalendarAccessTokenParams) (int64, error)
 	UpdateHousehold(ctx context.Context, arg UpdateHouseholdParams) (Household, error)
+	UpdateHouseholdCombo(ctx context.Context, arg UpdateHouseholdComboParams) (Combo, error)
 	UpdateHouseholdQuest(ctx context.Context, arg UpdateHouseholdQuestParams) (HouseholdQuest, error)
 	UpdateHouseholdReward(ctx context.Context, arg UpdateHouseholdRewardParams) (HouseholdReward, error)
 	UpdatePasswordHash(ctx context.Context, arg UpdatePasswordHashParams) error
