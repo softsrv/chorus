@@ -157,6 +157,7 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("PUT /api/v1/households/{householdID}/family-members/{memberID}/pin", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.SetPin))))
 	api.Handle("DELETE /api/v1/households/{householdID}/family-members/{memberID}/pin", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.ClearPin))))
 	api.Handle("POST /api/v1/households/{householdID}/family-members/{memberID}/verify", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.Verify))))
+	api.Handle("GET /api/v1/households/{householdID}/family-members/{memberID}/points-history", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.PointsHistory))))
 	api.Handle("GET /api/v1/households/{householdID}/admin-pin", verified(familyMemberH.AdminPinStatus))
 	api.Handle("PUT /api/v1/households/{householdID}/admin-pin", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.SetAdminPin))))
 	api.Handle("DELETE /api/v1/households/{householdID}/admin-pin", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.ClearAdminPin))))

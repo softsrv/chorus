@@ -20,6 +20,7 @@ type familyServicer interface {
 	SetPin(ctx context.Context, userID, householdID, memberID uuid.UUID, pin string, adminPin string) (app.Member, error)
 	ClearPin(ctx context.Context, userID, householdID, memberID uuid.UUID, adminPin string) (app.Member, error)
 	Verify(ctx context.Context, userID, householdID, memberID uuid.UUID, pin string) (app.Member, error)
+	PointsHistory(ctx context.Context, userID, householdID, memberID uuid.UUID, memberPin, adminPin string, limit, offset int32) ([]app.PointsAward, error)
 	AdminPinSet(ctx context.Context, userID, householdID uuid.UUID) (bool, error)
 	SetAdminPin(ctx context.Context, userID, householdID uuid.UUID, newPin, currentAdminPin string) error
 	ClearAdminPin(ctx context.Context, userID, householdID uuid.UUID, currentAdminPin string) error
