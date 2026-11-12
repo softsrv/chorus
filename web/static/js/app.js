@@ -651,7 +651,7 @@ async function questsTab(h, $root, notice = null) {
 
   const cards = [
     notice && alertBox('warning', notice),
-    activeMember ? takeCard(h, quests, nameOf, rerender) : card(null,
+    activeMember ? await takeCard(h, quests, nameOf, rerender) : card(null,
       el('h3', { class: 'font-semibold', text: 'Quests' }),
       el('p', { class: 'text-sm opacity-70', text: 'Choose a family member to take quests.' })),
     !activeMember && await approvalsCard(h, members, rerender),
@@ -664,10 +664,14 @@ async function questsTab(h, $root, notice = null) {
 // quest detail with Accept/Decline, and Abandon/Mark done on their own quests.
 // Every action sends activeMemberAction(); the server decides the outcome and
 // the list is re-read from it afterwards.
-function takeCard(h, quests, nameOf, rerender) {
+async function takeCard(h, quests, nameOf, rerender) {
   const $err = el('div');
   const $detail = el('div');
   const parts = partitionQuests(quests, activeMember.id);
+  const historyRes = await api('GET', `/households/${h.id}/family-members/${activeMember.id}/points-history`, undefined, {
+    headers: { 'X-Member-PIN': activeMember.pin ?? '' },
+  });
+  const history = historyRes?.items || [];
 
   const act = (verb, q) => action(async () => {
     const body = activeMemberAction();
@@ -718,7 +722,24 @@ function takeCard(h, quests, nameOf, rerender) {
       (q) => row(q, el('span', { class: 'text-xs opacity-70', text: `Taken by ${nameOf[q.claimed_by] || 'a former member'}` })),
       'Nobody else has a quest.'),
     parts.resting.length > 0 && section('Coming back later', parts.resting,
-      (q) => row(q, q.available_at && el('span', { class: 'text-xs opacity-70', text: `Back ${fmtDate(q.available_at)}` })), ''));
+      (q) => row(q, q.available_at && el('span', { class: 'text-xs opacity-70', text: `Back ${fmtDate(q.available_at)}` })), ''),
+    el('div', { class: 'space-y-1' },
+      el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Points history' }),
+      history.length
+        ? el('table', { class: 'table table-sm' },
+            el('thead', {}, el('tr', {},
+              el('th', { text: 'Date' }),
+              el('th', { text: 'Points' }),
+              el('th', { text: 'Reason' }),
+            )),
+            el('tbody', {}, history.map((item) => el('tr', {},
+              el('td', { text: fmtDate(item.earned_at) }),
+              el('td', { text: `+${item.points}` }),
+              el('td', { text: item.reason }),
+            ))),
+          )
+        : el('p', { class: 'text-xs opacity-60', text: 'No points yet. Points you earn will show up here.' }),
+    ));
 }
 
 // approvalsCard is the administrator's list of quests marked done. Loading,
