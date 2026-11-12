@@ -3,6 +3,7 @@
 package http_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -102,6 +103,52 @@ func TestAPI_Combos(t *testing.T) {
 	}, &updated)
 	if updated.Name != "Evening Trio" || updated.BonusPoints != 50 || len(updated.QuestIDs) != 2 {
 		t.Fatalf("unexpected updated combo: %+v", updated)
+	}
+
+	// Approval reports combo bonuses (CLM-14). Chore One is in no combo:
+	// combo_bonuses is [] (not null). Chores Two and Three finish Evening
+	// Trio: the second approval pays its bonus and says so.
+	var kid struct {
+		ID uuid.UUID `json:"id"`
+	}
+	s.expect(http.StatusCreated, "POST", "/api/v1/households/"+hid+"/family-members", user.AccessToken,
+		map[string]string{"name": "Combo Kid"}, &kid)
+	type approveWire struct {
+		Member struct {
+			ID     uuid.UUID `json:"id"`
+			Points int32     `json:"points"`
+		} `json:"member"`
+		ComboBonuses json.RawMessage `json:"combo_bonuses"`
+	}
+	approve := func(questID uuid.UUID) approveWire {
+		t.Helper()
+		qp := "/api/v1/households/" + hid + "/quests/" + questID.String()
+		s.expect(http.StatusOK, "POST", qp+"/accept", user.AccessToken, map[string]any{"member_id": kid.ID}, nil)
+		s.expect(http.StatusOK, "POST", qp+"/done", user.AccessToken, map[string]any{"member_id": kid.ID}, nil)
+		var out approveWire
+		s.expect(http.StatusOK, "POST", qp+"/approve", user.AccessToken, nil, &out)
+		return out
+	}
+	if got := approve(q1.ID); string(got.ComboBonuses) != "[]" || got.Member.Points != 10 {
+		t.Fatalf("approve chore in no combo: combo_bonuses=%s points=%d, want [] and 10", got.ComboBonuses, got.Member.Points)
+	}
+	if got := approve(q2.ID); string(got.ComboBonuses) != "[]" || got.Member.Points != 25 {
+		t.Fatalf("approve first combo chore: combo_bonuses=%s points=%d, want [] and 25", got.ComboBonuses, got.Member.Points)
+	}
+	last := approve(q3.ID)
+	var paid []struct {
+		ComboID     uuid.UUID `json:"combo_id"`
+		Name        string    `json:"name"`
+		BonusPoints int32     `json:"bonus_points"`
+	}
+	if err := json.Unmarshal(last.ComboBonuses, &paid); err != nil {
+		t.Fatalf("decode combo_bonuses %s: %v", last.ComboBonuses, err)
+	}
+	if len(paid) != 1 || paid[0].ComboID != created.ID || paid[0].Name != "Evening Trio" || paid[0].BonusPoints != 50 {
+		t.Fatalf("approve finishing combo: combo_bonuses=%s", last.ComboBonuses)
+	}
+	if last.Member.ID != kid.ID || last.Member.Points != 10+15+20+50 {
+		t.Fatalf("approve finishing combo: member %+v, want points %d", last.Member, 10+15+20+50)
 	}
 
 	// 7. Admin PIN protection (CLM-9)

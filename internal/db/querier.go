@@ -20,8 +20,15 @@ type Querier interface {
 	// Completes a pending quest. The pending row is locked first, and the
 	// done_at check is re-read under the lock, so of two concurrent approvals
 	// exactly one gets a row. The repeat countdown starts now. credited_member_id
-	// is the holder to credit, read before claimed_by is cleared.
+	// is the holder to credit, read before claimed_by is cleared; credited_done_at
+	// is when they marked it done, read before done_at is cleared (it decides the
+	// household day the completion counts toward for combos).
 	ApproveQuest(ctx context.Context, arg ApproveQuestParams) (ApproveQuestRow, error)
+	// Counts one completion per chore of the combo toward the award: for each
+	// chore, the member's earliest completion on award_day (household-local) not
+	// yet counted toward this combo. No ON CONFLICT: a completion counted twice
+	// toward one combo is a unique violation that rolls the approval back.
+	ClaimComboCompletions(ctx context.Context, arg ClaimComboCompletionsParams) (int64, error)
 	ClaimHouseholdProvisioning(ctx context.Context, id uuid.UUID) (int64, error)
 	// Assigns an available quest to a family member. The availability check and
 	// the write are one statement, so of two concurrent claims exactly one
@@ -94,14 +101,26 @@ type Querier interface {
 	GetUserForSession(ctx context.Context, arg GetUserForSessionParams) (User, error)
 	GetVerificationCodeByTokenHash(ctx context.Context, tokenHash string) (EmailVerificationCode, error)
 	IncrementFailedLoginAttempts(ctx context.Context, id uuid.UUID) error
+	// One paid bonus. combo_name and points are snapshots, so a later edit or
+	// delete of the combo leaves the award as it was paid.
+	InsertComboAward(ctx context.Context, arg InsertComboAwardParams) (ComboAward, error)
 	InsertComboQuest(ctx context.Context, arg InsertComboQuestParams) error
 	InsertEmailVerificationCode(ctx context.Context, arg InsertEmailVerificationCodeParams) (EmailVerificationCode, error)
 	InsertOAuthState(ctx context.Context, arg InsertOAuthStateParams) (OauthState, error)
 	InsertPasswordResetToken(ctx context.Context, arg InsertPasswordResetTokenParams) (PasswordResetToken, error)
+	// Records one approved completion: who did the chore and when they marked it
+	// done. Combos are judged from these rows.
+	InsertQuestCompletion(ctx context.Context, arg InsertQuestCompletionParams) (QuestCompletion, error)
 	InsertRefreshToken(ctx context.Context, arg InsertRefreshTokenParams) (RefreshToken, error)
 	InsertSignInHandoff(ctx context.Context, arg InsertSignInHandoffParams) (GoogleSignInHandoff, error)
 	ListActiveRefreshTokensByUserID(ctx context.Context, userID uuid.UUID) ([]RefreshToken, error)
 	ListComboQuests(ctx context.Context, arg ListComboQuestsParams) ([]uuid.UUID, error)
+	// The combos containing the quest that the member has just finished: the
+	// combo still has two or more chores, and every one of them has a completion
+	// by the member, not yet counted toward this combo, whose done_at falls on the
+	// same household-local day (households.timezone) as done_at. award_day is
+	// that day; chore_count is how many completions paying it will claim.
+	ListCombosCompletedByMemberOnDay(ctx context.Context, arg ListCombosCompletedByMemberOnDayParams) ([]ListCombosCompletedByMemberOnDayRow, error)
 	// Events overlapping [range_start, range_end).
 	ListEventsInRange(ctx context.Context, arg ListEventsInRangeParams) ([]Event, error)
 	// Every family member query is scoped by household_id. Membership / admin
@@ -133,6 +152,10 @@ type Querier interface {
 	// anyone's points.
 	ListRewardLibrary(ctx context.Context) ([]RewardLibrary, error)
 	LockAccount(ctx context.Context, arg LockAccountParams) error
+	// Locks, in one statement and in id order, every combo of the household that
+	// contains the quest. Concurrent approvals touching the same combo serialize
+	// here, so the achievement check that follows sees the other's completion.
+	LockCombosForQuest(ctx context.Context, arg LockCombosForQuestParams) ([]uuid.UUID, error)
 	// Locks the member row for the rest of the transaction. The lock conflicts
 	// with the key-share lock a foreign-key check takes, so rows that would point
 	// at this member wait until the transaction ends.

@@ -549,7 +549,7 @@ func TestIntegration_RemoveMemberHoldingQuests(t *testing.T) {
 	if _, err := quests.MarkDone(ctx, admin, h.ID, warmup.ID, benAct); err != nil {
 		t.Fatalf("Ben mark warmup done: %v", err)
 	}
-	if _, _, err := quests.Approve(ctx, admin, h.ID, warmup.ID, ""); err != nil {
+	if _, _, _, err := quests.Approve(ctx, admin, h.ID, warmup.ID, ""); err != nil {
 		t.Fatalf("approve warmup: %v", err)
 	}
 	if _, err := quests.Accept(ctx, admin, h.ID, others.ID, benAct); err != nil {

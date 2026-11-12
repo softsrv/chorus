@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/softsrv/chorus/internal/db"
 )
@@ -242,37 +243,55 @@ func (s *QuestService) ListPending(ctx context.Context, userID, householdID uuid
 	return rows, nil
 }
 
+// ComboBonus is one combo bonus paid by an approval.
+type ComboBonus struct {
+	ComboID     uuid.UUID
+	Name        string
+	BonusPoints int32
+}
+
 // Approve completes a pending quest and credits its points to the member who
-// held it, in one transaction: either both happen or neither does. The
+// held it, in one transaction: either all of it happens or none does. The
 // quest's repeat countdown starts now. Admin only, behind the admin PIN once
 // one is set. A quest that is not pending (never marked done, sent back, or
 // already approved) is ErrNotFound, so a repeated or concurrent approval
 // credits the points once.
-func (s *QuestService) Approve(ctx context.Context, userID, householdID, questID uuid.UUID, adminPin string) (db.HouseholdQuest, db.FamilyMember, error) {
+//
+// The approval also records the completion (member, chore, mark-done time)
+// and pays every combo it finishes: a combo of two or more chores each of
+// which the member marked done on the same household-local day, using
+// completions not yet counted toward that combo. The returned member's points
+// include the bonuses; the returned slice is empty, never nil, when none paid.
+func (s *QuestService) Approve(ctx context.Context, userID, householdID, questID uuid.UUID, adminPin string) (db.HouseholdQuest, db.FamilyMember, []ComboBonus, error) {
 	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
-		return db.HouseholdQuest{}, db.FamilyMember{}, err
+		return db.HouseholdQuest{}, db.FamilyMember{}, nil, err
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return db.HouseholdQuest{}, db.FamilyMember{}, fmt.Errorf("begin tx: %w", err)
+		return db.HouseholdQuest{}, db.FamilyMember{}, nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
 	qtx := s.q.WithTx(tx)
 	row, err := notFoundIfNoRows(qtx.ApproveQuest(ctx, db.ApproveQuestParams{HouseholdID: householdID, ID: questID}))
 	if err != nil {
-		return db.HouseholdQuest{}, db.FamilyMember{}, err
+		return db.HouseholdQuest{}, db.FamilyMember{}, nil, err
 	}
-	if row.CreditedMemberID == nil {
-		// The schema forbids a pending quest without a holder.
-		return db.HouseholdQuest{}, db.FamilyMember{}, fmt.Errorf("approve quest %s: pending quest has no holder", questID)
+	if row.CreditedMemberID == nil || !row.CreditedDoneAt.Valid {
+		// The schema forbids a pending quest without a holder or done_at.
+		return db.HouseholdQuest{}, db.FamilyMember{}, nil, fmt.Errorf("approve quest %s: pending quest has no holder", questID)
 	}
-	member, err := qtx.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: householdID, ID: *row.CreditedMemberID, Delta: row.Points})
+	memberID := *row.CreditedMemberID
+	member, err := qtx.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: householdID, ID: memberID, Delta: row.Points})
 	if err != nil {
-		return db.HouseholdQuest{}, db.FamilyMember{}, fmt.Errorf("credit points: %w", err)
+		return db.HouseholdQuest{}, db.FamilyMember{}, nil, fmt.Errorf("credit points: %w", err)
+	}
+	member, bonuses, err := payCombos(ctx, qtx, householdID, questID, member, row.CreditedDoneAt)
+	if err != nil {
+		return db.HouseholdQuest{}, db.FamilyMember{}, nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return db.HouseholdQuest{}, db.FamilyMember{}, fmt.Errorf("commit: %w", err)
+		return db.HouseholdQuest{}, db.FamilyMember{}, nil, fmt.Errorf("commit: %w", err)
 	}
 	return db.HouseholdQuest{
 		ID:          row.ID,
@@ -289,7 +308,64 @@ func (s *QuestService) Approve(ctx context.Context, userID, householdID, questID
 		AvailableAt: row.AvailableAt,
 		CreatedAt:   row.CreatedAt,
 		UpdatedAt:   row.UpdatedAt,
-	}, member, nil
+	}, member, bonuses, nil
+}
+
+// payCombos runs inside Approve's transaction (qtx). It records the approved
+// completion, locks the combos containing the quest (so concurrent approvals
+// of one combo's chores serialize and the later one sees the earlier one's
+// completion), then pays each combo the member has finished: an award row
+// with name and points snapshots, one claimed completion per chore, and the
+// bonus credit. Any error is returned for the caller to roll back.
+func payCombos(ctx context.Context, qtx *db.Queries, householdID, questID uuid.UUID, member db.FamilyMember, doneAt pgtype.Timestamptz) (db.FamilyMember, []ComboBonus, error) {
+	completionID, err := uuid.NewV7()
+	if err != nil {
+		return db.FamilyMember{}, nil, fmt.Errorf("new completion id: %w", err)
+	}
+	if _, err := qtx.InsertQuestCompletion(ctx, db.InsertQuestCompletionParams{
+		ID: completionID, HouseholdID: householdID, QuestID: questID, MemberID: member.ID, DoneAt: doneAt,
+	}); err != nil {
+		return db.FamilyMember{}, nil, fmt.Errorf("record completion: %w", err)
+	}
+	if _, err := qtx.LockCombosForQuest(ctx, db.LockCombosForQuestParams{HouseholdID: householdID, QuestID: questID}); err != nil {
+		return db.FamilyMember{}, nil, fmt.Errorf("lock combos: %w", err)
+	}
+	achieved, err := qtx.ListCombosCompletedByMemberOnDay(ctx, db.ListCombosCompletedByMemberOnDayParams{
+		HouseholdID: householdID, QuestID: questID, MemberID: member.ID, DoneAt: doneAt,
+	})
+	if err != nil {
+		return db.FamilyMember{}, nil, fmt.Errorf("find achieved combos: %w", err)
+	}
+	bonuses := make([]ComboBonus, 0, len(achieved))
+	for _, c := range achieved {
+		awardID, err := uuid.NewV7()
+		if err != nil {
+			return db.FamilyMember{}, nil, fmt.Errorf("new award id: %w", err)
+		}
+		comboID := c.ID
+		if _, err := qtx.InsertComboAward(ctx, db.InsertComboAwardParams{
+			ID: awardID, HouseholdID: householdID, ComboID: &comboID, MemberID: member.ID,
+			ComboName: c.Name, Points: c.BonusPoints, AwardDay: c.AwardDay,
+		}); err != nil {
+			return db.FamilyMember{}, nil, fmt.Errorf("record combo award: %w", err)
+		}
+		claimed, err := qtx.ClaimComboCompletions(ctx, db.ClaimComboCompletionsParams{
+			ComboAwardID: awardID, MemberID: member.ID, AwardDay: c.AwardDay, HouseholdID: householdID, ComboID: c.ID,
+		})
+		if err != nil {
+			return db.FamilyMember{}, nil, fmt.Errorf("claim combo completions: %w", err)
+		}
+		if claimed != int64(c.ChoreCount) {
+			// Under the combo lock the set just checked must still be there.
+			return db.FamilyMember{}, nil, fmt.Errorf("claim combo %s: claimed %d completions, want %d", c.ID, claimed, c.ChoreCount)
+		}
+		member, err = qtx.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: householdID, ID: member.ID, Delta: c.BonusPoints})
+		if err != nil {
+			return db.FamilyMember{}, nil, fmt.Errorf("credit combo bonus: %w", err)
+		}
+		bonuses = append(bonuses, ComboBonus{ComboID: c.ID, Name: c.Name, BonusPoints: c.BonusPoints})
+	}
+	return member, bonuses, nil
 }
 
 // Reject sends a pending quest back to the member who holds it: it stays
