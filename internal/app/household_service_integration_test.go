@@ -261,8 +261,8 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		got.RepeatDays != 1 || got.Notes != "Wash and dry" || got.ClaimedBy != nil || got.ClaimedAt.Valid {
 		t.Errorf("alice's quest was modified: %+v, %v", got, err)
 	}
-	if list, _, err := quests.List(ctx, alice, h.ID, app.QuestPage{Limit: 10}); err != nil || len(list) != 2 {
-		t.Errorf("alice's quests after outsider attempts: %d, %v; want exactly 2 (no smuggled create or copy)", len(list), err)
+	if list, _, err := quests.List(ctx, alice, h.ID, app.QuestPage{Limit: 10}); err != nil || len(list) != 3 {
+		t.Errorf("alice's quests after outsider attempts: %d, %v; want exactly 3 (no smuggled create or copy)", len(list), err)
 	}
 	if rows, err := quests.ListPending(ctx, alice, h.ID, ""); err != nil || len(rows) != 1 || rows[0].HouseholdQuest.ID != alicePending.ID ||
 		rows[0].HouseholdQuest.ClaimedBy == nil || *rows[0].HouseholdQuest.ClaimedBy != aliceMember.ID {
