@@ -4,7 +4,7 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  installBrowser, installFetch, loadApp, walk, click,
+  installBrowser, installFetch, loadApp, walk, click, buttons, buttonStarting,
 } from './harness.mjs';
 
 const H = 'h1';
@@ -38,6 +38,7 @@ function routes() {
     [`GET ${HP}/combos`]: () => [200, { items: srv.combos }],
     'GET /quest-library': () => [200, { items: [] }],
     [`GET ${HP}/family-members`]: () => [200, { items: srv.members }],
+    [`POST ${HP}/family-members/m-a/verify`]: () => [204, null],
     [`GET ${HP}/quests/pending`]: () => [200, { items: [] }],
   };
 }
@@ -84,3 +85,32 @@ test('CLM-1: while management is visible, Quests tab renders combos card showing
   const comboCalls = calls.filter((c) => c.method === 'GET' && c.path === `${HP}/combos`);
   assert.equal(comboCalls.length, 1);
 });
+
+async function becomeAnn() {
+  await click(buttons(env.$app, 'Switch member')[0]);
+  await click(buttonStarting(env.$app, 'Ann'));
+}
+
+test('CLM-7: member view renders no Manage combos card', async () => {
+  srv.adminPinSet = true;
+  await loadApp();
+  await becomeAnn();
+
+  assert.doesNotMatch(text(), /Manage combos/);
+});
+
+test('CLM-7: management visible but locked renders no Add/Edit/Delete controls for combos', async () => {
+  srv.adminPinSet = true;
+  await loadApp();
+
+  assert.match(text(), /Manage combos/);
+  assert.equal(buttons(env.$app, 'Edit').length, 0);
+  assert.equal(buttons(env.$app, 'Delete').length, 0);
+  assert.equal(buttons(env.$app, 'Add combo').length, 0);
+  assert.equal(buttons(env.$app, 'Create combo').length, 0);
+  const forms = walk(env.$app).filter((n) => n.tagName === 'FORM');
+  for (const f of forms) {
+    assert.doesNotMatch(f.textContent, /Create combo|Add combo|Bonus points/);
+  }
+});
+
