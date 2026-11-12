@@ -33,6 +33,7 @@ type RouterConfig struct {
 	FamilySvc         *app.FamilyService  // nil = built from Queries
 	QuestSvc          *app.QuestService   // nil = built from Queries
 	RewardSvc         *app.RewardService  // nil = built from Queries
+	ComboSvc          *app.ComboService   // nil = built from Queries + Pool
 	GoogleSignIn      *app.GoogleSignIn   // nil = Google sign-in disabled
 	GoogleCalendar    *app.GoogleCalendar // nil = Google Calendar unavailable
 	JWTSecret         string

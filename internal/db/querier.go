@@ -30,6 +30,7 @@ type Querier interface {
 	// Single use: conditional on used_at IS NULL, unexpired, and the flow's
 	// purpose, so a state can't be replayed or used to complete another flow.
 	ConsumeOAuthState(ctx context.Context, arg ConsumeOAuthStateParams) (OauthState, error)
+	CountHouseholdQuestsByIDs(ctx context.Context, arg CountHouseholdQuestsByIDsParams) (int64, error)
 	CountRecentPasswordResetsByEmail(ctx context.Context, email string) (int64, error)
 	CountRecentVerificationCodesByUserID(ctx context.Context, userID uuid.UUID) (int64, error)
 	// Every event query is scoped by household_id; see quests.sql.
@@ -39,10 +40,12 @@ type Querier interface {
 	// email, so the account starts verified.
 	CreateGoogleUser(ctx context.Context, arg CreateGoogleUserParams) (User, error)
 	CreateHousehold(ctx context.Context, arg CreateHouseholdParams) (Household, error)
+	CreateHouseholdCombo(ctx context.Context, arg CreateHouseholdComboParams) (Combo, error)
 	CreateHouseholdQuest(ctx context.Context, arg CreateHouseholdQuestParams) (HouseholdQuest, error)
 	CreateHouseholdReward(ctx context.Context, arg CreateHouseholdRewardParams) (HouseholdReward, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	DeleteAdminPin(ctx context.Context, householdID uuid.UUID) (int64, error)
+	DeleteComboQuests(ctx context.Context, arg DeleteComboQuestsParams) error
 	DeleteEvent(ctx context.Context, arg DeleteEventParams) (int64, error)
 	DeleteExpiredRefreshTokens(ctx context.Context) (int64, error)
 	DeleteFamilyMember(ctx context.Context, arg DeleteFamilyMemberParams) (int64, error)
@@ -51,6 +54,7 @@ type Querier interface {
 	DeleteHousehold(ctx context.Context, id uuid.UUID) error
 	// Only the member who set it can clear it.
 	DeleteHouseholdCalendar(ctx context.Context, arg DeleteHouseholdCalendarParams) (int64, error)
+	DeleteHouseholdCombo(ctx context.Context, arg DeleteHouseholdComboParams) (int64, error)
 	DeleteHouseholdQuest(ctx context.Context, arg DeleteHouseholdQuestParams) (int64, error)
 	DeleteHouseholdReward(ctx context.Context, arg DeleteHouseholdRewardParams) (int64, error)
 	// Deletes every household where the user is the only member.
@@ -67,6 +71,7 @@ type Querier interface {
 	// Every family-calendar query is scoped by household_id; callers check
 	// membership with getHousehold first.
 	GetHouseholdCalendar(ctx context.Context, householdID uuid.UUID) (GetHouseholdCalendarRow, error)
+	GetHouseholdCombo(ctx context.Context, arg GetHouseholdComboParams) (Combo, error)
 	// Returns the household together with the caller's role. No row means either
 	// the household doesn't exist or the user isn't a member; callers treat both
 	// as "not found" so household IDs can't be probed.
@@ -89,12 +94,14 @@ type Querier interface {
 	GetUserForSession(ctx context.Context, arg GetUserForSessionParams) (User, error)
 	GetVerificationCodeByTokenHash(ctx context.Context, tokenHash string) (EmailVerificationCode, error)
 	IncrementFailedLoginAttempts(ctx context.Context, id uuid.UUID) error
+	InsertComboQuest(ctx context.Context, arg InsertComboQuestParams) error
 	InsertEmailVerificationCode(ctx context.Context, arg InsertEmailVerificationCodeParams) (EmailVerificationCode, error)
 	InsertOAuthState(ctx context.Context, arg InsertOAuthStateParams) (OauthState, error)
 	InsertPasswordResetToken(ctx context.Context, arg InsertPasswordResetTokenParams) (PasswordResetToken, error)
 	InsertRefreshToken(ctx context.Context, arg InsertRefreshTokenParams) (RefreshToken, error)
 	InsertSignInHandoff(ctx context.Context, arg InsertSignInHandoffParams) (GoogleSignInHandoff, error)
 	ListActiveRefreshTokensByUserID(ctx context.Context, userID uuid.UUID) ([]RefreshToken, error)
+	ListComboQuests(ctx context.Context, arg ListComboQuestsParams) ([]uuid.UUID, error)
 	// Events overlapping [range_start, range_end).
 	ListEventsInRange(ctx context.Context, arg ListEventsInRangeParams) ([]Event, error)
 	// Every family member query is scoped by household_id. Membership / admin
@@ -102,6 +109,11 @@ type Querier interface {
 	// predicate guarantees a member ID from another household can never be
 	// read or modified through this one.
 	ListFamilyMembers(ctx context.Context, householdID uuid.UUID) ([]FamilyMember, error)
+	ListHouseholdComboQuests(ctx context.Context, householdID uuid.UUID) ([]ListHouseholdComboQuestsRow, error)
+	// Household combo queries are scoped by household_id. Membership is checked
+	// by the service layer first; the household_id predicate guarantees a combo
+	// or chore ID from another household can never be read or modified through this one.
+	ListHouseholdCombos(ctx context.Context, householdID uuid.UUID) ([]Combo, error)
 	ListHouseholdQuests(ctx context.Context, arg ListHouseholdQuestsParams) ([]HouseholdQuest, error)
 	ListHouseholdRewards(ctx context.Context, householdID uuid.UUID) ([]HouseholdReward, error)
 	ListHouseholdsForUser(ctx context.Context, userID uuid.UUID) ([]ListHouseholdsForUserRow, error)
@@ -159,6 +171,7 @@ type Querier interface {
 	UpdateEvent(ctx context.Context, arg UpdateEventParams) (Event, error)
 	UpdateGoogleCalendarAccessToken(ctx context.Context, arg UpdateGoogleCalendarAccessTokenParams) (int64, error)
 	UpdateHousehold(ctx context.Context, arg UpdateHouseholdParams) (Household, error)
+	UpdateHouseholdCombo(ctx context.Context, arg UpdateHouseholdComboParams) (Combo, error)
 	UpdateHouseholdQuest(ctx context.Context, arg UpdateHouseholdQuestParams) (HouseholdQuest, error)
 	UpdateHouseholdReward(ctx context.Context, arg UpdateHouseholdRewardParams) (HouseholdReward, error)
 	UpdatePasswordHash(ctx context.Context, arg UpdatePasswordHashParams) error
