@@ -176,6 +176,17 @@ type PasswordResetToken struct {
 	UsedAt    pgtype.Timestamptz `json:"used_at"`
 }
 
+type PointsAward struct {
+	ID          uuid.UUID          `json:"id"`
+	HouseholdID uuid.UUID          `json:"household_id"`
+	MemberID    uuid.UUID          `json:"member_id"`
+	Kind        string             `json:"kind"`
+	Reason      string             `json:"reason"`
+	Points      int32              `json:"points"`
+	EarnedAt    pgtype.Timestamptz `json:"earned_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type QuestLibrary struct {
 	ID         uuid.UUID          `json:"id"`
 	Name       string             `json:"name"`

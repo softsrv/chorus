@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/softsrv/chorus/internal/db"
 )
@@ -242,8 +243,43 @@ func (s *QuestService) ListPending(ctx context.Context, userID, householdID uuid
 	return rows, nil
 }
 
+// Kinds of points award, as stored in points_awards.kind.
+const (
+	awardKindQuest = "quest"
+)
+
+// creditPoints is the single path that adds points to a family member: it
+// adds points to the member's total and writes the points_awards history row
+// that explains them, both on q, which must be bound to the caller's
+// transaction so that the credit, its history and the caller's own writes
+// commit or roll back together. earnedAt is the moment the award was earned.
+func creditPoints(ctx context.Context, q *db.Queries, householdID, memberID uuid.UUID, kind, reason string, points int32, earnedAt pgtype.Timestamptz) (db.FamilyMember, error) {
+	member, err := q.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: householdID, ID: memberID, Delta: points})
+	if err != nil {
+		return db.FamilyMember{}, fmt.Errorf("credit points: %w", err)
+	}
+	id, err := uuid.NewV7()
+	if err != nil {
+		return db.FamilyMember{}, fmt.Errorf("generate points award id: %w", err)
+	}
+	if _, err := q.InsertPointsAward(ctx, db.InsertPointsAwardParams{
+		ID:          id,
+		HouseholdID: householdID,
+		MemberID:    memberID,
+		Kind:        kind,
+		Reason:      reason,
+		Points:      points,
+		EarnedAt:    earnedAt,
+	}); err != nil {
+		return db.FamilyMember{}, fmt.Errorf("record points award: %w", err)
+	}
+	return member, nil
+}
+
 // Approve completes a pending quest and credits its points to the member who
 // held it, in one transaction: either both happen or neither does. The
+// credit also writes the member's points history entry (kind quest, the
+// quest's name as the reason, earned at the approval time). The
 // quest's repeat countdown starts now. Admin only, behind the admin PIN once
 // one is set. A quest that is not pending (never marked done, sent back, or
 // already approved) is ErrNotFound, so a repeated or concurrent approval
@@ -267,9 +303,9 @@ func (s *QuestService) Approve(ctx context.Context, userID, householdID, questID
 		// The schema forbids a pending quest without a holder.
 		return db.HouseholdQuest{}, db.FamilyMember{}, fmt.Errorf("approve quest %s: pending quest has no holder", questID)
 	}
-	member, err := qtx.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: householdID, ID: *row.CreditedMemberID, Delta: row.Points})
+	member, err := creditPoints(ctx, qtx, householdID, *row.CreditedMemberID, awardKindQuest, row.Name, row.Points, row.CompletedAt)
 	if err != nil {
-		return db.HouseholdQuest{}, db.FamilyMember{}, fmt.Errorf("credit points: %w", err)
+		return db.HouseholdQuest{}, db.FamilyMember{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return db.HouseholdQuest{}, db.FamilyMember{}, fmt.Errorf("commit: %w", err)

@@ -777,6 +777,14 @@ func TestIntegration_QuestApproval(t *testing.T) {
 		}
 		return rows
 	}
+	awards := func(memberID uuid.UUID) []db.PointsAward {
+		t.Helper()
+		rows, err := q.ListMemberPointsAwards(ctx, db.ListMemberPointsAwardsParams{HouseholdID: h.ID, MemberID: memberID, Limit: 100, Offset: 0})
+		if err != nil {
+			t.Fatalf("list points awards: %v", err)
+		}
+		return rows
+	}
 
 	// Declining is client-side: reading the quest writes nothing.
 	if got := get(); got.ClaimedBy != nil || !app.QuestAvailable(got, time.Now()) {
@@ -907,6 +915,9 @@ func TestIntegration_QuestApproval(t *testing.T) {
 	if p := points(ben.ID); p != 0 {
 		t.Errorf("points after a failed approval: %d, want 0", p)
 	}
+	if got := awards(ben.ID); len(got) != 0 {
+		t.Errorf("a failed approval left history entries: %+v", got)
+	}
 
 	// Two approvals at once: exactly one credits the points.
 	start := make(chan struct{})
@@ -958,6 +969,16 @@ func TestIntegration_QuestApproval(t *testing.T) {
 		!approved.AvailableAt.Valid || approved.AvailableAt.Time.Sub(approved.CompletedAt.Time) != 72*time.Hour {
 		t.Fatalf("approved quest: %+v", approved)
 	}
+	// The concurrent and repeated approvals wrote exactly one history entry,
+	// for the credited points, earned at the approval time.
+	benAwards := awards(ben.ID)
+	if len(benAwards) != 1 {
+		t.Fatalf("Ben's history after approval: %d entries, want 1: %+v", len(benAwards), benAwards)
+	}
+	if a := benAwards[0]; a.HouseholdID != h.ID || a.MemberID != ben.ID || a.Kind != "quest" || a.Reason != "Mow the lawn" ||
+		a.Points != 7 || !a.EarnedAt.Valid || !a.EarnedAt.Time.Equal(approved.CompletedAt.Time) {
+		t.Errorf("Ben's history entry: %+v, want quest 'Mow the lawn' 7 points earned at %v", a, approved.CompletedAt.Time)
+	}
 	if app.QuestAvailable(approved, time.Now()) {
 		t.Error("an approved quest is available before its repeat days pass")
 	}
@@ -995,5 +1016,11 @@ func TestIntegration_QuestApproval(t *testing.T) {
 	}
 	if p := points(ben.ID); p != 7 {
 		t.Errorf("Ben's points changed on Ann's approval: %d, want 7", p)
+	}
+	if a := awards(ann.ID); len(a) != 1 || a[0].Reason != "Mow the lawn" || a[0].Points != 7 {
+		t.Errorf("Ann's history: %+v, want one 'Mow the lawn' entry of 7", a)
+	}
+	if a := awards(ben.ID); len(a) != 1 {
+		t.Errorf("Ben's history changed on Ann's approval: %+v", a)
 	}
 }
