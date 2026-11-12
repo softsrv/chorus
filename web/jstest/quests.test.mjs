@@ -475,3 +475,56 @@ test('CLM-3: home view with no households shows the New household form as the pr
   assert.equal(walk(env.$app).filter((n) => n.tagName === 'A' && n.textContent === 'Quests').length, 0, 'no household panel');
   noInlineStyle();
 });
+
+// combos CLM-5/CLM-6: the approve response's combo_bonuses becomes a plain-text
+// notice naming the chore and every combo paid; none paid, no notice.
+function approvalWithBonuses(bonuses) {
+  srv.adminPinSet = true;
+  let items = [{ ...quest({ id: 'q1', name: 'Wipe counters', points: 10, awaiting_approval: true, claimed_by: 'm-a' }), member_name: 'Sam' }];
+  srv.pending = () => [200, { items }];
+  srv.extra[`POST ${HP}/quests/q1/approve`] = () => {
+    items = [];
+    return [200, { quest: quest({ id: 'q1', available: false }), member: srv.members[0], combo_bonuses: bonuses }];
+  };
+}
+
+const alerts = () => walk(env.$app).filter((n) => n.getAttribute('role') === 'alert');
+
+test('combos CLM-5: an approval that paid two combos shows each name and bonus, and the list reloads', async () => {
+  approvalWithBonuses([
+    { combo_id: 'c1', name: 'Kitchen Crew', bonus_points: 20 },
+    { combo_id: 'c2', name: 'Clean Sweep', bonus_points: 15 },
+  ]);
+  await loadApp();
+  await unlockAdmin('9999');
+  const pendingBefore = calls.filter((c) => c.path.endsWith('/pending')).length;
+  await click(buttons(env.$app, 'Approve')[0]);
+  const notice = alerts().map((n) => n.textContent).join('|');
+  assert.match(notice, /Approved 'Wipe counters' for Sam: \+10 points, combo bonus 'Kitchen Crew' \+20, combo bonus 'Clean Sweep' \+15/);
+  assert.ok(calls.filter((c) => c.path.endsWith('/pending')).length > pendingBefore, 'approvals not reloaded');
+  assert.match(text(), /Nothing waiting for approval\./);
+});
+
+test('combos CLM-5: an approval with combo_bonuses [] shows no bonus text and no notice', async () => {
+  approvalWithBonuses([]);
+  await loadApp();
+  await unlockAdmin('9999');
+  await click(buttons(env.$app, 'Approve')[0]);
+  assert.doesNotMatch(text(), /combo bonus/);
+  assert.equal(alerts().length, 0);
+  assert.match(text(), /Nothing waiting for approval\./);
+});
+
+test('combos CLM-6: a combo name with markup stays literal text in the bonus notice', async () => {
+  const evil = '<img src=x onerror=1>';
+  approvalWithBonuses([{ combo_id: 'c1', name: evil, bonus_points: 5 }]);
+  await loadApp();
+  await unlockAdmin('9999');
+  await click(buttons(env.$app, 'Approve')[0]);
+  const [notice] = alerts();
+  const span = walk(notice).find((n) => n.tagName === 'SPAN');
+  assert.equal(span.childNodes.length, 1);
+  assert.ok(span.childNodes[0] instanceof Text);
+  assert.ok(span.childNodes[0].data.includes(`combo bonus '${evil}' +5`));
+  assert.equal(walk(env.$app).filter((n) => n.tagName === 'IMG').length, 0);
+});

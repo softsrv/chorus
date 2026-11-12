@@ -50,11 +50,17 @@ function form({ fields, submit, onSubmit, inline = false }) {
   const $error = el('div');
   const inputs = {};
   const hints = {};
+  const multi = new Set(fields.filter((f) => f.type === 'multiselect').map((f) => f.name));
   const rows = fields.map((f) => {
     let input;
     if (f.type === 'select') {
       input = el('select', { name: f.name, class: 'select select-bordered w-full' },
         f.options.map(([value, label]) => el('option', { value, text: label, selected: value === (f.value ?? '') })));
+    } else if (f.type === 'multiselect') {
+      // value is the array of selected option values.
+      const chosen = f.value || [];
+      input = el('select', { name: f.name, multiple: true, class: 'select select-bordered w-full' },
+        f.options.map(([value, label]) => el('option', { value, text: label, selected: chosen.includes(value) })));
     } else if (f.type === 'textarea') {
       input = el('textarea', { name: f.name, class: 'textarea textarea-bordered w-full', rows: 2, text: f.value ?? '' });
     } else if (f.type === 'checkbox') {
@@ -83,7 +89,9 @@ function form({ fields, submit, onSubmit, inline = false }) {
       Object.values(hints).forEach((h) => { h.textContent = ''; });
       const values = {};
       for (const [name, input] of Object.entries(inputs)) {
-        values[name] = input.type === 'checkbox' ? input.checked : input.value;
+        if (input.type === 'checkbox') values[name] = input.checked;
+        else if (multi.has(name)) values[name] = Array.from(input.children).filter((o) => o.selected).map((o) => o.value);
+        else values[name] = input.value;
       }
       $submit.disabled = true;
       try {
@@ -724,6 +732,16 @@ function takeCard(h, quests, nameOf, rerender) {
       (q) => row(q, q.available_at && el('span', { class: 'text-xs opacity-70', text: `Back ${fmtDate(q.available_at)}` })), ''));
 }
 
+// comboBonusNotice is the plain-text notice after an approval that paid combo
+// bonuses (the approve response's combo_bonuses), naming the chore and every
+// combo with its bonus; null when none were paid (or for a send-back).
+function comboBonusNotice(q, res) {
+  const bonuses = (res && res.combo_bonuses) || [];
+  if (bonuses.length === 0) return null;
+  const paid = bonuses.map((b) => `combo bonus '${b.name}' +${b.bonus_points}`).join(', ');
+  return `Approved '${q.name}' for ${q.member_name}: +${q.points} points, ${paid}`;
+}
+
 // approvalsCard is the administrator's list of quests marked done. Loading,
 // approving and sending back carry X-Admin-PIN (adminRequest). A 403 for the
 // admin PIN says so, leaves the list as it was and never signs anyone out.
@@ -757,15 +775,16 @@ async function approvalsCard(h, members, rerender) {
   }
 
   const act = (verb, q) => action(async () => {
+    let res;
     try {
-      await adminRequest('POST', `/households/${h.id}/quests/${q.id}/${verb}`, {});
+      res = await adminRequest('POST', `/households/${h.id}/quests/${q.id}/${verb}`, {});
     } catch (err) {
       if (isAdminPinError(err)) { wrongAdminPin(); return; }
       const msg = questNotice(err);
       if (msg) { rerender(msg); return; }
       throw err;
     }
-    rerender();
+    rerender(comboBonusNotice(q, res));
   }, $err);
 
   const rows = pending.map((q) => el('li', { class: 'flex flex-wrap items-center gap-2 py-2 border-b border-base-300' },
@@ -869,30 +888,71 @@ function manageQuestsCard(h, quests, library, page, rerender) {
       el('ul', {}, libraryRows)));
 }
 
-// manageCombosCard lists every combo for the household admin.
+// manageCombosCard lists every combo (name, chores, bonus) with the admin's
+// add, edit and delete controls, shown while management is unlocked. Writes
+// carry the admin PIN only in X-Admin-PIN (adminRequest); a refused save keeps
+// the form as typed and shows each field's error under it.
 function manageCombosCard(h, combos, quests, rerender) {
+  const unlocked = managementUnlocked();
+  const base = `/households/${h.id}/combos`;
   const questMap = Object.fromEntries(quests.map((q) => [q.id, q.name]));
+
+  // A blank bonus is sent as typed, never as 0: the server validates it.
+  const toNum = (val) => {
+    if (String(val).trim() === '') return val;
+    const n = Number(val);
+    return Number.isNaN(n) ? val : n;
+  };
+  const toBody = (v) => ({ name: v.name, bonus_points: toNum(v.bonus_points), quest_ids: v.quest_ids });
+  const comboFields = (c = {}) => [
+    { name: 'name', label: 'Name', value: c.name },
+    { name: 'quest_ids', label: 'Chores', type: 'multiselect', value: c.quest_ids || [], options: quests.map((q) => [q.id, q.name]) },
+    { name: 'bonus_points', label: 'Bonus points', type: 'number', value: c.bonus_points ?? '' },
+  ];
+
   const rows = combos.map((c) => {
     const choreNames = (c.quest_ids || []).map((id) => questMap[id] || id).join(', ');
-    return el('tr', {},
+    const $row = el('tr', {},
       el('td', { class: 'font-medium', text: c.name }),
       el('td', { text: choreNames }),
       el('td', { text: `+${c.bonus_points}` }),
-      el('td', {}));
+      el('td', {},
+        unlocked && el('button', {
+          class: 'btn btn-ghost btn-xs', text: 'Edit',
+          onclick: () => $row.replaceWith(el('tr', {}, el('td', { colspan: '4' }, form({
+            fields: comboFields(c), submit: 'Save', inline: true,
+            onSubmit: async (v) => { await adminRequest('PUT', `${base}/${c.id}`, toBody(v)); rerender(); },
+          })))),
+        }),
+        unlocked && el('button', {
+          class: 'btn btn-ghost btn-xs text-error', text: 'Delete',
+          onclick: confirmClick('Sure?', async () => { await adminRequest('DELETE', `${base}/${c.id}`); rerender(); }),
+        })));
+    return $row;
   });
 
-  const table = el('table', { class: 'table w-full' },
-    el('thead', {},
-      el('tr', {},
-        el('th', { text: 'Combo' }),
-        el('th', { text: 'Chores' }),
-        el('th', { text: 'Bonus' }),
-        el('th', {}))),
-    el('tbody', {}, rows));
+  const list = combos.length
+    ? el('table', { class: 'table w-full' },
+      el('thead', {},
+        el('tr', {},
+          el('th', { text: 'Combo' }),
+          el('th', { text: 'Chores' }),
+          el('th', { text: 'Bonus' }),
+          el('th', {}))),
+      el('tbody', {}, rows))
+    : el('div', { class: 'text-sm' },
+      el('p', { class: 'font-medium', text: 'No combos yet' }),
+      el('p', { class: 'opacity-70', text: 'Create one to reward chores done together on the same day.' }));
+
+  const addForm = unlocked && form({
+    fields: comboFields(), submit: 'Create combo', inline: true,
+    onSubmit: async (v) => { await adminRequest('POST', base, toBody(v)); rerender(); },
+  });
 
   return card(null,
     el('h3', { class: 'font-semibold', text: 'Manage combos' }),
-    table);
+    list,
+    addForm);
 }
 
 // ── Rewards ───────────────────────────────────────────────────────────────────
