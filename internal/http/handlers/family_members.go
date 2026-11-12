@@ -342,4 +342,3 @@ func (h *FamilyMemberHandler) PointsHistory(w http.ResponseWriter, r *http.Reque
 		Items: mapSlice(awards, toPointsAward),
 	})
 }
-

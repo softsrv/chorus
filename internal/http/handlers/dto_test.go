@@ -175,4 +175,3 @@ func TestPointsAwardJSON(t *testing.T) {
 		}
 	}
 }
-

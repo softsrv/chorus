@@ -1165,4 +1165,3 @@ func TestIntegration_QuestApproval_RollbackOnPointsAwardFailure(t *testing.T) {
 		t.Errorf("points awards final: %+v, want 1 award with 10 pts", awardsFinal)
 	}
 }
-

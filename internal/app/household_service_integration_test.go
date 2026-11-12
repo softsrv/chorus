@@ -156,6 +156,11 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	// Cross-household ID smuggling with family members:
 	_, checks["get family member via own household"] = familySvc.Get(ctx, mallory, mh.ID, aliceMember.ID)
 	checks["remove family member via own household"] = familySvc.Remove(ctx, mallory, mh.ID, aliceMember.ID, "")
+	// Points history isolation checks:
+	_, checks["points history outsider user"] = familySvc.PointsHistory(ctx, mallory, h.ID, aliceMember.ID, "1234", "", 10, 0)
+	_, checks["points history own household foreign member"] = familySvc.PointsHistory(ctx, alice, h.ID, malloryMember.ID, "", "", 10, 0)
+	_, checks["points history foreign household own member"] = familySvc.PointsHistory(ctx, alice, mh.ID, aliceMember.ID, "1234", "", 10, 0)
+	_, checks["points history nonexistent member"] = familySvc.PointsHistory(ctx, alice, h.ID, uuid.New(), "1234", "", 10, 0)
 	// Reward isolation: every reward operation by an outsider is ErrNotFound,
 	// and Alice's reward id smuggled under Mallory's own household fails too.
 	rewardLibrary, err := rewards.ListLibrary(ctx)
@@ -302,6 +307,85 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		t.Fatalf("Create bob reward: %v", err)
 	}
 
+	// Points history isolation and PIN checks:
+	// Insert awards for Alice (Household A) and Bob (Household B).
+	aliceAwardID := uuid.New()
+	_, err = q.InsertPointsAward(ctx, db.InsertPointsAwardParams{
+		ID:          aliceAwardID,
+		HouseholdID: h.ID,
+		MemberID:    aliceMember.ID,
+		Kind:        "quest",
+		Reason:      "Alice quest",
+		Points:      10,
+		EarnedAt:    pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("InsertPointsAward for alice: %v", err)
+	}
+
+	bobAwardID := uuid.New()
+	_, err = q.InsertPointsAward(ctx, db.InsertPointsAwardParams{
+		ID:          bobAwardID,
+		HouseholdID: bh.ID,
+		MemberID:    bobMember.ID,
+		Kind:        "quest",
+		Reason:      "Bob quest",
+		Points:      25,
+		EarnedAt:    pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("InsertPointsAward for bob: %v", err)
+	}
+
+	// Right member PIN reads history; Bob's award is not in Alice's history.
+	aliceHist, err := familySvc.PointsHistory(ctx, alice, h.ID, aliceMember.ID, "1234", "", 50, 0)
+	if err != nil {
+		t.Fatalf("PointsHistory with member PIN: %v", err)
+	}
+	if len(aliceHist) != 1 || aliceHist[0].ID != aliceAwardID {
+		t.Errorf("alice points history mismatch: got %+v, want award %v", aliceHist, aliceAwardID)
+	}
+
+	// Admin PIN reads history (SetAdminPin first).
+	if err := familySvc.SetAdminPin(ctx, alice, h.ID, "5555", ""); err != nil {
+		t.Fatalf("SetAdminPin for alice: %v", err)
+	}
+	aliceHistAdmin, err := familySvc.PointsHistory(ctx, alice, h.ID, aliceMember.ID, "", "5555", 50, 0)
+	if err != nil {
+		t.Fatalf("PointsHistory with admin PIN: %v", err)
+	}
+	if len(aliceHistAdmin) != 1 || aliceHistAdmin[0].ID != aliceAwardID {
+		t.Errorf("alice admin PIN points history mismatch: got %+v, want award %v", aliceHistAdmin, aliceAwardID)
+	}
+	if err := familySvc.ClearAdminPin(ctx, alice, h.ID, "5555"); err != nil {
+		t.Fatalf("ClearAdminPin for alice: %v", err)
+	}
+
+	// Wrong PIN -> ErrWrongPIN and no rows returned.
+	wrongHist, err := familySvc.PointsHistory(ctx, alice, h.ID, aliceMember.ID, "0000", "", 50, 0)
+	if !errors.Is(err, app.ErrWrongPIN) {
+		t.Errorf("wrong member PIN points history: expected ErrWrongPIN, got %v", err)
+	}
+	if len(wrongHist) != 0 {
+		t.Errorf("wrong member PIN points history returned rows: %+v", wrongHist)
+	}
+	wrongHist2, err := familySvc.PointsHistory(ctx, alice, h.ID, aliceMember.ID, "0000", "0000", 50, 0)
+	if !errors.Is(err, app.ErrWrongPIN) {
+		t.Errorf("wrong member and admin PIN points history: expected ErrWrongPIN, got %v", err)
+	}
+	if len(wrongHist2) != 0 {
+		t.Errorf("wrong member and admin PIN points history returned rows: %+v", wrongHist2)
+	}
+
+	// Bob's history in household B is separate.
+	bobHist, err := familySvc.PointsHistory(ctx, bob, bh.ID, bobMember.ID, "4321", "", 50, 0)
+	if err != nil {
+		t.Fatalf("bob PointsHistory with member PIN: %v", err)
+	}
+	if len(bobHist) != 1 || bobHist[0].ID != bobAwardID {
+		t.Errorf("bob points history mismatch: got %+v, want award %v", bobHist, bobAwardID)
+	}
+
 	// Non-member (Mallory) gets ErrNotFound deleting household A, and A stays intact.
 	if err := households.Delete(ctx, mallory, h.ID); !errors.Is(err, app.ErrNotFound) {
 		t.Errorf("mallory delete household A: expected ErrNotFound, got %v", err)
@@ -361,6 +445,9 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM household_rewards WHERE household_id = $1", h.ID).Scan(&count); err != nil || count != 0 {
 		t.Errorf("household A household_rewards count = %d, want 0", count)
 	}
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM points_awards WHERE household_id = $1", h.ID).Scan(&count); err != nil || count != 0 {
+		t.Errorf("household A points_awards count = %d, want 0", count)
+	}
 
 	// Assert B's household, members, quests (including claimed and pending states), rewards and points are unchanged.
 	gotBH, err := households.Get(ctx, bob, bh.ID)
@@ -382,6 +469,10 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	gotBobReward, err := rewards.Get(ctx, bob, bh.ID, bobReward.ID)
 	if err != nil || gotBobReward.ID != bobReward.ID || gotBobReward.Description != "Ice cream" || gotBobReward.Cost != 100 {
 		t.Errorf("bob reward changed: %+v, %v", gotBobReward, err)
+	}
+	gotBobHist, err := familySvc.PointsHistory(ctx, bob, bh.ID, bobMember.ID, "4321", "", 50, 0)
+	if err != nil || len(gotBobHist) != 1 || gotBobHist[0].ID != bobAwardID {
+		t.Errorf("bob points history changed or missing after alice delete: %+v, %v", gotBobHist, err)
 	}
 
 	// Assert Bob's household_provisioned_at is unchanged.
