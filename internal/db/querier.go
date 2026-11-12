@@ -19,8 +19,10 @@ type Querier interface {
 	AddMemberPoints(ctx context.Context, arg AddMemberPointsParams) (FamilyMember, error)
 	// Completes a pending quest. The pending row is locked first, and the
 	// done_at check is re-read under the lock, so of two concurrent approvals
-	// exactly one gets a row. The repeat countdown starts now. credited_member_id
-	// is the holder to credit, read before claimed_by is cleared.
+	// exactly one gets a row; the households row is read, not locked. The quest
+	// comes back at local midnight in the household's timezone, repeat_days days
+	// after the local day it was marked done (done_at), however late the approval.
+	// credited_member_id is the holder to credit, read before claimed_by is cleared.
 	ApproveQuest(ctx context.Context, arg ApproveQuestParams) (ApproveQuestRow, error)
 	ClaimHouseholdProvisioning(ctx context.Context, id uuid.UUID) (int64, error)
 	// Assigns an available quest to a family member. The availability check and

@@ -127,6 +127,14 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	if _, err := quests.MarkDone(ctx, alice, h.ID, alicePending.ID, asAlice); err != nil {
 		t.Fatalf("MarkDone pending quest: %v", err)
 	}
+	pendingBefore, err := quests.Get(ctx, alice, h.ID, alicePending.ID)
+	if err != nil {
+		t.Fatalf("Get pending quest before outsider attempts: %v", err)
+	}
+	memberBefore, err := familySvc.Get(ctx, alice, h.ID, aliceMember.ID)
+	if err != nil {
+		t.Fatalf("Get alice member before outsider attempts: %v", err)
+	}
 	_, checks["abandon quest"] = quests.Abandon(ctx, mallory, h.ID, alicePending.ID, asAlice)
 	_, checks["mark quest done"] = quests.MarkDone(ctx, mallory, h.ID, alicePending.ID, asAlice)
 	_, checks["list pending quests"] = quests.ListPending(ctx, mallory, h.ID, "")
@@ -137,6 +145,30 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	_, checks["mark quest done via own household"] = quests.MarkDone(ctx, mallory, mh.ID, alicePending.ID, asAlice)
 	_, _, checks["approve quest via own household"] = quests.Approve(ctx, mallory, mh.ID, alicePending.ID, "")
 	_, checks["reject quest via own household"] = quests.Reject(ctx, mallory, mh.ID, alicePending.ID, "")
+
+	// CLM-14: Mallory's cross-household Approve attempts on Alice's pending quest
+	// must not approve it, clear done_at, change available_at, or award points.
+	pendingAfter, err := quests.Get(ctx, alice, h.ID, alicePending.ID)
+	if err != nil {
+		t.Fatalf("get pending quest after outsider approve attempts: %v", err)
+	}
+	if pendingAfter.ClaimedBy == nil || *pendingAfter.ClaimedBy != aliceMember.ID || !pendingAfter.DoneAt.Valid {
+		t.Errorf("alice pending quest not awaiting approval: claimed_by %v, done_at %v", pendingAfter.ClaimedBy, pendingAfter.DoneAt)
+	}
+	if pendingAfter.CompletedAt.Valid {
+		t.Errorf("alice pending quest completed_at was set: %+v", pendingAfter)
+	}
+	if pendingAfter.AvailableAt.Valid != pendingBefore.AvailableAt.Valid ||
+		(pendingBefore.AvailableAt.Valid && !pendingAfter.AvailableAt.Time.Equal(pendingBefore.AvailableAt.Time)) {
+		t.Errorf("alice pending quest available_at changed: before %v, after %v", pendingBefore.AvailableAt, pendingAfter.AvailableAt)
+	}
+	memberAfter, err := familySvc.Get(ctx, alice, h.ID, aliceMember.ID)
+	if err != nil {
+		t.Fatalf("get alice member after outsider approve attempts: %v", err)
+	}
+	if memberAfter.Points != memberBefore.Points {
+		t.Errorf("alice member points changed: before %d, after %d", memberBefore.Points, memberAfter.Points)
+	}
 	if rows, err := quests.ListPending(ctx, mallory, mh.ID, ""); err != nil || len(rows) != 0 {
 		t.Errorf("mallory's own pending list shows other households' quests: %+v, %v", rows, err)
 	}

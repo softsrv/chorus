@@ -101,7 +101,7 @@ Each household has exactly one login account (its administrator); invites and lo
 
 Quests replace chores: the old `/households/{id}/chores` routes are removed and answer `404 not_found`. Every existing chore was carried over into a quest with the same id (0 points, daily); the chore details stay in the database as a read-only archive.
 
-Quest: `id, household_id, library_id, name, points, repeat_days, notes, available, claimed_by, claimed_at, done_at, awaiting_approval, completed_at, available_at, created_at, updated_at`. `library_id` is set when the quest was copied from the library. `repeat_days` is the number of days until the quest is available again after completion (1 = daily, 30 = monthly).
+Quest: `id, household_id, library_id, name, points, repeat_days, notes, available, claimed_by, claimed_at, done_at, awaiting_approval, completed_at, available_at, created_at, updated_at`. `library_id` is set when the quest was copied from the library. `repeat_days` is the number of local days after the day the member marked it done before it is back at midnight (1 = daily, 30 = monthly).
 
 Library quest: `id, name, points, repeat_days, notes`. The library is the same for every household and read-only: there is no route that writes to it.
 
@@ -114,14 +114,14 @@ Library quest: `id, name, points, repeat_days, notes`. The library is the same f
 | `GET /households/{id}/quests/{questId}` | none | Any member |
 | `PUT /households/{id}/quests/{questId}` | same as POST | admin; `X-Admin-PIN` header if set. Full replacement |
 | `DELETE /households/{id}/quests/{questId}` | none | admin; `X-Admin-PIN` header if set. `204` |
-| `POST /households/{id}/quests/{questId}/accept` | `member_id, pin?` | The acting family member takes an available quest. `200` quest; `409 quest_taken` when another member holds it or it is waiting out its repeat days |
+| `POST /households/{id}/quests/{questId}/accept` | `member_id, pin?` | The acting family member takes an available quest. `200` quest; `409 quest_taken` when another member holds it or it is waiting for its midnight |
 | `POST /households/{id}/quests/{questId}/abandon` | `member_id, pin?` | The holder puts the quest back in the pool for everyone. `200` quest; `404` when the member does not hold it or it is waiting for approval |
 | `POST /households/{id}/quests/{questId}/done` | `member_id, pin?` | The holder marks the quest done; it waits for the administrator and no points move yet. `200` quest; `404` when the member does not hold it or it is already waiting |
 | `GET /households/{id}/quests/pending` | none | admin; `X-Admin-PIN` header if set. `{items: [quest + member_name]}` of quests waiting for approval, oldest first; `{items: []}` when nothing is waiting |
-| `POST /households/{id}/quests/{questId}/approve` | none or `{}` | admin; `X-Admin-PIN` header if set. Credits the quest's points to its holder in the same transaction, releases the quest and starts its repeat countdown. `200 {quest, member}` with the member's new `points`; `404` when the quest is not waiting (so a repeated approval credits nothing) |
+| `POST /households/{id}/quests/{questId}/approve` | none or `{}` | admin; `X-Admin-PIN` header if set. Credits the quest's points to its holder in the same transaction, releases the quest and sets the return time. `200 {quest, member}` with the member's new `points`; `404` when the quest is not waiting (so a repeated approval credits nothing) |
 | `POST /households/{id}/quests/{questId}/reject` | none or `{}` | admin; `X-Admin-PIN` header if set. Sends the quest back: it stays with the same member, unfinished, no points. `200` quest; `404` when the quest is not waiting |
 
-Quest lifecycle: available → `accept` (held by a member) → `done` (`awaiting_approval: true`) → `approve` (points credited; `available_at` = approval time + `repeat_days`) or `reject` (back to held). Declining is client-side only and writes nothing. Member actions name the acting family member in the body; a wrong member PIN is `403 wrong_pin`. On admin-gated actions a missing `X-Admin-PIN` (once one is set) is `403 admin_pin_required` and a wrong one `403 wrong_pin`; neither ever signs anyone out, and neither changes anything. Quest actions share the PIN rate limit.
+Quest lifecycle: available → `accept` (held by a member) → `done` (`awaiting_approval: true`) → `approve` (points credited; `available_at` = 00:00 in the household's timezone, `repeat_days` days after the day the member marked it done) or `reject` (back to held). Declining is client-side only and writes nothing. Member actions name the acting family member in the body; a wrong member PIN is `403 wrong_pin`. On admin-gated actions a missing `X-Admin-PIN` (once one is set) is `403 admin_pin_required` and a wrong one `403 wrong_pin`; neither ever signs anyone out, and neither changes anything. Quest actions share the PIN rate limit.
 
 Validation is per field and all at once: a `422` lists every bad field in `fields` — `name` (1–200 characters), `points` (a whole number ≥ 0; a non-numeric value is rejected), `repeat_days` (a whole number ≥ 1), `notes` (≤ 2000 characters). Nothing is saved on a `422`. A non-member, or a quest id from another household, gets `404`. Quest writes share the PIN rate limit.
 

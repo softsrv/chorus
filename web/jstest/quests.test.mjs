@@ -116,7 +116,7 @@ test('CLM-1: quest detail shows notes; Accept sends the active member and moves 
 
   await click(buttons(env.$app, 'View')[0]);
   assert.match(text(), /Half a scoop, then fresh water\./);
-  assert.match(text(), /5 points · 1 day\(s\) until available again/);
+  assert.match(text(), /5 points · resets at midnight after 1 day\(s\)/);
   assert.equal(buttons(env.$app, 'Decline').length, 1);
 
   await click(buttons(env.$app, 'Accept')[0]);
@@ -222,6 +222,17 @@ test('CLM-6: the Available list follows the server available flag only', async (
   await click(walk(env.$app).find((n) => n.tagName === 'A' && n.textContent === 'Quests'));
   assert.match(section(env.$app, 'Available'), /Feed the cat/);
   assert.equal(section(env.$app, 'Coming back later'), null);
+});
+
+test('CLM-11: resting quest in Coming back later renders Back followed by fmtDate(available_at)', async () => {
+  const future = '2030-01-02T06:00:00Z';
+  srv.quests = [quest({ available: false, completed_at: '2025-01-03T00:00:00Z', available_at: future })];
+  await loadApp();
+  await becomeAnn();
+  const comingBack = section(env.$app, 'Coming back later');
+  assert.ok(comingBack, 'Coming back later section should be present');
+  const expectedText = `Back ${new Date(future).toLocaleString()}`;
+  assert.ok(comingBack.includes(expectedText), `expected ${comingBack} to include ${expectedText}`);
 });
 
 test('CLM-7: points show in the picker, header and Family tab, and refresh after an approval', async () => {
