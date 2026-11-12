@@ -906,7 +906,7 @@ function manageCombosCard(h, combos, quests, rerender) {
   const toBody = (v) => ({ name: v.name, bonus_points: toNum(v.bonus_points), quest_ids: v.quest_ids });
   const comboFields = (c = {}) => [
     { name: 'name', label: 'Name', value: c.name },
-    { name: 'quest_ids', label: 'Chores', type: 'multiselect', value: c.quest_ids || [], options: quests.map((q) => [q.id, q.name]) },
+    { name: 'quest_ids', label: 'Quests', type: 'multiselect', value: c.quest_ids || [], options: quests.map((q) => [q.id, q.name]) },
     { name: 'bonus_points', label: 'Bonus points', type: 'number', value: c.bonus_points ?? '' },
   ];
 
@@ -936,7 +936,7 @@ function manageCombosCard(h, combos, quests, rerender) {
       el('thead', {},
         el('tr', {},
           el('th', { text: 'Combo' }),
-          el('th', { text: 'Chores' }),
+          el('th', { text: 'Quests' }),
           el('th', { text: 'Bonus' }),
           el('th', {}))),
       el('tbody', {}, rows))
