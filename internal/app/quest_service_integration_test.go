@@ -851,6 +851,9 @@ func TestIntegration_QuestApproval(t *testing.T) {
 	if p := points(ben.ID); p != 0 {
 		t.Errorf("points after reject: %d, want 0", p)
 	}
+	if got := awards(ben.ID); len(got) != 0 {
+		t.Errorf("points awards after reject: %+v, want none", got)
+	}
 	if len(pending("")) != 0 {
 		t.Error("a rejected quest is still waiting")
 	}
@@ -1024,3 +1027,142 @@ func TestIntegration_QuestApproval(t *testing.T) {
 		t.Errorf("Ben's history changed on Ann's approval: %+v", a)
 	}
 }
+
+// TestIntegration_QuestApproval_RollbackOnPointsAwardFailure proves CLM-2:
+// when the points_awards insert fails during Approve, the whole transaction rolls back:
+// the quest is still pending (done_at set, claimed_by kept), the member's points
+// are unchanged, zero history rows exist, and Approve returns an error.
+// Dropping the fault trigger allows a retry to succeed.
+func TestIntegration_QuestApproval_RollbackOnPointsAwardFailure(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	households := app.NewHouseholdService(q, pool)
+	quests := app.NewQuestService(q, pool)
+	familySvc := app.NewFamilyService(q, pool, 10)
+	ctx := context.Background()
+
+	alice := registerVerified(t, pool, authSvc, mailer, "approvefault").User.ID
+	h, err := households.Create(ctx, alice, app.HouseholdInput{Name: "Fault Family"})
+	if err != nil {
+		t.Fatalf("create household: %v", err)
+	}
+	ann, err := familySvc.Create(ctx, alice, h.ID, app.FamilyMemberInput{Name: "Ann"}, "")
+	if err != nil {
+		t.Fatalf("create Ann: %v", err)
+	}
+	asAnn := app.MemberAction{MemberID: ann.ID}
+	quest, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "Mow lawn", Points: num(10), RepeatDays: num(2)}, "")
+	if err != nil {
+		t.Fatalf("create quest: %v", err)
+	}
+
+	if _, err := quests.Accept(ctx, alice, h.ID, quest.ID, asAnn); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	done, err := quests.MarkDone(ctx, alice, h.ID, quest.ID, asAnn)
+	if err != nil {
+		t.Fatalf("mark done: %v", err)
+	}
+	if !done.DoneAt.Valid || done.ClaimedBy == nil || *done.ClaimedBy != ann.ID {
+		t.Fatalf("quest state after mark done: %+v", done)
+	}
+
+	// Fault injection: trigger on points_awards fails the insert.
+	if _, err := pool.Exec(ctx, `CREATE OR REPLACE FUNCTION test_fail_points_award() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN RAISE EXCEPTION 'points award insert failed'; END $$`); err != nil {
+		t.Fatalf("create trigger function: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DROP FUNCTION IF EXISTS test_fail_points_award() CASCADE`)
+	})
+	if _, err := pool.Exec(ctx, `CREATE TRIGGER test_fail_points_award BEFORE INSERT ON points_awards
+		FOR EACH ROW EXECUTE FUNCTION test_fail_points_award()`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	// Attempt approve: must fail because points_awards insert fails.
+	if _, _, err := quests.Approve(ctx, alice, h.ID, quest.ID, ""); err == nil {
+		t.Fatal("approve succeeded despite points_awards trigger failure")
+	}
+
+	// Assert whole transaction rolled back:
+	// 1. Quest is still pending (done_at set, claimed_by kept).
+	qAfter, err := quests.Get(ctx, alice, h.ID, quest.ID)
+	if err != nil {
+		t.Fatalf("get quest after failed approve: %v", err)
+	}
+	if qAfter.ClaimedBy == nil || *qAfter.ClaimedBy != ann.ID {
+		t.Errorf("claimed_by after failed approve: got %v, want %v", qAfter.ClaimedBy, ann.ID)
+	}
+	if !qAfter.DoneAt.Valid {
+		t.Errorf("done_at after failed approve was cleared")
+	}
+	if qAfter.CompletedAt.Valid || qAfter.AvailableAt.Valid {
+		t.Errorf("quest completed/available after failed approve: %+v", qAfter)
+	}
+
+	// 2. Member points unchanged (0).
+	mAfter, err := q.GetFamilyMember(ctx, db.GetFamilyMemberParams{HouseholdID: h.ID, ID: ann.ID})
+	if err != nil {
+		t.Fatalf("get member: %v", err)
+	}
+	if mAfter.Points != 0 {
+		t.Errorf("member points after failed approve: got %d, want 0", mAfter.Points)
+	}
+
+	// 3. Zero points_awards rows.
+	awards, err := q.ListMemberPointsAwards(ctx, db.ListMemberPointsAwardsParams{
+		HouseholdID: h.ID,
+		MemberID:    ann.ID,
+		Limit:       100,
+		Offset:      0,
+	})
+	if err != nil {
+		t.Fatalf("list points awards: %v", err)
+	}
+	if len(awards) != 0 {
+		t.Errorf("points awards count after failed approve: got %d, want 0", len(awards))
+	}
+
+	// 4. Drop trigger and assert retry succeeds.
+	if _, err := pool.Exec(ctx, `DROP TRIGGER test_fail_points_award ON points_awards`); err != nil {
+		t.Fatalf("drop trigger: %v", err)
+	}
+
+	approved, creditedMember, err := quests.Approve(ctx, alice, h.ID, quest.ID, "")
+	if err != nil {
+		t.Fatalf("retry approve after dropping trigger: %v", err)
+	}
+	if creditedMember.ID != ann.ID || creditedMember.Points != 10 {
+		t.Errorf("credited member after retry: %+v", creditedMember)
+	}
+	if !approved.CompletedAt.Valid || approved.ClaimedBy != nil || approved.DoneAt.Valid {
+		t.Errorf("approved quest state: %+v", approved)
+	}
+
+	// Member points credited
+	mFinal, err := q.GetFamilyMember(ctx, db.GetFamilyMemberParams{HouseholdID: h.ID, ID: ann.ID})
+	if err != nil {
+		t.Fatalf("get member: %v", err)
+	}
+	if mFinal.Points != 10 {
+		t.Errorf("member points after successful retry: got %d, want 10", mFinal.Points)
+	}
+
+	// Exactly 1 points award row now exists
+	awardsFinal, err := q.ListMemberPointsAwards(ctx, db.ListMemberPointsAwardsParams{
+		HouseholdID: h.ID,
+		MemberID:    ann.ID,
+		Limit:       100,
+		Offset:      0,
+	})
+	if err != nil {
+		t.Fatalf("list points awards final: %v", err)
+	}
+	if len(awardsFinal) != 1 || awardsFinal[0].Points != 10 || awardsFinal[0].Reason != "Mow lawn" {
+		t.Errorf("points awards final: %+v, want 1 award with 10 pts", awardsFinal)
+	}
+}
+
