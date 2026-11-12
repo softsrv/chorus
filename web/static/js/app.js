@@ -640,12 +640,14 @@ const questMeta = (q) => `${q.points} points · ${q.repeat_days} day(s) until av
 async function questsTab(h, $root, notice = null) {
   const rerender = (next = null) => { $root.replaceChildren(); questsTab(h, $root, next).catch((err) => showError($root, err)); };
 
-  const [page, library, family] = await Promise.all([
+  const [page, comboPage, library, family] = await Promise.all([
     api('GET', `/households/${h.id}/quests?limit=100`),
+    api('GET', `/households/${h.id}/combos`),
     api('GET', '/quest-library'),
     api('GET', `/households/${h.id}/family-members`),
   ]);
   const quests = page.items || [];
+  const combos = comboPage.items || [];
   const members = family.items || [];
   const nameOf = Object.fromEntries(members.map((m) => [m.id, m.name]));
 
@@ -656,6 +658,7 @@ async function questsTab(h, $root, notice = null) {
       el('p', { class: 'text-sm opacity-70', text: 'Choose a family member to take quests.' })),
     !activeMember && await approvalsCard(h, members, rerender),
     managementVisible() && manageQuestsCard(h, quests, library, page, rerender),
+    managementVisible() && manageCombosCard(h, combos, quests, rerender),
   ].filter(Boolean);
   $root.replaceChildren(el('div', { class: 'space-y-4' }, cards));
 }
@@ -864,6 +867,32 @@ function manageQuestsCard(h, quests, library, page, rerender) {
     el('div', { class: 'space-y-2' },
       el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Quest Library' }),
       el('ul', {}, libraryRows)));
+}
+
+// manageCombosCard lists every combo for the household admin.
+function manageCombosCard(h, combos, quests, rerender) {
+  const questMap = Object.fromEntries(quests.map((q) => [q.id, q.name]));
+  const rows = combos.map((c) => {
+    const choreNames = (c.quest_ids || []).map((id) => questMap[id] || id).join(', ');
+    return el('tr', {},
+      el('td', { class: 'font-medium', text: c.name }),
+      el('td', { text: choreNames }),
+      el('td', { text: `+${c.bonus_points}` }),
+      el('td', {}));
+  });
+
+  const table = el('table', { class: 'table w-full' },
+    el('thead', {},
+      el('tr', {},
+        el('th', { text: 'Combo' }),
+        el('th', { text: 'Chores' }),
+        el('th', { text: 'Bonus' }),
+        el('th', {}))),
+    el('tbody', {}, rows));
+
+  return card(null,
+    el('h3', { class: 'font-semibold', text: 'Manage combos' }),
+    table);
 }
 
 // ── Rewards ───────────────────────────────────────────────────────────────────

@@ -40,6 +40,7 @@ function routes() {
     [`GET ${HP}/admin-pin`]: () => [200, { set: srv.adminPinSet }],
     [`POST ${HP}/admin-pin/verify`]: (r) => (r.body.pin === srv.adminPin ? [204, null] : err(403, 'wrong_pin', 'Wrong PIN.')),
     [`GET ${HP}/quests`]: () => [200, { items: srv.quests, next_offset: null }],
+    [`GET ${HP}/combos`]: () => [200, { items: [] }],
     'GET /quest-library': () => [200, { items: [] }],
     [`GET ${HP}/family-members`]: () => [200, { items: srv.members }],
     [`POST ${HP}/family-members/m-a/verify`]: () => [204, null],
