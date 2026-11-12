@@ -29,6 +29,7 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	quests := app.NewQuestService(q, pool)
 	familySvc := app.NewFamilyService(q, pool, 10)
 	rewards := app.NewRewardService(q)
+	combos := app.NewComboService(q, pool)
 	ctx := context.Background()
 
 	alice := registerVerified(t, pool, authSvc, mailer, "alice").User.ID
@@ -68,6 +69,22 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	aliceReward, err := rewards.Create(ctx, alice, h.ID, app.RewardInput{Description: "Movie night", Cost: num(300)}, "")
 	if err != nil {
 		t.Fatalf("Create reward: %v", err)
+	}
+	aliceQuest2, err := quests.Create(ctx, alice, h.ID, app.QuestInput{
+		Name:       "Wipe counters",
+		Points:     app.NumberField{Value: 5, Set: true},
+		RepeatDays: app.NumberField{Value: 1, Set: true},
+	}, "")
+	if err != nil {
+		t.Fatalf("Create quest 2: %v", err)
+	}
+	aliceCombo, err := combos.Create(ctx, alice, h.ID, app.ComboInput{
+		Name:        "Kitchen Crew",
+		BonusPoints: num(20),
+		QuestIDs:    []uuid.UUID{aliceQuest.ID, aliceQuest2.ID},
+	}, "")
+	if err != nil {
+		t.Fatalf("Create combo: %v", err)
 	}
 	if _, err := family.Set(ctx, alice, h.ID, "family-y@group.calendar.google.com"); err != nil {
 		t.Fatalf("Set family calendar: %v", err)
@@ -173,6 +190,25 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	checks["delete reward via own household"] = rewards.Delete(ctx, mallory, mh.ID, aliceReward.ID, "")
 	if own, err := rewards.List(ctx, mallory, mh.ID); err != nil || len(own) != 0 {
 		t.Errorf("mallory's own reward list shows other households' rewards: %+v, %v", own, err)
+	}
+
+	// Combo isolation: every combo operation by an outsider is ErrNotFound,
+	// smuggling Alice's combo id via Mallory's own household fails, and
+	// creating a combo with Alice's chore ids fails with ErrNotFound.
+	_, checks["list combos"] = combos.List(ctx, mallory, h.ID)
+	_, checks["get combo"] = combos.Get(ctx, mallory, h.ID, aliceCombo.ID)
+	_, checks["create combo"] = combos.Create(ctx, mallory, h.ID, app.ComboInput{Name: "Evil", BonusPoints: num(10), QuestIDs: []uuid.UUID{aliceQuest.ID, aliceQuest2.ID}}, "")
+	_, checks["update combo"] = combos.Update(ctx, mallory, h.ID, aliceCombo.ID, app.ComboInput{Name: "Pwned", BonusPoints: num(0), QuestIDs: []uuid.UUID{aliceQuest.ID, aliceQuest2.ID}}, "")
+	checks["delete combo"] = combos.Delete(ctx, mallory, h.ID, aliceCombo.ID, "")
+	_, checks["get combo via own household"] = combos.Get(ctx, mallory, mh.ID, aliceCombo.ID)
+	_, checks["update combo via own household"] = combos.Update(ctx, mallory, mh.ID, aliceCombo.ID, app.ComboInput{Name: "Smuggled", BonusPoints: num(0), QuestIDs: []uuid.UUID{aliceQuest.ID, aliceQuest2.ID}}, "")
+	checks["delete combo via own household"] = combos.Delete(ctx, mallory, mh.ID, aliceCombo.ID, "")
+	_, checks["create combo with foreign quests"] = combos.Create(ctx, mallory, mh.ID, app.ComboInput{Name: "Foreign Chores", BonusPoints: num(10), QuestIDs: []uuid.UUID{aliceQuest.ID, aliceQuest2.ID}}, "")
+	if own, err := combos.List(ctx, mallory, mh.ID); err != nil || len(own) != 0 {
+		t.Errorf("mallory's own combo list shows other households' combos: %+v, %v", own, err)
+	}
+	if got, err := combos.Get(ctx, alice, h.ID, aliceCombo.ID); err != nil || got.ID != aliceCombo.ID || got.Name != "Kitchen Crew" {
+		t.Errorf("alice's combo was modified by outsider: %+v, %v", got, err)
 	}
 
 	for name, err := range checks {
