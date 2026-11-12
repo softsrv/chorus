@@ -716,7 +716,8 @@ func TestIntegration_QuestAcceptConcurrent(t *testing.T) {
 // accepts it, abandons it, another member takes it, marks it done, the
 // administrator sends it back and then approves it. Points move only on
 // approval, exactly once, in the same transaction as the quest update, and the
-// repeat countdown starts at approval.
+// quest comes back at household-local midnight, repeat_days after the day it
+// was marked done.
 func TestIntegration_QuestApproval(t *testing.T) {
 	pool := testDB(t)
 	mailer := &captureMailer{}
@@ -909,6 +910,7 @@ func TestIntegration_QuestApproval(t *testing.T) {
 	}
 
 	// Two approvals at once: exactly one credits the points.
+	doneAt := get().DoneAt.Time
 	start := make(chan struct{})
 	type result struct {
 		member db.FamilyMember
@@ -952,11 +954,14 @@ func TestIntegration_QuestApproval(t *testing.T) {
 		t.Errorf("Ben's points after repeat approve: %d, want 7", p)
 	}
 
-	// Approved: released, completed, and out of the pool for its 3 days.
+	// Approved: released, completed, and out of the pool until 00:00 (the
+	// household's default UTC) three days after the day it was marked done.
 	approved := get()
+	y, m, d := doneAt.UTC().Date()
+	wantBack := time.Date(y, m, d+3, 0, 0, 0, 0, time.UTC)
 	if approved.ClaimedBy != nil || approved.ClaimedAt.Valid || approved.DoneAt.Valid || !approved.CompletedAt.Valid ||
-		!approved.AvailableAt.Valid || approved.AvailableAt.Time.Sub(approved.CompletedAt.Time) != 72*time.Hour {
-		t.Fatalf("approved quest: %+v", approved)
+		!approved.AvailableAt.Valid || !approved.AvailableAt.Time.Equal(wantBack) {
+		t.Fatalf("approved quest: %+v, want available_at %v", approved, wantBack)
 	}
 	if app.QuestAvailable(approved, time.Now()) {
 		t.Error("an approved quest is available before its repeat days pass")
@@ -996,4 +1001,286 @@ func TestIntegration_QuestApproval(t *testing.T) {
 	if p := points(ben.ID); p != 7 {
 		t.Errorf("Ben's points changed on Ann's approval: %d, want 7", p)
 	}
+}
+
+// TestIntegration_QuestResetsAtLocalMidnight pins the return rule: an approved
+// quest comes back at 00:00 in its household's timezone on local day D+N,
+// where D is the local day its holder marked it done and N its repeat_days.
+// The approval time never enters it, and nothing but an approval sets it.
+func TestIntegration_QuestResetsAtLocalMidnight(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	households := app.NewHouseholdService(q, pool)
+	quests := app.NewQuestService(q, pool)
+	familySvc := app.NewFamilyService(q, pool, 10)
+	ctx := context.Background()
+	alice := registerVerified(t, pool, authSvc, mailer, "questmidnight").User.ID
+
+	type family struct {
+		id       uuid.UUID
+		ann, ben app.MemberAction
+	}
+	newFamily := func(name, tz string) family {
+		t.Helper()
+		h, err := households.Create(ctx, alice, app.HouseholdInput{Name: name, Timezone: tz})
+		if err != nil {
+			t.Fatalf("create household %s: %v", name, err)
+		}
+		ann, err := familySvc.Create(ctx, alice, h.ID, app.FamilyMemberInput{Name: "Ann"}, "")
+		if err != nil {
+			t.Fatalf("create Ann: %v", err)
+		}
+		ben, err := familySvc.Create(ctx, alice, h.ID, app.FamilyMemberInput{Name: "Ben"}, "")
+		if err != nil {
+			t.Fatalf("create Ben: %v", err)
+		}
+		return family{h.ID, app.MemberAction{MemberID: ann.ID}, app.MemberAction{MemberID: ben.ID}}
+	}
+	newQuest := func(f family, days int64) uuid.UUID {
+		t.Helper()
+		quest, err := quests.Create(ctx, alice, f.id, app.QuestInput{Name: "Feed the cat", Points: num(1), RepeatDays: num(days)}, "")
+		if err != nil {
+			t.Fatalf("create quest: %v", err)
+		}
+		return quest.ID
+	}
+	get := func(f family, id uuid.UUID) db.HouseholdQuest {
+		t.Helper()
+		got, err := quests.Get(ctx, alice, f.id, id)
+		if err != nil {
+			t.Fatalf("get quest: %v", err)
+		}
+		return got
+	}
+	// doneAt has Ann accept and mark the quest done, then moves done_at to the
+	// given instant, as if she had marked it done then.
+	doneAt := func(f family, id uuid.UUID, at time.Time) {
+		t.Helper()
+		if _, err := quests.Accept(ctx, alice, f.id, id, f.ann); err != nil {
+			t.Fatalf("accept: %v", err)
+		}
+		if _, err := quests.MarkDone(ctx, alice, f.id, id, f.ann); err != nil {
+			t.Fatalf("mark done: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE household_quests SET done_at = $2 WHERE id = $1`, id, at); err != nil {
+			t.Fatalf("age done_at: %v", err)
+		}
+	}
+	approve := func(f family, id uuid.UUID) db.HouseholdQuest {
+		t.Helper()
+		got, _, err := quests.Approve(ctx, alice, f.id, id, "")
+		if err != nil {
+			t.Fatalf("approve: %v", err)
+		}
+		return got
+	}
+	// back marks a quest done at `at`, approves it now, and returns available_at.
+	back := func(f family, days int64, at time.Time) time.Time {
+		t.Helper()
+		id := newQuest(f, days)
+		doneAt(f, id, at)
+		got := approve(f, id)
+		if !got.AvailableAt.Valid || !got.CompletedAt.Valid || got.CompletedAt.Time.Before(time.Now().Add(-time.Minute)) {
+			t.Fatalf("approved quest: %+v", got)
+		}
+		return got.AvailableAt.Time
+	}
+	chicagoTZ, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatalf("load America/Chicago: %v", err)
+	}
+	chicago := newFamily("Chicago Family", "America/Chicago")
+
+	t.Run("late approval keeps the done-day midnight", func(t *testing.T) {
+		// Marked done at 20:00 yesterday (local): back at 00:00 today, so it
+		// can be picked up this morning however late the approval.
+		now := time.Now().In(chicagoTZ)
+		yesterday20 := time.Date(now.Year(), now.Month(), now.Day()-1, 20, 0, 0, 0, chicagoTZ)
+		todayMidnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, chicagoTZ)
+		id := newQuest(chicago, 1)
+		doneAt(chicago, id, yesterday20)
+		if got := approve(chicago, id); !got.AvailableAt.Time.Equal(todayMidnight) || !app.QuestAvailable(got, time.Now()) {
+			t.Errorf("available_at %v, want %v and available", got.AvailableAt.Time, todayMidnight)
+		}
+		if _, err := quests.Accept(ctx, alice, chicago.id, id, chicago.ben); err != nil {
+			t.Errorf("accept after the midnight: %v", err)
+		}
+		// Approved months after it was done: the done day still decides.
+		at := time.Date(2025, 6, 2, 20, 0, 0, 0, chicagoTZ)
+		want := time.Date(2025, 6, 3, 0, 0, 0, 0, chicagoTZ)
+		if got := back(chicago, 1, at); !got.Equal(want) {
+			t.Errorf("late approval: available_at %v, want %v", got, want)
+		}
+	})
+
+	t.Run("N days from any time on the done day", func(t *testing.T) {
+		// 2025-06-02 is a Monday.
+		for _, days := range []int64{1, 3, 7} {
+			want := time.Date(2025, 6, 2+int(days), 0, 0, 0, 0, chicagoTZ)
+			for _, at := range []time.Time{
+				time.Date(2025, 6, 2, 0, 0, 30, 0, chicagoTZ),
+				time.Date(2025, 6, 2, 23, 0, 0, 0, chicagoTZ),
+				time.Date(2025, 6, 2, 23, 59, 59, 0, chicagoTZ),
+			} {
+				got := back(chicago, days, at)
+				if !got.Equal(want) {
+					t.Errorf("repeat %d, done %v: available_at %v, want %v", days, at, got.In(chicagoTZ), want)
+				}
+				if wait := got.Sub(at); wait <= time.Duration(days-1)*24*time.Hour || wait > time.Duration(days)*24*time.Hour {
+					t.Errorf("repeat %d, done %v: wait %v", days, at, wait)
+				}
+			}
+		}
+	})
+
+	t.Run("each household uses its own midnight", func(t *testing.T) {
+		utc := newFamily("UTC Family", "UTC")
+		plain := newFamily("Default Family", "")
+		if h, err := households.Get(ctx, alice, plain.id); err != nil || h.Timezone != "UTC" {
+			t.Fatalf("default timezone: %q %v", h.Timezone, err)
+		}
+		// 03:00 UTC on June 3 is still 22:00 on June 2 in Chicago.
+		at := time.Date(2025, 6, 3, 3, 0, 0, 0, time.UTC)
+		cases := []struct {
+			name string
+			f    family
+			want time.Time
+		}{
+			{"UTC", utc, time.Date(2025, 6, 4, 0, 0, 0, 0, time.UTC)},
+			{"America/Chicago", chicago, time.Date(2025, 6, 3, 0, 0, 0, 0, chicagoTZ)},
+			{"default", plain, time.Date(2025, 6, 4, 0, 0, 0, 0, time.UTC)},
+		}
+		for _, c := range cases {
+			if got := back(c.f, 1, at); !got.Equal(c.want) {
+				t.Errorf("%s: available_at %v, want %v", c.name, got, c.want)
+			}
+		}
+	})
+
+	t.Run("daylight-saving days", func(t *testing.T) {
+		havana := newFamily("Havana Family", "America/Havana")
+		cases := []struct {
+			name string
+			f    family
+			at   time.Time
+			want time.Time
+		}{
+			// Spring forward (02:00 is skipped): 00:00 CST.
+			{"spring forward", chicago, time.Date(2025, 3, 8, 18, 0, 0, 0, time.UTC), time.Date(2025, 3, 9, 6, 0, 0, 0, time.UTC)},
+			// Fall back (01:00 happens twice): the one 00:00, CDT.
+			{"fall back", chicago, time.Date(2025, 11, 1, 17, 0, 0, 0, time.UTC), time.Date(2025, 11, 2, 5, 0, 0, 0, time.UTC)},
+			// Havana skips 00:00 on 2025-03-09: the day starts at 01:00 CDT.
+			{"skipped midnight", havana, time.Date(2025, 3, 8, 17, 0, 0, 0, time.UTC), time.Date(2025, 3, 9, 5, 0, 0, 0, time.UTC)},
+		}
+		for _, c := range cases {
+			if got := back(c.f, 1, c.at); !got.Equal(c.want) {
+				t.Errorf("%s: available_at %v, want %v", c.name, got.UTC(), c.want)
+			}
+		}
+	})
+
+	t.Run("accept is refused until the midnight", func(t *testing.T) {
+		id := newQuest(chicago, 1)
+		doneAt(chicago, id, time.Now())
+		approve(chicago, id)
+		if _, err := pool.Exec(ctx, `UPDATE household_quests SET available_at = NOW() + interval '1 minute' WHERE id = $1`, id); err != nil {
+			t.Fatalf("set available_at: %v", err)
+		}
+		before := get(chicago, id)
+		if _, err := quests.Accept(ctx, alice, chicago.id, id, chicago.ben); !errors.Is(err, app.ErrQuestTaken) {
+			t.Errorf("accept before the midnight: %v, want ErrQuestTaken", err)
+		}
+		if after := get(chicago, id); after.ClaimedBy != nil || !after.UpdatedAt.Time.Equal(before.UpdatedAt.Time) ||
+			!after.AvailableAt.Time.Equal(before.AvailableAt.Time) {
+			t.Errorf("a refused accept changed the quest: %+v, was %+v", after, before)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE household_quests SET available_at = NOW() - interval '1 minute' WHERE id = $1`, id); err != nil {
+			t.Fatalf("set available_at: %v", err)
+		}
+		if _, err := quests.Accept(ctx, alice, chicago.id, id, chicago.ben); err != nil {
+			t.Errorf("accept after the midnight: %v", err)
+		}
+	})
+
+	t.Run("a quest never done is available", func(t *testing.T) {
+		id := newQuest(chicago, 7)
+		if got := get(chicago, id); got.AvailableAt.Valid || got.CompletedAt.Valid || !app.QuestAvailable(got, time.Now()) {
+			t.Fatalf("new quest: %+v", got)
+		}
+		if _, err := quests.Accept(ctx, alice, chicago.id, id, chicago.ann); err != nil {
+			t.Errorf("accept a new quest: %v", err)
+		}
+	})
+
+	t.Run("no return time without approval", func(t *testing.T) {
+		unearned := func(label string, id uuid.UUID) {
+			t.Helper()
+			if got := get(chicago, id); got.AvailableAt.Valid || got.CompletedAt.Valid {
+				t.Errorf("%s: available_at %v completed_at %v, want both unset", label, got.AvailableAt, got.CompletedAt)
+			}
+		}
+		// Done, sent back, done again, sent back, put down: another takes it.
+		id := newQuest(chicago, 3)
+		doneAt(chicago, id, time.Now().Add(-48*time.Hour))
+		if _, err := quests.Reject(ctx, alice, chicago.id, id, ""); err != nil {
+			t.Fatalf("reject: %v", err)
+		}
+		unearned("after reject", id)
+		if _, err := quests.MarkDone(ctx, alice, chicago.id, id, chicago.ann); err != nil {
+			t.Fatalf("mark done again: %v", err)
+		}
+		if _, err := quests.Reject(ctx, alice, chicago.id, id, ""); err != nil {
+			t.Fatalf("reject again: %v", err)
+		}
+		if _, err := quests.Abandon(ctx, alice, chicago.id, id, chicago.ann); err != nil {
+			t.Fatalf("abandon: %v", err)
+		}
+		unearned("after abandon", id)
+		if _, err := quests.Accept(ctx, alice, chicago.id, id, chicago.ben); err != nil {
+			t.Errorf("accept after reject and abandon: %v", err)
+		}
+
+		// Taken and put down.
+		id = newQuest(chicago, 3)
+		if _, err := quests.Accept(ctx, alice, chicago.id, id, chicago.ann); err != nil {
+			t.Fatalf("accept: %v", err)
+		}
+		if _, err := quests.Abandon(ctx, alice, chicago.id, id, chicago.ann); err != nil {
+			t.Fatalf("abandon: %v", err)
+		}
+		unearned("after a plain abandon", id)
+		if _, err := quests.Accept(ctx, alice, chicago.id, id, chicago.ben); err != nil {
+			t.Errorf("accept after abandon: %v", err)
+		}
+
+		// Marked done, then its holder is removed from the household.
+		f := newFamily("Release Family", "America/Chicago")
+		id = newQuest(f, 3)
+		doneAt(f, id, time.Now().Add(-48*time.Hour))
+		if err := familySvc.Remove(ctx, alice, f.id, f.ann.MemberID, ""); err != nil {
+			t.Fatalf("remove Ann: %v", err)
+		}
+		if got := get(f, id); got.AvailableAt.Valid || got.CompletedAt.Valid || got.ClaimedBy != nil {
+			t.Errorf("after release: %+v", got)
+		}
+		if _, err := quests.Accept(ctx, alice, f.id, id, f.ben); err != nil {
+			t.Errorf("accept after release: %v", err)
+		}
+
+		// Approved once and back: a rejection keeps its earned return time.
+		id = newQuest(chicago, 1)
+		doneAt(chicago, id, time.Now().Add(-72*time.Hour))
+		earned := approve(chicago, id)
+		doneAt(chicago, id, time.Now())
+		if _, err := quests.Reject(ctx, alice, chicago.id, id, ""); err != nil {
+			t.Fatalf("reject: %v", err)
+		}
+		if got := get(chicago, id); !got.AvailableAt.Time.Equal(earned.AvailableAt.Time) ||
+			!got.CompletedAt.Time.Equal(earned.CompletedAt.Time) {
+			t.Errorf("reject moved the return time: %v %v, want %v %v",
+				got.AvailableAt.Time, got.CompletedAt.Time, earned.AvailableAt.Time, earned.CompletedAt.Time)
+		}
+	})
 }

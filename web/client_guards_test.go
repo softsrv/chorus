@@ -176,8 +176,11 @@ func TestClientJS_QuestsTab(t *testing.T) {
 				t.Errorf("expected quest field %s", field)
 			}
 		}
-		if !strings.Contains(app, "label: 'Days until available again'") {
-			t.Error("expected repeat_days labelled 'Days until available again'")
+		if !strings.Contains(app, "label: 'Repeats after (days, back at midnight)'") {
+			t.Error("expected repeat_days labelled 'Repeats after (days, back at midnight)'")
+		}
+		if strings.Contains(app, "until available again") {
+			t.Error("expected 'until available again' to be absent")
 		}
 	})
 
