@@ -86,7 +86,9 @@ ORDER BY q.done_at ASC, q.id ASC;
 -- exactly one gets a row; the households row is read, not locked. The quest
 -- comes back at local midnight in the household's timezone, repeat_days days
 -- after the local day it was marked done (done_at), however late the approval.
--- credited_member_id is the holder to credit, read before claimed_by is cleared.
+-- credited_member_id is the holder to credit, read before claimed_by is cleared;
+-- credited_done_at is when they marked it done, read before done_at is cleared
+-- (it decides the household day the completion counts toward for combos).
 WITH pending AS (
     SELECT hq.id, hq.claimed_by, hq.done_at, h.timezone
     FROM household_quests hq
@@ -103,7 +105,7 @@ SET claimed_by = NULL, claimed_at = NULL, done_at = NULL,
     updated_at = NOW()
 FROM pending p
 WHERE q.household_id = sqlc.arg(household_id) AND q.id = p.id
-RETURNING q.*, p.claimed_by AS credited_member_id;
+RETURNING q.*, p.claimed_by AS credited_member_id, p.done_at AS credited_done_at;
 
 -- name: RejectQuest :one
 -- Sends a pending quest back to its holder: it stays theirs, unfinished.

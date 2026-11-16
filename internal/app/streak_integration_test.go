@@ -72,7 +72,7 @@ func TestIntegration_PointsHistory(t *testing.T) {
 			t.Fatalf("mark done quest %d: %v", i, err)
 		}
 
-		appr, _, err := quests.Approve(ctx, parent, h.ID, questRow.ID, "")
+		appr, _, _, err := quests.Approve(ctx, parent, h.ID, questRow.ID, "")
 		if err != nil {
 			t.Fatalf("approve quest %d: %v", i, err)
 		}

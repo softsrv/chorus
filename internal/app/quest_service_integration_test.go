@@ -861,7 +861,7 @@ func TestIntegration_QuestApproval(t *testing.T) {
 	if _, err := quests.Reject(ctx, alice, h.ID, quest.ID, ""); !errors.Is(err, app.ErrNotFound) {
 		t.Errorf("reject a quest that is not pending: %v, want ErrNotFound", err)
 	}
-	if _, _, err := quests.Approve(ctx, alice, h.ID, quest.ID, ""); !errors.Is(err, app.ErrNotFound) {
+	if _, _, _, err := quests.Approve(ctx, alice, h.ID, quest.ID, ""); !errors.Is(err, app.ErrNotFound) {
 		t.Errorf("approve a quest that is not pending: %v, want ErrNotFound", err)
 	}
 	if p := points(ben.ID); p != 0 {
@@ -875,10 +875,10 @@ func TestIntegration_QuestApproval(t *testing.T) {
 	if err := familySvc.SetAdminPin(ctx, alice, h.ID, "2468", ""); err != nil {
 		t.Fatalf("set admin pin: %v", err)
 	}
-	if _, _, err := quests.Approve(ctx, alice, h.ID, quest.ID, ""); !errors.Is(err, app.ErrAdminPinRequired) {
+	if _, _, _, err := quests.Approve(ctx, alice, h.ID, quest.ID, ""); !errors.Is(err, app.ErrAdminPinRequired) {
 		t.Errorf("approve without admin pin: %v, want ErrAdminPinRequired", err)
 	}
-	if _, _, err := quests.Approve(ctx, alice, h.ID, quest.ID, "0000"); !errors.Is(err, app.ErrWrongPIN) {
+	if _, _, _, err := quests.Approve(ctx, alice, h.ID, quest.ID, "0000"); !errors.Is(err, app.ErrWrongPIN) {
 		t.Errorf("approve with wrong admin pin: %v, want ErrWrongPIN", err)
 	}
 	if _, err := quests.Reject(ctx, alice, h.ID, quest.ID, "0000"); !errors.Is(err, app.ErrWrongPIN) {
@@ -906,7 +906,7 @@ func TestIntegration_QuestApproval(t *testing.T) {
 		FOR EACH ROW WHEN (NEW.id = '`+ben.ID.String()+`') EXECUTE FUNCTION test_fail_points()`); err != nil {
 		t.Fatalf("create trigger: %v", err)
 	}
-	if _, _, err := quests.Approve(ctx, alice, h.ID, quest.ID, "2468"); err == nil {
+	if _, _, _, err := quests.Approve(ctx, alice, h.ID, quest.ID, "2468"); err == nil {
 		t.Fatal("approve succeeded although the points credit failed")
 	}
 	if _, err := pool.Exec(ctx, `DROP FUNCTION test_fail_points() CASCADE`); err != nil {
@@ -934,7 +934,7 @@ func TestIntegration_QuestApproval(t *testing.T) {
 	for range 2 {
 		go func() {
 			<-start
-			_, m, err := quests.Approve(ctx, alice, h.ID, quest.ID, "2468")
+			_, m, _, err := quests.Approve(ctx, alice, h.ID, quest.ID, "2468")
 			results <- result{m, err}
 		}()
 	}
@@ -961,7 +961,7 @@ func TestIntegration_QuestApproval(t *testing.T) {
 		t.Errorf("Ben's points after approval: %d, want 7", p)
 	}
 	// Approving again credits nothing more.
-	if _, _, err := quests.Approve(ctx, alice, h.ID, quest.ID, "2468"); !errors.Is(err, app.ErrNotFound) {
+	if _, _, _, err := quests.Approve(ctx, alice, h.ID, quest.ID, "2468"); !errors.Is(err, app.ErrNotFound) {
 		t.Errorf("repeat approve: %v, want ErrNotFound", err)
 	}
 	if p := points(ben.ID); p != 7 {
@@ -1016,8 +1016,10 @@ func TestIntegration_QuestApproval(t *testing.T) {
 	if _, err := quests.MarkDone(ctx, alice, h.ID, quest.ID, asAnn); err != nil {
 		t.Fatalf("Ann marks done: %v", err)
 	}
-	if _, m, err := quests.Approve(ctx, alice, h.ID, quest.ID, ""); err != nil || m.ID != ann.ID || m.Points != 7 {
-		t.Errorf("approve with no admin pin set: %+v %v", m, err)
+	// A household with no combos approves exactly as before: chore points
+	// only, and an empty (non-nil) list of combo bonuses.
+	if _, m, bonuses, err := quests.Approve(ctx, alice, h.ID, quest.ID, ""); err != nil || m.ID != ann.ID || m.Points != 7 || bonuses == nil || len(bonuses) != 0 {
+		t.Errorf("approve with no admin pin set: %+v %+v %v", m, bonuses, err)
 	}
 	if p := points(ann.ID); p != 7 {
 		t.Errorf("Ann's points: %d, want 7", p)
@@ -1088,7 +1090,7 @@ func TestIntegration_QuestApproval_RollbackOnPointsAwardFailure(t *testing.T) {
 	}
 
 	// Attempt approve: must fail because points_awards insert fails.
-	if _, _, err := quests.Approve(ctx, alice, h.ID, quest.ID, ""); err == nil {
+	if _, _, _, err := quests.Approve(ctx, alice, h.ID, quest.ID, ""); err == nil {
 		t.Fatal("approve succeeded despite points_awards trigger failure")
 	}
 
@@ -1136,7 +1138,7 @@ func TestIntegration_QuestApproval_RollbackOnPointsAwardFailure(t *testing.T) {
 		t.Fatalf("drop trigger: %v", err)
 	}
 
-	approved, creditedMember, err := quests.Approve(ctx, alice, h.ID, quest.ID, "")
+	approved, creditedMember, _, err := quests.Approve(ctx, alice, h.ID, quest.ID, "")
 	if err != nil {
 		t.Fatalf("retry approve after dropping trigger: %v", err)
 	}
@@ -1238,7 +1240,7 @@ func TestIntegration_QuestResetsAtLocalMidnight(t *testing.T) {
 	}
 	approve := func(f family, id uuid.UUID) db.HouseholdQuest {
 		t.Helper()
-		got, _, err := quests.Approve(ctx, alice, f.id, id, "")
+		got, _, _, err := quests.Approve(ctx, alice, f.id, id, "")
 		if err != nil {
 			t.Fatalf("approve: %v", err)
 		}
