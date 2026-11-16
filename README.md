@@ -35,4 +35,4 @@ make check              # everything CI runs, including govulncheck
 
 ## CI and images
 
-GitHub Actions (`.github/workflows/ci.yml`) runs the full test suite against Postgres on every push and pull request, then builds the Docker image. On commits to `main` that pass, it pushes `trriplejay/chorus:latest` and `trriplejay/chorus:sha-<commit>` to Docker Hub. The repo needs the secrets `DOCKER_USERNAME` and `DOCKER_PASSWORD` (a Docker Hub access token).
+GitHub Actions (`.github/workflows/ci.yml`) runs the full test suite against Postgres on pushes to `main` and on every pull request. Pull requests build the Docker image without pushing it. On merges to `main` that pass, it builds and pushes `trriplejay/chorus:latest` and `trriplejay/chorus:sha-<commit>` to Docker Hub. The repo needs the secrets `DOCKER_USERNAME` and `DOCKER_PASSWORD` (a Docker Hub access token).
