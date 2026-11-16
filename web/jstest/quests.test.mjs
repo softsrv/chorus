@@ -31,7 +31,7 @@ const quest = (over) => ({
 const err = (status, code, message = code) => [status, { error: { code, message } }];
 
 function routes() {
-  return {
+  const r = {
     'POST /auth/refresh': () => [200, {
       access_token: 'at', refresh_token: 'rt',
       user: { id: 'u1', email: 'p@example.com', display_name: 'Parent', email_verified: true },
@@ -47,6 +47,15 @@ function routes() {
     [`GET ${HP}/quests/pending`]: (r) => srv.pending(r),
     ...srv.extra,
   };
+  return new Proxy(r, {
+    get(target, prop) {
+      if (prop in target) return target[prop];
+      if (typeof prop === 'string' && prop.startsWith(`GET ${HP}/family-members/`) && prop.endsWith('/points-history')) {
+        return (req) => (srv.pointsHistory ? srv.pointsHistory(req) : [200, { items: srv.history || [] }]);
+      }
+      return undefined;
+    },
+  });
 }
 
 beforeEach(() => {
@@ -62,6 +71,7 @@ beforeEach(() => {
       { id: 'm-a', household_id: H, name: 'Ann', has_pin: false, points: 0 },
       { id: 'm-b', household_id: H, name: 'Ben', has_pin: true, points: 30 },
     ],
+    history: [],
     pending: () => [200, { items: [] }],
     extra: {},
   };
@@ -106,7 +116,7 @@ test('CLM-1: quest detail shows notes; Accept sends the active member and moves 
 
   await click(buttons(env.$app, 'View')[0]);
   assert.match(text(), /Half a scoop, then fresh water\./);
-  assert.match(text(), /5 points · 1 day\(s\) until available again/);
+  assert.match(text(), /5 points · resets at midnight after 1 day\(s\)/);
   assert.equal(buttons(env.$app, 'Decline').length, 1);
 
   await click(buttons(env.$app, 'Accept')[0]);
@@ -212,6 +222,17 @@ test('CLM-6: the Available list follows the server available flag only', async (
   await click(walk(env.$app).find((n) => n.tagName === 'A' && n.textContent === 'Quests'));
   assert.match(section(env.$app, 'Available'), /Feed the cat/);
   assert.equal(section(env.$app, 'Coming back later'), null);
+});
+
+test('CLM-11: resting quest in Coming back later renders Back followed by fmtDate(available_at)', async () => {
+  const future = '2030-01-02T06:00:00Z';
+  srv.quests = [quest({ available: false, completed_at: '2025-01-03T00:00:00Z', available_at: future })];
+  await loadApp();
+  await becomeAnn();
+  const comingBack = section(env.$app, 'Coming back later');
+  assert.ok(comingBack, 'Coming back later section should be present');
+  const expectedText = `Back ${new Date(future).toLocaleString()}`;
+  assert.ok(comingBack.includes(expectedText), `expected ${comingBack} to include ${expectedText}`);
 });
 
 test('CLM-7: points show in the picker, header and Family tab, and refresh after an approval', async () => {
@@ -350,6 +371,72 @@ test('CLM-11: Approve and Send back post an empty body with X-Admin-PIN; a sent-
   assert.match(mine.textContent, /Water plants/);
   assert.equal(buttons(mine, 'Mark done').length, 1);
   assert.match(text(), /Viewing as: Ann · 5 points/);
+});
+
+test('CLM-10: takeCard fetches points-history with X-Member-PIN and renders table in order', async () => {
+  srv.history = [
+    { id: 'a3', points: 5, reason: 'streak: Feed the cat 4', earned_at: '2025-01-03T12:00:00Z' },
+    { id: 'a2', points: 3, reason: 'Feed the cat', earned_at: '2025-01-02T12:00:00Z' },
+    { id: 'a1', points: 10, reason: 'Clean sweep', earned_at: '2025-01-01T12:00:00Z' },
+  ];
+  await loadApp();
+  await becomeBen();
+
+  const histCall = calls.find((c) => c.path === `${HP}/family-members/m-b/points-history`);
+  assert.ok(histCall, 'points-history was fetched');
+  assert.equal(histCall.headers['X-Member-PIN'], '1234');
+
+  const historyNode = sectionNode(env.$app, 'Points history');
+  assert.ok(historyNode, 'Points history section exists');
+
+  const ths = walk(historyNode).filter((n) => n.tagName === 'TH').map((n) => n.textContent);
+  assert.deepEqual(ths, ['Date', 'Points', 'Reason']);
+
+  const rows = walk(historyNode).filter((n) => n.tagName === 'TBODY');
+  assert.equal(rows.length, 1);
+  const trs = walk(rows[0]).filter((n) => n.tagName === 'TR');
+  assert.equal(trs.length, 3);
+
+  const rowData = trs.map((tr) => walk(tr).filter((n) => n.tagName === 'TD').map((td) => td.textContent));
+  assert.equal(rowData[0][1], '+5');
+  assert.equal(rowData[0][2], 'streak: Feed the cat 4');
+  assert.equal(rowData[1][1], '+3');
+  assert.equal(rowData[1][2], 'Feed the cat');
+  assert.equal(rowData[2][1], '+10');
+  assert.equal(rowData[2][2], 'Clean sweep');
+});
+
+test('CLM-11: empty points-history renders empty message and no table', async () => {
+  srv.history = [];
+  await loadApp();
+  await becomeAnn();
+
+  const historyNode = sectionNode(env.$app, 'Points history');
+  assert.ok(historyNode, 'Points history section exists');
+  assert.match(historyNode.textContent, /No points yet/);
+  assert.match(historyNode.textContent, /Points you earn will show up here\./);
+
+  const tables = walk(historyNode).filter((n) => n.tagName === 'TABLE');
+  assert.equal(tables.length, 0, 'no table should be rendered');
+  const rows = walk(historyNode).filter((n) => n.tagName === 'TR');
+  assert.equal(rows.length, 0, 'no rows should be rendered');
+});
+
+test('CLM-1: points history inserts API data as textContent with no markup or child elements', async () => {
+  const evilReason = '<b>x</b><img src=x onerror=alert(1)>';
+  srv.history = [
+    { id: 'a1', points: 5, reason: evilReason, earned_at: '2025-01-01T12:00:00Z' },
+  ];
+  await loadApp();
+  await becomeAnn();
+
+  const historyNode = sectionNode(env.$app, 'Points history');
+  const cells = walk(historyNode).filter((n) => n.tagName === 'TD');
+  const reasonCell = cells.find((td) => td.textContent === evilReason);
+  assert.ok(reasonCell, 'reason cell contains the exact literal string');
+  assert.equal(reasonCell.children.length, 0, 'cell has no child elements created');
+  assert.equal(reasonCell.childNodes.length, 1);
+  assert.equal(reasonCell.childNodes[0].data, evilReason);
 });
 
 test('CLM-12: a 403 admin-PIN error says so, keeps the list and the session', async () => {

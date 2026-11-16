@@ -19,8 +19,10 @@ type Querier interface {
 	AddMemberPoints(ctx context.Context, arg AddMemberPointsParams) (FamilyMember, error)
 	// Completes a pending quest. The pending row is locked first, and the
 	// done_at check is re-read under the lock, so of two concurrent approvals
-	// exactly one gets a row. The repeat countdown starts now. credited_member_id
-	// is the holder to credit, read before claimed_by is cleared.
+	// exactly one gets a row; the households row is read, not locked. The quest
+	// comes back at local midnight in the household's timezone, repeat_days days
+	// after the local day it was marked done (done_at), however late the approval.
+	// credited_member_id is the holder to credit, read before claimed_by is cleared.
 	ApproveQuest(ctx context.Context, arg ApproveQuestParams) (ApproveQuestRow, error)
 	ClaimHouseholdProvisioning(ctx context.Context, id uuid.UUID) (int64, error)
 	// Assigns an available quest to a family member. The availability check and
@@ -92,6 +94,11 @@ type Querier interface {
 	InsertEmailVerificationCode(ctx context.Context, arg InsertEmailVerificationCodeParams) (EmailVerificationCode, error)
 	InsertOAuthState(ctx context.Context, arg InsertOAuthStateParams) (OauthState, error)
 	InsertPasswordResetToken(ctx context.Context, arg InsertPasswordResetTokenParams) (PasswordResetToken, error)
+	// Points awards are the history of every points credit. Each row is written
+	// by the service layer's creditPoints in the same transaction as the
+	// family_members.points update it explains. Every query is scoped by
+	// household_id; the service checks membership first.
+	InsertPointsAward(ctx context.Context, arg InsertPointsAwardParams) (PointsAward, error)
 	InsertRefreshToken(ctx context.Context, arg InsertRefreshTokenParams) (RefreshToken, error)
 	InsertSignInHandoff(ctx context.Context, arg InsertSignInHandoffParams) (GoogleSignInHandoff, error)
 	ListActiveRefreshTokensByUserID(ctx context.Context, userID uuid.UUID) ([]RefreshToken, error)
@@ -105,6 +112,7 @@ type Querier interface {
 	ListHouseholdQuests(ctx context.Context, arg ListHouseholdQuestsParams) ([]HouseholdQuest, error)
 	ListHouseholdRewards(ctx context.Context, householdID uuid.UUID) ([]HouseholdReward, error)
 	ListHouseholdsForUser(ctx context.Context, userID uuid.UUID) ([]ListHouseholdsForUserRow, error)
+	ListMemberPointsAwards(ctx context.Context, arg ListMemberPointsAwardsParams) ([]PointsAward, error)
 	// Quests waiting for approval, oldest first, with the name of the member who
 	// holds each one.
 	ListPendingQuests(ctx context.Context, householdID uuid.UUID) ([]ListPendingQuestsRow, error)

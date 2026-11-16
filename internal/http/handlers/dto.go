@@ -179,6 +179,24 @@ func toLibraryQuest(q db.QuestLibrary) libraryQuestJSON {
 	return libraryQuestJSON{ID: q.ID, Name: q.Name, Points: q.Points, RepeatDays: q.RepeatDays, Notes: q.Notes}
 }
 
+type pointsAwardJSON struct {
+	ID       uuid.UUID `json:"id"`
+	Kind     string    `json:"kind"`
+	Reason   string    `json:"reason"`
+	Points   int32     `json:"points"`
+	EarnedAt time.Time `json:"earned_at"`
+}
+
+func toPointsAward(a app.PointsAward) pointsAwardJSON {
+	return pointsAwardJSON{
+		ID:       a.ID,
+		Kind:     a.Kind,
+		Reason:   a.Reason,
+		Points:   a.Points,
+		EarnedAt: a.EarnedAt,
+	}
+}
+
 // rewardJSON is a household reward. library_id is set when it was adopted
 // from the library.
 type rewardJSON struct {

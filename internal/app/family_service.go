@@ -26,6 +26,16 @@ type Member struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+// PointsAward represents a points award entry for a family member.
+type PointsAward struct {
+	ID        uuid.UUID `json:"id"`
+	Kind      string    `json:"kind"`
+	Reason    string    `json:"reason"`
+	Points    int32     `json:"points"`
+	EarnedAt  time.Time `json:"earned_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // FamilyMember is an alias for Member.
 type FamilyMember = Member
 
@@ -103,6 +113,73 @@ func (s *FamilyService) Get(ctx context.Context, userID, householdID, memberID u
 		return Member{}, fmt.Errorf("get family member: %w", err)
 	}
 	return toMember(m), nil
+}
+
+// PointsHistory returns the member's awards ordered by created_at DESC then id DESC.
+// Caller must be a member of the household (non-members get ErrNotFound).
+// The target member must belong to the household (otherwise ErrNotFound).
+// Access requires the member's PIN (via VerifyMemberPin) or the household admin PIN (if an admin PIN is set).
+// A wrong PIN returns ErrWrongPIN.
+// Empty result returns an empty, non-nil slice.
+func (s *FamilyService) PointsHistory(ctx context.Context, userID, householdID, memberID uuid.UUID, memberPin, adminPin string, limit, offset int32) ([]PointsAward, error) {
+	if _, err := getHousehold(ctx, s.q, userID, householdID); err != nil {
+		return nil, err
+	}
+
+	if _, err := s.q.GetFamilyMember(ctx, db.GetFamilyMemberParams{
+		HouseholdID: householdID,
+		ID:          memberID,
+	}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get family member: %w", err)
+	}
+
+	authorized := false
+	if _, err := VerifyMemberPin(ctx, s.q, householdID, memberID, memberPin); err == nil {
+		authorized = true
+	} else if adminPin != "" {
+		if err := s.VerifyAdminPin(ctx, userID, householdID, adminPin); err == nil {
+			authorized = true
+		}
+	}
+
+	if !authorized {
+		return nil, ErrWrongPIN
+	}
+
+	if limit <= 0 {
+		limit = 50
+	} else if limit > 100 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	rows, err := s.q.ListMemberPointsAwards(ctx, db.ListMemberPointsAwardsParams{
+		HouseholdID: householdID,
+		MemberID:    memberID,
+		Limit:       limit,
+		Offset:      offset,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list member points awards: %w", err)
+	}
+
+	awards := make([]PointsAward, 0, len(rows))
+	for _, r := range rows {
+		awards = append(awards, PointsAward{
+			ID:        r.ID,
+			Kind:      r.Kind,
+			Reason:    r.Reason,
+			Points:    r.Points,
+			EarnedAt:  r.EarnedAt.Time.UTC(),
+			CreatedAt: r.CreatedAt.Time.UTC(),
+		})
+	}
+	return awards, nil
 }
 
 // Create adds a new family member to the household. Requires admin role and admin PIN if set.

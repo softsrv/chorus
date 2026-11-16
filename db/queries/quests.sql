@@ -83,18 +83,23 @@ ORDER BY q.done_at ASC, q.id ASC;
 -- name: ApproveQuest :one
 -- Completes a pending quest. The pending row is locked first, and the
 -- done_at check is re-read under the lock, so of two concurrent approvals
--- exactly one gets a row. The repeat countdown starts now. credited_member_id
--- is the holder to credit, read before claimed_by is cleared.
+-- exactly one gets a row; the households row is read, not locked. The quest
+-- comes back at local midnight in the household's timezone, repeat_days days
+-- after the local day it was marked done (done_at), however late the approval.
+-- credited_member_id is the holder to credit, read before claimed_by is cleared.
 WITH pending AS (
-    SELECT hq.id, hq.claimed_by FROM household_quests hq
+    SELECT hq.id, hq.claimed_by, hq.done_at, h.timezone
+    FROM household_quests hq
+    JOIN households h ON h.id = hq.household_id
     WHERE hq.household_id = sqlc.arg(household_id) AND hq.id = sqlc.arg(id)
       AND hq.done_at IS NOT NULL
-    FOR UPDATE
+    FOR UPDATE OF hq
 )
 UPDATE household_quests q
 SET claimed_by = NULL, claimed_at = NULL, done_at = NULL,
     completed_at = NOW(),
-    available_at = NOW() + make_interval(days => q.repeat_days),
+    available_at = (date_trunc('day', p.done_at AT TIME ZONE p.timezone)
+        + make_interval(days => q.repeat_days)) AT TIME ZONE p.timezone,
     updated_at = NOW()
 FROM pending p
 WHERE q.household_id = sqlc.arg(household_id) AND q.id = p.id
