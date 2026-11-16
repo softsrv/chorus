@@ -293,6 +293,8 @@ type comboWorld struct {
 	combos *app.ComboService
 	admin  uuid.UUID
 	h      app.Household
+	// last maps a chore to the completion its latest markDone recorded.
+	last   map[uuid.UUID]uuid.UUID
 }
 
 func newComboWorld(t *testing.T, w *comboWorld, name string) *comboWorld {
@@ -304,6 +306,7 @@ func newComboWorld(t *testing.T, w *comboWorld, name string) *comboWorld {
 	c := *w
 	c.t = t
 	c.h = h
+	c.last = map[uuid.UUID]uuid.UUID{}
 	return &c
 }
 
@@ -335,9 +338,9 @@ func (w *comboWorld) combo(name string, bonus int64, ids ...uuid.UUID) uuid.UUID
 }
 
 // markDone has the member accept and mark the chore done through the service,
-// then sets the pending row's done_at to at (test setup: it fixes the
-// mark-done time). available_at is reset first so a chore approved earlier in
-// the test can be taken again.
+// then sets the new pending completion's done_at to at (test setup: it fixes
+// the mark-done time) and remembers it in w.last. available_at is reset first
+// so a chore marked done earlier in the test can be taken again.
 func (w *comboWorld) markDone(questID, memberID uuid.UUID, at time.Time) {
 	w.t.Helper()
 	if _, err := w.pool.Exec(w.ctx, `UPDATE household_quests SET available_at = NOW() - interval '1 second' WHERE household_id = $1 AND id = $2`, w.h.ID, questID); err != nil {
@@ -350,14 +353,24 @@ func (w *comboWorld) markDone(questID, memberID uuid.UUID, at time.Time) {
 	if _, err := w.quests.MarkDone(w.ctx, w.admin, w.h.ID, questID, act); err != nil {
 		w.t.Fatalf("mark done: %v", err)
 	}
-	if _, err := w.pool.Exec(w.ctx, `UPDATE household_quests SET done_at = $3 WHERE household_id = $1 AND id = $2 AND done_at IS NOT NULL`, w.h.ID, questID, at); err != nil {
-		w.t.Fatalf("set done_at: %v", err)
+	// The completion just recorded has done_at NOW(), later than every
+	// back-dated one in these tests.
+	var completionID uuid.UUID
+	if err := w.pool.QueryRow(w.ctx, `
+		UPDATE quest_completions SET done_at = $4
+		WHERE id = (SELECT id FROM quest_completions
+		            WHERE household_id = $1 AND quest_id = $2 AND member_id = $3 AND status = 'pending'
+		            ORDER BY done_at DESC, id DESC LIMIT 1)
+		RETURNING id`, w.h.ID, questID, memberID, at).Scan(&completionID); err != nil {
+		w.t.Fatalf("set completion done_at: %v", err)
 	}
+	w.last[questID] = completionID
 }
 
+// approve approves the completion the chore's latest markDone recorded.
 func (w *comboWorld) approve(questID uuid.UUID) (db.FamilyMember, []app.ComboBonus) {
 	w.t.Helper()
-	_, m, bonuses, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, questID, "")
+	_, m, bonuses, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, w.last[questID], "")
 	if err != nil {
 		w.t.Fatalf("approve: %v", err)
 	}
@@ -500,7 +513,7 @@ func TestIntegration_ComboBonusPayment(t *testing.T) {
 				t.Fatalf("set %d: %d awards, want %d", i, w.awards(), i+1)
 			}
 		}
-		if _, _, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, b, ""); !errors.Is(err, app.ErrNotFound) {
+		if _, _, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, w.last[b], ""); !errors.Is(err, app.ErrNotFound) {
 			t.Fatalf("repeat approval: %v, want ErrNotFound", err)
 		}
 		if w.awards() != 3 || w.points(ann) != 3*(10+15+20) {
@@ -525,7 +538,7 @@ func TestIntegration_ComboBonusPayment(t *testing.T) {
 			errs := make([]error, 2)
 			paid := make([]int, 2)
 			start := make(chan struct{})
-			for i, id := range []uuid.UUID{a, b} {
+			for i, id := range []uuid.UUID{w.last[a], w.last[b]} {
 				wg.Add(1)
 				go func(i int, id uuid.UUID) {
 					defer wg.Done()
@@ -606,16 +619,15 @@ END $$`, fn, w.h.ID)); err != nil {
 			t.Fatalf("create trigger: %v", err)
 		}
 
-		if _, _, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, b, ""); err == nil {
+		if _, _, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, w.last[b], ""); err == nil {
 			t.Fatal("approve with failing award insert succeeded")
 		}
-		got, err := w.quests.Get(w.ctx, w.admin, w.h.ID, b)
-		if err != nil || !got.DoneAt.Valid || got.ClaimedBy == nil || *got.ClaimedBy != ann {
-			t.Fatalf("quest not pending after failed approval: %+v %v", got, err)
+		if n := w.count(`SELECT count(*) FROM quest_completions WHERE household_id = $1 AND id = $2 AND status = 'pending' AND approved_at IS NULL`, w.h.ID, w.last[b]); n != 1 {
+			t.Fatalf("completion not pending after failed approval")
 		}
 		if w.points(ann) != 10 || w.awards() != 0 ||
-			w.count(`SELECT count(*) FROM quest_completions WHERE household_id = $1 AND quest_id = $2`, w.h.ID, b) != 0 {
-			t.Fatalf("failed approval left points %d, awards %d or a completion", w.points(ann), w.awards())
+			w.count(`SELECT count(*) FROM quest_completions WHERE household_id = $1 AND quest_id = $2 AND status = 'approved'`, w.h.ID, b) != 0 {
+			t.Fatalf("failed approval left points %d, awards %d or an approved completion", w.points(ann), w.awards())
 		}
 
 		drop()
@@ -704,8 +716,9 @@ END $$`, fn, w.h.ID)); err != nil {
 		if one.awards() != 0 || one.points(ann1) != 10 {
 			t.Fatalf("household one touched: awards %d points %d", one.awards(), one.points(ann1))
 		}
-		// Approving household two's quest through household one is not found.
-		if _, _, _, err := one.quests.Approve(one.ctx, one.admin, one.h.ID, b2, ""); !errors.Is(err, app.ErrNotFound) {
+		// Approving household two's completion through household one is not found.
+		two.markDone(a2, ann2, utc(11, 14, 0))
+		if _, _, _, err := one.quests.Approve(one.ctx, one.admin, one.h.ID, two.last[a2], ""); !errors.Is(err, app.ErrNotFound) {
 			t.Fatalf("cross-household approve: %v, want ErrNotFound", err)
 		}
 	})
