@@ -214,7 +214,9 @@ func (s *ComboService) Update(ctx context.Context, userID, householdID, comboID 
 	return Combo{Combo: combo, QuestIDs: v.questIDs}, nil
 }
 
-// Delete removes a combo from the household. Deletes never touch combo_awards.
+// Delete removes a combo from the household. Awards already paid are kept: the
+// delete only sets combo_awards.combo_id to NULL (ON DELETE SET NULL), and each
+// award keeps its combo name and points snapshot.
 func (s *ComboService) Delete(ctx context.Context, userID, householdID, comboID uuid.UUID, adminPin string) error {
 	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
 		return err
