@@ -19,7 +19,7 @@ import (
 // releaseMemberQuests in quest_service.go.
 func TestMemberRemovalLeavesQuestsToQuestCode(t *testing.T) {
 	const repoRoot = "../.."
-	forbidden := regexp.MustCompile(`(?i)household_quests|claimed_by|claimed_at|done_at`)
+	forbidden := regexp.MustCompile(`(?i)household_quests|quest_completions|claimed_by|claimed_at|done_at`)
 	for _, path := range []string{
 		"family_service.go",
 		filepath.Join(repoRoot, "db", "queries", "family_members.sql"),
