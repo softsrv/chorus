@@ -1536,8 +1536,10 @@ func TestIntegration_QuestResetsAtLocalMidnight(t *testing.T) {
 		}
 
 		// Marked done, then its holder is removed from the household.
+		// A 1-day repeat marked done 48h ago has finished its cooldown, so the
+		// released chore is back in the pool for the other member.
 		f := newFamily("Release Family", "America/Chicago")
-		id = newQuest(f, 3)
+		id = newQuest(f, 1)
 		_ = doneAt(f, id, time.Now().Add(-48*time.Hour))
 		if err := familySvc.Remove(ctx, alice, f.id, f.ann.MemberID, ""); err != nil {
 			t.Fatalf("remove Ann: %v", err)

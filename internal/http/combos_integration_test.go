@@ -125,8 +125,25 @@ func TestAPI_Combos(t *testing.T) {
 		qp := "/api/v1/households/" + hid + "/quests/" + questID.String()
 		s.expect(http.StatusOK, "POST", qp+"/accept", user.AccessToken, map[string]any{"member_id": kid.ID}, nil)
 		s.expect(http.StatusOK, "POST", qp+"/done", user.AccessToken, map[string]any{"member_id": kid.ID}, nil)
+		// Approval is by completion id: find this chore's pending completion.
+		var pending struct {
+			Items []struct {
+				CompletionID uuid.UUID `json:"completion_id"`
+				QuestID      uuid.UUID `json:"quest_id"`
+			} `json:"items"`
+		}
+		s.expect(http.StatusOK, "GET", "/api/v1/households/"+hid+"/quests/pending", user.AccessToken, nil, &pending)
+		var completionID uuid.UUID
+		for _, it := range pending.Items {
+			if it.QuestID == questID {
+				completionID = it.CompletionID
+			}
+		}
+		if completionID == uuid.Nil {
+			t.Fatalf("no pending completion for quest %s: %+v", questID, pending.Items)
+		}
 		var out approveWire
-		s.expect(http.StatusOK, "POST", qp+"/approve", user.AccessToken, nil, &out)
+		s.expect(http.StatusOK, "POST", "/api/v1/households/"+hid+"/quest-completions/"+completionID.String()+"/approve", user.AccessToken, nil, &out)
 		return out
 	}
 	if got := approve(q1.ID); string(got.ComboBonuses) != "[]" || got.Member.Points != 10 {
