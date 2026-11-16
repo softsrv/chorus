@@ -294,7 +294,7 @@ type comboWorld struct {
 	admin  uuid.UUID
 	h      app.Household
 	// last maps a chore to the completion its latest markDone recorded.
-	last   map[uuid.UUID]uuid.UUID
+	last map[uuid.UUID]uuid.UUID
 }
 
 func newComboWorld(t *testing.T, w *comboWorld, name string) *comboWorld {
