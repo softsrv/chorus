@@ -19,10 +19,12 @@ type Querier interface {
 	AddMemberPoints(ctx context.Context, arg AddMemberPointsParams) (FamilyMember, error)
 	// Completes a pending quest. The pending row is locked first, and the
 	// done_at check is re-read under the lock, so of two concurrent approvals
-	// exactly one gets a row. The repeat countdown starts now. credited_member_id
-	// is the holder to credit, read before claimed_by is cleared; credited_done_at
-	// is when they marked it done, read before done_at is cleared (it decides the
-	// household day the completion counts toward for combos).
+	// exactly one gets a row; the households row is read, not locked. The quest
+	// comes back at local midnight in the household's timezone, repeat_days days
+	// after the local day it was marked done (done_at), however late the approval.
+	// credited_member_id is the holder to credit, read before claimed_by is cleared;
+	// credited_done_at is when they marked it done, read before done_at is cleared
+	// (it decides the household day the completion counts toward for combos).
 	ApproveQuest(ctx context.Context, arg ApproveQuestParams) (ApproveQuestRow, error)
 	// Counts one completion per chore of the combo toward the award: for each
 	// chore, the member's earliest completion on award_day (household-local) not

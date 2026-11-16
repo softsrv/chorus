@@ -1,4 +1,4 @@
--- 000012_combos.up.sql
+-- 000013_combos.up.sql
 -- Combo bonus feature: combos, combo_quests, quest_completions, combo_awards,
 -- and combo_award_completions.
 -- Expand only: no existing rows are modified, quest_completions starts empty.

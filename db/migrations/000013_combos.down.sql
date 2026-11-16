@@ -1,5 +1,5 @@
--- 000012_combos.down.sql
--- Reverse of 000012_combos.up.sql in dependency order.
+-- 000013_combos.down.sql
+-- Reverse of 000013_combos.up.sql in dependency order.
 
 DROP TABLE IF EXISTS combo_award_completions;
 DROP TABLE IF EXISTS combo_awards;
