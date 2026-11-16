@@ -392,6 +392,129 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		t.Fatalf("Create bob reward: %v", err)
 	}
 
+	// CLM-4: Cross-household combo isolation. Look-alike chores done the same
+	// day in another household never trigger or pay a household's combo.
+	bobDishes, err := quests.Create(ctx, bob, bh.ID, app.QuestInput{
+		Name:       "Dishes",
+		Points:     num(10),
+		RepeatDays: num(1),
+	}, "")
+	if err != nil {
+		t.Fatalf("Create bob dishes: %v", err)
+	}
+	bobWipe, err := quests.Create(ctx, bob, bh.ID, app.QuestInput{
+		Name:       "Wipe counters",
+		Points:     num(5),
+		RepeatDays: num(1),
+	}, "")
+	if err != nil {
+		t.Fatalf("Create bob wipe counters: %v", err)
+	}
+	_, err = combos.Create(ctx, bob, bh.ID, app.ComboInput{
+		Name:        "Kitchen Crew",
+		BonusPoints: num(20),
+		QuestIDs:    []uuid.UUID{bobDishes.ID, bobWipe.ID},
+	}, "")
+	if err != nil {
+		t.Fatalf("Create bob combo: %v", err)
+	}
+
+	// Bob's member accepts and marks done both look-alike chores.
+	if _, err := quests.Accept(ctx, bob, bh.ID, bobDishes.ID, asBob); err != nil {
+		t.Fatalf("Accept bob dishes: %v", err)
+	}
+	if _, err := quests.MarkDone(ctx, bob, bh.ID, bobDishes.ID, asBob); err != nil {
+		t.Fatalf("MarkDone bob dishes: %v", err)
+	}
+	if _, err := quests.Accept(ctx, bob, bh.ID, bobWipe.ID, asBob); err != nil {
+		t.Fatalf("Accept bob wipe counters: %v", err)
+	}
+	if _, err := quests.MarkDone(ctx, bob, bh.ID, bobWipe.ID, asBob); err != nil {
+		t.Fatalf("MarkDone bob wipe counters: %v", err)
+	}
+
+	// Approve Bob's look-alike completions (leave bobPending awaiting approval).
+	bobPendingList, err := quests.ListPending(ctx, bob, bh.ID, "")
+	if err != nil {
+		t.Fatalf("ListPending bob: %v", err)
+	}
+	var bobBonusesTotal int
+	for _, p := range bobPendingList {
+		if p.QuestID == bobDishes.ID || p.QuestID == bobWipe.ID {
+			_, _, bonuses, err := quests.Approve(ctx, bob, bh.ID, p.ID, "")
+			if err != nil {
+				t.Fatalf("Approve bob completion %s: %v", p.ID, err)
+			}
+			bobBonusesTotal += len(bonuses)
+		}
+	}
+	if bobBonusesTotal != 1 {
+		t.Fatalf("bob combo bonuses = %d, want 1", bobBonusesTotal)
+	}
+
+	// Alice's member accepts and marks done only aliceQuest ("Dishes").
+	// Even though Bob marked done "Wipe counters" in household B on the same day,
+	// Bob's completion must not count toward Alice's "Kitchen Crew" combo.
+	if _, err := quests.Accept(ctx, alice, h.ID, aliceQuest.ID, asAlice); err != nil {
+		t.Fatalf("Accept aliceQuest: %v", err)
+	}
+	if _, err := quests.MarkDone(ctx, alice, h.ID, aliceQuest.ID, asAlice); err != nil {
+		t.Fatalf("MarkDone aliceQuest: %v", err)
+	}
+
+	alicePendingList, err := quests.ListPending(ctx, alice, h.ID, "")
+	if err != nil {
+		t.Fatalf("ListPending alice: %v", err)
+	}
+	var aliceDishesCompID uuid.UUID
+	for _, p := range alicePendingList {
+		if p.QuestID == aliceQuest.ID {
+			aliceDishesCompID = p.ID
+			break
+		}
+	}
+	if aliceDishesCompID == uuid.Nil {
+		t.Fatal("alice dishes completion not found in pending list")
+	}
+
+	_, _, aliceBonuses, err := quests.Approve(ctx, alice, h.ID, aliceDishesCompID, "")
+	if err != nil {
+		t.Fatalf("Approve alice dishes completion: %v", err)
+	}
+	if len(aliceBonuses) != 0 {
+		t.Fatalf("alice combo bonuses = %d, want 0", len(aliceBonuses))
+	}
+
+	// Verify combo_awards in the database: Bob has 1, Alice has 0.
+	var aliceComboAwardsCount int
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM combo_awards WHERE household_id = $1", h.ID).Scan(&aliceComboAwardsCount); err != nil {
+		t.Fatalf("count alice combo_awards: %v", err)
+	}
+	if aliceComboAwardsCount != 0 {
+		t.Errorf("alice combo_awards count = %d, want 0", aliceComboAwardsCount)
+	}
+
+	var bobComboAwardsCount int
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM combo_awards WHERE household_id = $1", bh.ID).Scan(&bobComboAwardsCount); err != nil {
+		t.Fatalf("count bob combo_awards: %v", err)
+	}
+	if bobComboAwardsCount != 1 {
+		t.Errorf("bob combo_awards count = %d, want 1", bobComboAwardsCount)
+	}
+
+	var aliceComboByComboID int
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM combo_awards WHERE combo_id = $1", aliceCombo.ID).Scan(&aliceComboByComboID); err != nil {
+		t.Fatalf("count aliceCombo by id: %v", err)
+	}
+	if aliceComboByComboID != 0 {
+		t.Errorf("aliceCombo awards count = %d, want 0", aliceComboByComboID)
+	}
+
+	// Restore Bob's member points to baseline 25 for downstream assertions.
+	if _, err := q.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: bh.ID, ID: bobMember.ID, Delta: -35}); err != nil {
+		t.Fatalf("restore bob member points: %v", err)
+	}
+
 	// Non-member (Mallory) gets ErrNotFound deleting household A, and A stays intact.
 	if err := households.Delete(ctx, mallory, h.ID); !errors.Is(err, app.ErrNotFound) {
 		t.Errorf("mallory delete household A: expected ErrNotFound, got %v", err)
