@@ -489,9 +489,11 @@ func TestIntegration_AdminPin(t *testing.T) {
 	}
 }
 
-// TestIntegration_RemoveMemberHoldingQuests: removing a member who holds a
-// quest, accepted or waiting for approval, succeeds and returns the quest to
-// the pool; other members' quests are untouched.
+// TestIntegration_RemoveMemberHoldingQuests: removing a member who holds an
+// accepted quest or has a completion waiting for approval succeeds: the held
+// quest returns to the pool, the waiting completion is cancelled with no
+// points and the quest's cooldown unchanged; other members' quests and
+// approved history are untouched.
 func TestIntegration_RemoveMemberHoldingQuests(t *testing.T) {
 	pool := testDB(t)
 	mailer := &captureMailer{}
@@ -549,11 +551,55 @@ func TestIntegration_RemoveMemberHoldingQuests(t *testing.T) {
 	if _, err := quests.MarkDone(ctx, admin, h.ID, warmup.ID, benAct); err != nil {
 		t.Fatalf("Ben mark warmup done: %v", err)
 	}
-	if _, _, err := quests.Approve(ctx, admin, h.ID, warmup.ID, ""); err != nil {
+	waiting, err := quests.ListPending(ctx, admin, h.ID, "")
+	if err != nil {
+		t.Fatalf("list pending: %v", err)
+	}
+	var warmupCompletion uuid.UUID
+	for _, p := range waiting {
+		if p.QuestID == warmup.ID {
+			warmupCompletion = p.ID
+		}
+	}
+	if warmupCompletion == uuid.Nil {
+		t.Fatalf("Ben's warmup completion not pending: %+v", waiting)
+	}
+	if _, _, _, err := quests.Approve(ctx, admin, h.ID, warmupCompletion, ""); err != nil {
 		t.Fatalf("approve warmup: %v", err)
 	}
 	if _, err := quests.Accept(ctx, admin, h.ID, others.ID, benAct); err != nil {
 		t.Fatalf("Ben accept: %v", err)
+	}
+	// Ann's marked-done chore is resting; the removal must not move its clock.
+	pendingBefore, err := quests.Get(ctx, admin, h.ID, pending.ID)
+	if err != nil {
+		t.Fatalf("Get pending quest before removal: %v", err)
+	}
+	if !pendingBefore.AvailableAt.Valid || !pendingBefore.AwaitingApproval {
+		t.Fatalf("marked-done quest should be resting and awaiting approval: %+v", pendingBefore)
+	}
+	completionStatuses := func(memberID, questID uuid.UUID) []string {
+		t.Helper()
+		rows, err := pool.Query(ctx, `SELECT status FROM quest_completions WHERE household_id = $1 AND quest_id = $2 AND member_id = $3 ORDER BY done_at`, h.ID, questID, memberID)
+		if err != nil {
+			t.Fatalf("query completions: %v", err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var s string
+			if err := rows.Scan(&s); err != nil {
+				t.Fatalf("scan completion: %v", err)
+			}
+			out = append(out, s)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("read completions: %v", err)
+		}
+		return out
+	}
+	if got := completionStatuses(ann.ID, pending.ID); len(got) != 1 || got[0] != "pending" {
+		t.Fatalf("Ann's completions before removal = %v, want [pending]", got)
 	}
 	before, err := familySvc.List(ctx, admin, h.ID)
 	if err != nil {
@@ -574,17 +620,35 @@ func TestIntegration_RemoveMemberHoldingQuests(t *testing.T) {
 	if _, err := familySvc.Get(ctx, admin, h.ID, ann.ID); !errors.Is(err, app.ErrNotFound) {
 		t.Errorf("removed member still readable: %v", err)
 	}
-	for _, id := range []uuid.UUID{pending.ID, accepted.ID} {
-		got, err := quests.Get(ctx, admin, h.ID, id)
-		if err != nil {
-			t.Fatalf("Get quest: %v", err)
-		}
-		if got.ClaimedBy != nil || got.DoneAt.Valid || got.ClaimedAt.Valid {
-			t.Errorf("quest %s not released: %+v", got.Name, got)
-		}
-		if !app.QuestAvailable(got, time.Now()) {
-			t.Errorf("released quest %s is not available: %+v", got.Name, got)
-		}
+	gotAccepted, err := quests.Get(ctx, admin, h.ID, accepted.ID)
+	if err != nil {
+		t.Fatalf("Get accepted quest: %v", err)
+	}
+	if gotAccepted.ClaimedBy != nil || gotAccepted.ClaimedAt.Valid {
+		t.Errorf("accepted quest not released: %+v", gotAccepted)
+	}
+	if !app.QuestAvailable(gotAccepted.HouseholdQuest, time.Now()) {
+		t.Errorf("released quest is not available: %+v", gotAccepted)
+	}
+	// The marked-done chore keeps its cooldown; its waiting completion is
+	// cancelled, so nothing is left to approve.
+	gotPending, err := quests.Get(ctx, admin, h.ID, pending.ID)
+	if err != nil {
+		t.Fatalf("Get pending quest: %v", err)
+	}
+	if !gotPending.AvailableAt.Time.Equal(pendingBefore.AvailableAt.Time) || gotPending.ClaimedBy != nil {
+		t.Errorf("removal changed the resting quest: before %+v after %+v", pendingBefore, gotPending)
+	}
+	if gotPending.AwaitingApproval {
+		t.Errorf("quest still awaiting approval after its member was removed: %+v", gotPending)
+	}
+	var cancelled int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM quest_completions WHERE household_id = $1 AND quest_id = $2 AND status = 'cancelled'`, h.ID, pending.ID).Scan(&cancelled); err != nil || cancelled != 1 {
+		t.Errorf("cancelled completions of the removed member's quest = %d (%v), want 1", cancelled, err)
+	}
+	// Ben's approved completion is history and survives, untouched.
+	if got := completionStatuses(ben.ID, warmup.ID); len(got) != 1 || got[0] != "approved" {
+		t.Errorf("Ben's completions = %v, want [approved]", got)
 	}
 	after, err := familySvc.List(ctx, admin, h.ID)
 	if err != nil {
@@ -609,8 +673,9 @@ func TestIntegration_RemoveMemberHoldingQuests(t *testing.T) {
 
 // TestIntegration_RemoveMemberRollsBack: the release and the delete are one
 // transaction. When the member delete fails after the release ran, the
-// release is undone: the member is still there and still holds their
-// accepted and pending quests, and the caller gets an error.
+// release is undone: the member is still there, still holds their accepted
+// quest, and their completion is still waiting for approval; the caller gets
+// an error.
 func TestIntegration_RemoveMemberRollsBack(t *testing.T) {
 	pool := testDB(t)
 	mailer := &captureMailer{}
@@ -648,6 +713,9 @@ func TestIntegration_RemoveMemberRollsBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ann mark done: %v", err)
 	}
+	if !marked.AwaitingApproval {
+		t.Fatalf("marked-done quest not awaiting approval: %+v", marked)
+	}
 
 	// The delete of this one member row fails; every other row is untouched.
 	fn := "fail_member_delete_" + strings.ReplaceAll(ann.ID.String(), "-", "")
@@ -679,18 +747,18 @@ CREATE TRIGGER ` + fn + ` BEFORE DELETE ON family_members FOR EACH ROW EXECUTE F
 	if err != nil {
 		t.Fatalf("Get pending: %v", err)
 	}
-	if gotPending.ClaimedBy == nil || *gotPending.ClaimedBy != ann.ID || !gotPending.DoneAt.Valid ||
-		!gotPending.DoneAt.Time.Equal(marked.DoneAt.Time) {
+	if gotPending.ClaimedBy != nil || !gotPending.AwaitingApproval ||
+		!gotPending.AvailableAt.Time.Equal(marked.AvailableAt.Time) {
 		t.Errorf("pending quest changed by a failed removal: %+v", gotPending)
 	}
 	gotAccepted, err := quests.Get(ctx, admin, h.ID, accepted.ID)
 	if err != nil {
 		t.Fatalf("Get accepted: %v", err)
 	}
-	if gotAccepted.ClaimedBy == nil || *gotAccepted.ClaimedBy != ann.ID || gotAccepted.DoneAt.Valid || !gotAccepted.ClaimedAt.Valid {
+	if gotAccepted.ClaimedBy == nil || *gotAccepted.ClaimedBy != ann.ID || !gotAccepted.ClaimedAt.Valid {
 		t.Errorf("accepted quest changed by a failed removal: %+v", gotAccepted)
 	}
-	if pend, err := quests.ListPending(ctx, admin, h.ID, ""); err != nil || len(pend) != 1 || pend[0].HouseholdQuest.ID != pending.ID {
+	if pend, err := quests.ListPending(ctx, admin, h.ID, ""); err != nil || len(pend) != 1 || pend[0].QuestID != pending.ID || pend[0].MemberID != ann.ID {
 		t.Errorf("pending list after a failed removal: %+v %v", pend, err)
 	}
 }

@@ -100,7 +100,7 @@ Each household has exactly one login account (its administrator); invites and lo
 
 Quests replace chores: the old `/households/{id}/chores` routes are removed and answer `404 not_found`. Every existing chore was carried over into a quest with the same id (0 points, daily); the chore details stay in the database as a read-only archive.
 
-Quest: `id, household_id, library_id, name, points, repeat_days, notes, available, claimed_by, claimed_at, done_at, awaiting_approval, completed_at, available_at, created_at, updated_at`. `library_id` is set when the quest was copied from the library. `repeat_days` is the number of days until the quest is available again after completion (1 = daily, 30 = monthly).
+Quest: `id, household_id, library_id, name, points, repeat_days, notes, available, claimed_by, claimed_at, awaiting_approval, completed_at, available_at, created_at, updated_at`. `library_id` is set when the quest was copied from the library. `repeat_days` is the number of local days after the day the member marked it done before it is back at midnight (1 = daily, 30 = monthly). `done_at` is removed from quest JSON. `awaiting_approval` is a household-scoped flag indicating that at least one completion for this quest is currently waiting for administrator approval.
 
 Library quest: `id, name, points, repeat_days, notes`. The library is the same for every household and read-only: there is no route that writes to it.
 
@@ -113,14 +113,14 @@ Library quest: `id, name, points, repeat_days, notes`. The library is the same f
 | `GET /households/{id}/quests/{questId}` | none | Any member |
 | `PUT /households/{id}/quests/{questId}` | same as POST | admin; `X-Admin-PIN` header if set. Full replacement |
 | `DELETE /households/{id}/quests/{questId}` | none | admin; `X-Admin-PIN` header if set. `204` |
-| `POST /households/{id}/quests/{questId}/accept` | `member_id, pin?` | The acting family member takes an available quest. `200` quest; `409 quest_taken` when another member holds it or it is waiting out its repeat days |
-| `POST /households/{id}/quests/{questId}/abandon` | `member_id, pin?` | The holder puts the quest back in the pool for everyone. `200` quest; `404` when the member does not hold it or it is waiting for approval |
-| `POST /households/{id}/quests/{questId}/done` | `member_id, pin?` | The holder marks the quest done; it waits for the administrator and no points move yet. `200` quest; `404` when the member does not hold it or it is already waiting |
-| `GET /households/{id}/quests/pending` | none | admin; `X-Admin-PIN` header if set. `{items: [quest + member_name]}` of quests waiting for approval, oldest first; `{items: []}` when nothing is waiting |
-| `POST /households/{id}/quests/{questId}/approve` | none or `{}` | admin; `X-Admin-PIN` header if set. Credits the quest's points to its holder in the same transaction, releases the quest and starts its repeat countdown. `200 {quest, member}` with the member's new `points`; `404` when the quest is not waiting (so a repeated approval credits nothing) |
-| `POST /households/{id}/quests/{questId}/reject` | none or `{}` | admin; `X-Admin-PIN` header if set. Sends the quest back: it stays with the same member, unfinished, no points. `200` quest; `404` when the quest is not waiting |
+| `POST /households/{id}/quests/{questId}/accept` | `member_id, pin?` | The acting family member takes an available quest. `200` quest; `409 quest_taken` when another member holds it or it is waiting for its midnight |
+| `POST /households/{id}/quests/{questId}/abandon` | `member_id, pin?` | The holder puts the quest back in the pool for everyone. `200` quest; `404` when the member does not hold it |
+| `POST /households/{id}/quests/{questId}/done` | `member_id, pin?` | The holder marks the quest done. In one transaction, the quest is released immediately back to the pool, its cooldown begins from now (`available_at` = local midnight in the household's timezone, `repeat_days` days after the day marked done), and a pending completion is recorded for administrator approval. No points move yet. `200` quest; `404` when the member does not hold it |
+| `GET /households/{id}/quests/pending` | none | admin; `X-Admin-PIN` header if set. `{items: [{completion_id, quest_id, name, points, member_id, member_name, done_at}]}` of completions waiting for approval, oldest `done_at` first; `{items: []}` when nothing is waiting |
+| `POST /households/{id}/quest-completions/{completionId}/approve` | none or `{}` | admin; `X-Admin-PIN` header if set. Approves one pending completion, credits the chore's points to the member who marked it done, and pays earned combo bonuses. `200 {completion, member, combo_bonuses}` where `completion` has `{id, quest_id, member_id, done_at, approved_at, status}`, `member.points` includes bonuses, and `combo_bonuses` is always present (`[]` when none) with entries `{combo_id, name, bonus_points}`. Points are credited once; repeat or concurrent approval returns `404`. Combos are judged by the completion's marked-done date in the household timezone, even if approved on a later day |
+| `POST /households/{id}/quest-completions/{completionId}/reject` | none or `{}` | admin; `X-Admin-PIN` header if set. Rejects one pending completion without crediting points. If that completion started the quest's running cooldown, the cooldown is cancelled and the chore returns to available immediately. Other completions and any current holder are untouched. `200 {completion: {id, quest_id, member_id, done_at, status: "rejected"}}`; `404` when not pending |
 
-Quest lifecycle: available → `accept` (held by a member) → `done` (`awaiting_approval: true`) → `approve` (points credited; `available_at` = approval time + `repeat_days`) or `reject` (back to held). Declining is client-side only and writes nothing. Member actions name the acting family member in the body; a wrong member PIN is `403 wrong_pin`. On admin-gated actions a missing `X-Admin-PIN` (once one is set) is `403 admin_pin_required` and a wrong one `403 wrong_pin`; neither ever signs anyone out, and neither changes anything. Quest actions share the PIN rate limit.
+Quest lifecycle: available → `accept` (held by a member) → `done` (quest is released immediately; `available_at` = 00:00 in the household's timezone, `repeat_days` days after the day the member marked it done; pending completion created with `awaiting_approval: true` on the quest). When the cooldown expires, the quest returns to available in the pool even while an earlier completion awaits approval — a member can complete a daily chore multiple days in a row without waiting for admin approval. Admin approves (`POST /households/{id}/quest-completions/{completionId}/approve`) crediting points and paying eligible combos as of the completion's mark-done date, or rejects (`POST /households/{id}/quest-completions/{completionId}/reject`, cancelling the running cooldown if started by this completion, so the chore is available again right away). When a family member is removed from the household, their pending completions are cancelled with no points awarded, leaving chore cooldowns intact. Declining is client-side only and writes nothing. Member actions name the acting family member in the body; a wrong member PIN is `403 wrong_pin`. On admin-gated actions a missing `X-Admin-PIN` (once one is set) is `403 admin_pin_required` and a wrong one `403 wrong_pin`; neither ever signs anyone out, and neither changes anything. Quest actions share the PIN rate limit.
 
 Validation is per field and all at once: a `422` lists every bad field in `fields` — `name` (1–200 characters), `points` (a whole number ≥ 0; a non-numeric value is rejected), `repeat_days` (a whole number ≥ 1), `notes` (≤ 2000 characters). Nothing is saved on a `422`. A non-member, or a quest id from another household, gets `404`. Quest writes share the PIN rate limit.
 
@@ -143,6 +143,33 @@ Library reward: `id, description, cost`. The reward library is global, read-only
 | `DELETE /households/{id}/rewards/{rewardId}` | none | admin; `X-Admin-PIN` header if set. `204` |
 
 Validation is per field: a `422` lists bad fields in `fields` — `description` (1–200 characters after trimming), `cost` (required whole number ≥ 0 that fits int32; non-numeric or fractional values rejected). On `/from-library`, a missing `library_id` returns `422`. Nothing is saved on a `422`. Every household reward operation checks household membership first: non-members or a reward id from another household return `404 not_found`. While an admin PIN is set, write endpoints require `X-Admin-PIN` (`403 admin_pin_required` if missing, `403 wrong_pin` if wrong). Reward writes share the PIN rate limit.
+
+### Combos 🔒 — `/households/{id}/combos`
+
+Combos associate two or more chores with one another: completing all chores of a combo on the same day earns a bonus point payout for the member who completed them.
+
+Combo: `id, name, bonus_points, quest_ids`.
+
+| Method & path | Body | Notes |
+|---|---|---|
+| `GET /households/{id}/combos` | none | Any member. `{items: [combo]}`; `{items: []}` when there are none |
+| `POST /households/{id}/combos` | `name, bonus_points, quest_ids` | admin; `X-Admin-PIN` header if set. `201` combo |
+| `GET /households/{id}/combos/{comboId}` | none | Any member. `200` combo |
+| `PUT /households/{id}/combos/{comboId}` | `name, bonus_points, quest_ids` | admin; `X-Admin-PIN` header if set. Full replacement. `200` combo |
+| `DELETE /households/{id}/combos/{comboId}` | none | admin; `X-Admin-PIN` header if set. `204` |
+
+Validation is per field: a `422` lists bad fields in `fields` — `name` (1–200 characters after trimming), `bonus_points` (required whole number ≥ 0 that fits int32; non-numeric or fractional values rejected), `quest_ids` (array of at least 2 distinct existing household chore IDs). Nothing is saved on a `422`.
+
+Every household combo operation checks household membership first: non-members or a combo id from another household return `404 not_found`. While an admin PIN is set, write endpoints require `X-Admin-PIN` (`403 admin_pin_required` if missing, `403 wrong_pin` if wrong). Combo writes share the PIN rate limit.
+
+How bonuses are earned:
+- A chore counts toward a combo's day by when the member marked it done, judged on the household's local clock (its timezone).
+- A bonus is paid for each combo whose full set of chores was marked done by the same member on the same household day. The bonus is paid at the approval of the last chore, even if approvals come on a later day.
+- A combo pays again every time a member completes its full set again on a household day. Each set of completions pays its bonus at most once; repeat or concurrent approvals never pay twice.
+- A chore may belong to several combos; completing it can finish several combos and pay each bonus.
+- Chores marked done on different household days, or by different members, pay no bonus (only chore points move).
+- Editing or deleting a combo never changes bonuses already paid; changes affect only later completions. A combo that ends up with fewer than two chores (e.g. after deleting a chore) pays nothing.
+- Completions marked done before this release are not counted toward combo bonuses.
 
 ### Family calendar 🔒 — `/households/{id}/calendar`, `/households/{id}/events`
 

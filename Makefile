@@ -14,9 +14,10 @@ export
 ## ── Development ─────────────────────────────────────────────────────────────
 
 # Full hot-reload: Postgres + smtp4dev, migrate, then the app container (air
-# watching the bind-mounted source) + Tailwind watch on the host.
+# watching the bind-mounted source) detached, + Tailwind watch on the host.
 dev: services-up migrate-up tailwind
-	$(MAKE) -j2 app tailwind-watch
+	docker compose up -d --build app
+	$(MAKE) tailwind-watch
 
 # Postgres + smtp4dev only (the app container is started by dev/run).
 services-up:
@@ -47,7 +48,7 @@ test:
 
 # Web client unit tests: app.js against a minimal DOM and a stubbed fetch.
 test-js:
-	node --test web/jstest/quests.test.mjs
+	node --test web/jstest/quests.test.mjs web/jstest/rewards.test.mjs web/jstest/combos.test.mjs
 
 # Integration tests run against TEST_DATABASE_URL (the chorus_test database).
 test-integration: migrate-test

@@ -152,8 +152,8 @@ func TestClientJS_QuestsTab(t *testing.T) {
 	app := readStatic(t, "js/app.js")
 
 	t.Run("questsTab defined and routed", func(t *testing.T) {
-		if !strings.Contains(app, "async function questsTab(h, $root, notice = null)") {
-			t.Error("expected async function questsTab(h, $root, notice = null)")
+		if !strings.Contains(app, "async function questsTab(") {
+			t.Error("expected async function questsTab(")
 		}
 		if !strings.Contains(app, "quests: questsTab") {
 			t.Error("expected loaders to map quests to questsTab")
@@ -176,8 +176,11 @@ func TestClientJS_QuestsTab(t *testing.T) {
 				t.Errorf("expected quest field %s", field)
 			}
 		}
-		if !strings.Contains(app, "label: 'Days until available again'") {
-			t.Error("expected repeat_days labelled 'Days until available again'")
+		if !strings.Contains(app, "label: 'Repeats after (days, back at midnight)'") {
+			t.Error("expected repeat_days labelled 'Repeats after (days, back at midnight)'")
+		}
+		if strings.Contains(app, "until available again") {
+			t.Error("expected 'until available again' to be absent")
 		}
 	})
 

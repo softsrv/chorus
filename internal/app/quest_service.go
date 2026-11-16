@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/softsrv/chorus/internal/db"
 )
@@ -56,20 +57,74 @@ func NewQuestService(q *db.Queries, pool pgxBeginner) *QuestService {
 	return &QuestService{q: q, pool: pool}
 }
 
-// releaseMemberQuests returns every quest the member holds, one awaiting
-// approval included, to the household's pool. It is the one place that clears
-// a quest's holder when a member goes; qtx is the caller's transaction, so the
-// release commits or rolls back with the removal. No points move.
+// QuestView is a household quest with awaiting_approval: whether one of its
+// completions is waiting for the administrator.
+type QuestView struct {
+	db.HouseholdQuest
+	AwaitingApproval bool
+}
+
+// Completion is one time a member marked a chore done. Status is pending,
+// approved, rejected or cancelled; ApprovedAt is set only when approved.
+// MemberID is nil once the member has been removed.
+type Completion struct {
+	ID         uuid.UUID
+	QuestID    uuid.UUID
+	MemberID   *uuid.UUID
+	DoneAt     time.Time
+	ApprovedAt *time.Time
+	Status     string
+}
+
+// PendingCompletion is a completion waiting for approval, with the chore's
+// name and current points and the name of the member who did it.
+type PendingCompletion struct {
+	ID         uuid.UUID
+	QuestID    uuid.UUID
+	QuestName  string
+	Points     int32
+	MemberID   uuid.UUID
+	MemberName string
+	DoneAt     time.Time
+}
+
+// releaseMemberQuests returns every quest the member holds to the household's
+// pool and cancels the member's completions still waiting for approval. It is
+// the one place that clears a quest's holder when a member goes; qtx is the
+// caller's transaction, so the release commits or rolls back with the
+// removal. No points move and no quest's cooldown changes.
 func releaseMemberQuests(ctx context.Context, qtx *db.Queries, householdID, memberID uuid.UUID) error {
 	if err := qtx.ReleaseMemberQuests(ctx, db.ReleaseMemberQuestsParams{HouseholdID: householdID, MemberID: &memberID}); err != nil {
 		return fmt.Errorf("release member quests: %w", err)
 	}
+	if err := qtx.CancelMemberPendingCompletions(ctx, db.CancelMemberPendingCompletionsParams{HouseholdID: householdID, MemberID: &memberID}); err != nil {
+		return fmt.Errorf("cancel member completions: %w", err)
+	}
 	return nil
+}
+
+// view adds awaiting_approval to a quest just read or written.
+func (s *QuestService) view(ctx context.Context, quest db.HouseholdQuest) (QuestView, error) {
+	pending, err := s.q.QuestHasPendingCompletion(ctx, db.QuestHasPendingCompletionParams{HouseholdID: quest.HouseholdID, QuestID: quest.ID})
+	if err != nil {
+		return QuestView{}, fmt.Errorf("read pending completion: %w", err)
+	}
+	return QuestView{HouseholdQuest: quest, AwaitingApproval: pending}, nil
+}
+
+// viewOf takes a single-quest query's result and adds awaiting_approval to
+// its row; no row is ErrNotFound.
+func (s *QuestService) viewOf(ctx context.Context, quest db.HouseholdQuest, err error) (QuestView, error) {
+	quest, err = notFoundIfNoRows(quest, err)
+	if err != nil {
+		return QuestView{}, err
+	}
+	return s.view(ctx, quest)
 }
 
 // List returns up to p.Limit quests of the household, and whether more remain
 // after them.
-func (s *QuestService) List(ctx context.Context, userID, householdID uuid.UUID, p QuestPage) ([]db.HouseholdQuest, bool, error) {
+func (s *QuestService) List(ctx context.Context, userID, householdID uuid.UUID, p QuestPage) ([]QuestView, bool, error) {
 	if _, err := getHousehold(ctx, s.q, userID, householdID); err != nil {
 		return nil, false, err
 	}
@@ -86,13 +141,17 @@ func (s *QuestService) List(ctx context.Context, userID, householdID uuid.UUID, 
 		return nil, false, err
 	}
 	// Fetch one extra row to learn whether another page exists.
-	quests, err := s.q.ListHouseholdQuests(ctx, db.ListHouseholdQuestsParams{
+	rows, err := s.q.ListHouseholdQuests(ctx, db.ListHouseholdQuestsParams{
 		HouseholdID: householdID,
 		RowLimit:    int32(p.Limit + 1),
 		RowOffset:   int32(p.Offset),
 	})
 	if err != nil {
 		return nil, false, fmt.Errorf("list quests: %w", err)
+	}
+	quests := make([]QuestView, len(rows))
+	for i, r := range rows {
+		quests[i] = QuestView{HouseholdQuest: r.HouseholdQuest, AwaitingApproval: r.AwaitingApproval}
 	}
 	if len(quests) > p.Limit {
 		return quests[:p.Limit], true, nil
@@ -101,42 +160,47 @@ func (s *QuestService) List(ctx context.Context, userID, householdID uuid.UUID, 
 }
 
 // Get returns one quest of the household.
-func (s *QuestService) Get(ctx context.Context, userID, householdID, questID uuid.UUID) (db.HouseholdQuest, error) {
+func (s *QuestService) Get(ctx context.Context, userID, householdID, questID uuid.UUID) (QuestView, error) {
 	if _, err := getHousehold(ctx, s.q, userID, householdID); err != nil {
-		return db.HouseholdQuest{}, err
+		return QuestView{}, err
 	}
-	return notFoundIfNoRows(s.q.GetHouseholdQuest(ctx, db.GetHouseholdQuestParams{HouseholdID: householdID, ID: questID}))
+	row, err := notFoundIfNoRows(s.q.GetHouseholdQuestView(ctx, db.GetHouseholdQuestViewParams{HouseholdID: householdID, ID: questID}))
+	if err != nil {
+		return QuestView{}, err
+	}
+	return QuestView{HouseholdQuest: row.HouseholdQuest, AwaitingApproval: row.AwaitingApproval}, nil
 }
 
 // Create adds a quest to the household.
-func (s *QuestService) Create(ctx context.Context, userID, householdID uuid.UUID, in QuestInput, adminPin string) (db.HouseholdQuest, error) {
+func (s *QuestService) Create(ctx context.Context, userID, householdID uuid.UUID, in QuestInput, adminPin string) (QuestView, error) {
 	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
-		return db.HouseholdQuest{}, err
+		return QuestView{}, err
 	}
 	v, err := validateQuest(in)
 	if err != nil {
-		return db.HouseholdQuest{}, err
+		return QuestView{}, err
 	}
 	return s.insert(ctx, householdID, nil, v)
 }
 
 // Update replaces a quest's editable fields.
-func (s *QuestService) Update(ctx context.Context, userID, householdID, questID uuid.UUID, in QuestInput, adminPin string) (db.HouseholdQuest, error) {
+func (s *QuestService) Update(ctx context.Context, userID, householdID, questID uuid.UUID, in QuestInput, adminPin string) (QuestView, error) {
 	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
-		return db.HouseholdQuest{}, err
+		return QuestView{}, err
 	}
 	v, err := validateQuest(in)
 	if err != nil {
-		return db.HouseholdQuest{}, err
+		return QuestView{}, err
 	}
-	return notFoundIfNoRows(s.q.UpdateHouseholdQuest(ctx, db.UpdateHouseholdQuestParams{
+	quest, err := s.q.UpdateHouseholdQuest(ctx, db.UpdateHouseholdQuestParams{
 		HouseholdID: householdID,
 		ID:          questID,
 		Name:        v.name,
 		Points:      v.points,
 		RepeatDays:  v.repeatDays,
 		Notes:       v.notes,
-	}))
+	})
+	return s.viewOf(ctx, quest, err)
 }
 
 // Delete removes a quest from the household.
@@ -157,13 +221,13 @@ func (s *QuestService) Delete(ctx context.Context, userID, householdID, questID 
 // CopyFromLibrary adds a copy of a library quest to the household. The copy
 // carries the library's name, points, days and notes and remembers its
 // library_id; editing it later never changes the library.
-func (s *QuestService) CopyFromLibrary(ctx context.Context, userID, householdID, libraryID uuid.UUID, adminPin string) (db.HouseholdQuest, error) {
+func (s *QuestService) CopyFromLibrary(ctx context.Context, userID, householdID, libraryID uuid.UUID, adminPin string) (QuestView, error) {
 	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
-		return db.HouseholdQuest{}, err
+		return QuestView{}, err
 	}
 	item, err := notFoundIfNoRows(s.q.GetQuestLibraryItem(ctx, libraryID))
 	if err != nil {
-		return db.HouseholdQuest{}, err
+		return QuestView{}, err
 	}
 	return s.insert(ctx, householdID, &item.ID, validQuest{
 		name: item.Name, points: item.Points, repeatDays: item.RepeatDays, notes: item.Notes,
@@ -178,7 +242,10 @@ type MemberAction struct {
 }
 
 // QuestAvailable reports whether a quest is in the pool: nobody holds it and
-// its repeat days since the last approval have passed.
+// its available_at has arrived. available_at is the local midnight in the
+// household's timezone repeat_days days after the day it was last marked
+// done, whether or not that completion has been approved yet; a quest never
+// marked done has none.
 func QuestAvailable(q db.HouseholdQuest, now time.Time) bool {
 	return q.ClaimedBy == nil && (!q.AvailableAt.Valid || !q.AvailableAt.Time.After(now))
 }
@@ -187,120 +254,257 @@ func QuestAvailable(q db.HouseholdQuest, now time.Time) bool {
 // belong to the household and prove themselves with their PIN. A quest that
 // another member holds, or that is waiting out its repeat days, gives
 // ErrQuestTaken; of two concurrent accepts exactly one succeeds.
-func (s *QuestService) Accept(ctx context.Context, userID, householdID, questID uuid.UUID, act MemberAction) (db.HouseholdQuest, error) {
+func (s *QuestService) Accept(ctx context.Context, userID, householdID, questID uuid.UUID, act MemberAction) (QuestView, error) {
 	if err := s.verifyActingMember(ctx, userID, householdID, act); err != nil {
-		return db.HouseholdQuest{}, err
+		return QuestView{}, err
 	}
-	quest, err := s.q.ClaimQuest(ctx, db.ClaimQuestParams{HouseholdID: householdID, ID: questID, MemberID: &act.MemberID})
+	// The member row is locked before the quest row, the order
+	// FamilyService.Remove uses, so a concurrent removal cannot deadlock.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return QuestView{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	qtx := s.q.WithTx(tx)
+	if _, err := notFoundIfNoRows(qtx.LockFamilyMember(ctx, db.LockFamilyMemberParams{HouseholdID: householdID, ID: act.MemberID})); err != nil {
+		return QuestView{}, err
+	}
+	quest, err := qtx.ClaimQuest(ctx, db.ClaimQuestParams{HouseholdID: householdID, ID: questID, MemberID: &act.MemberID})
 	if err == nil {
-		return quest, nil
+		if err := tx.Commit(ctx); err != nil {
+			return QuestView{}, fmt.Errorf("commit: %w", err)
+		}
+		return s.view(ctx, quest)
 	}
 	if isForeignKeyViolation(err) {
-		return db.HouseholdQuest{}, ErrNotFound
+		return QuestView{}, ErrNotFound
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return db.HouseholdQuest{}, fmt.Errorf("claim quest: %w", err)
+		return QuestView{}, fmt.Errorf("claim quest: %w", err)
 	}
 	// No row: either the quest is not in this household, or it is not available.
-	if _, err := notFoundIfNoRows(s.q.GetHouseholdQuest(ctx, db.GetHouseholdQuestParams{HouseholdID: householdID, ID: questID})); err != nil {
-		return db.HouseholdQuest{}, err
+	if _, err := notFoundIfNoRows(qtx.GetHouseholdQuest(ctx, db.GetHouseholdQuestParams{HouseholdID: householdID, ID: questID})); err != nil {
+		return QuestView{}, err
 	}
-	return db.HouseholdQuest{}, ErrQuestTaken
+	return QuestView{}, ErrQuestTaken
 }
 
 // Abandon puts the acting member's quest back in the pool for everyone. Only
-// the quest's holder can abandon it, and not while it waits for approval;
-// any other case is ErrNotFound and changes nothing.
-func (s *QuestService) Abandon(ctx context.Context, userID, householdID, questID uuid.UUID, act MemberAction) (db.HouseholdQuest, error) {
+// the quest's holder can abandon it; any other case is ErrNotFound and
+// changes nothing.
+func (s *QuestService) Abandon(ctx context.Context, userID, householdID, questID uuid.UUID, act MemberAction) (QuestView, error) {
 	if err := s.verifyActingMember(ctx, userID, householdID, act); err != nil {
-		return db.HouseholdQuest{}, err
+		return QuestView{}, err
 	}
-	return notFoundIfNoRows(s.q.AbandonQuest(ctx, db.AbandonQuestParams{HouseholdID: householdID, ID: questID, MemberID: &act.MemberID}))
+	quest, err := s.q.AbandonQuest(ctx, db.AbandonQuestParams{HouseholdID: householdID, ID: questID, MemberID: &act.MemberID})
+	return s.viewOf(ctx, quest, err)
 }
 
-// MarkDone records that the acting member finished their quest. It then
-// waits for the administrator's approval; no points move until then. A quest
-// the member does not hold, or one already waiting, is ErrNotFound.
-func (s *QuestService) MarkDone(ctx context.Context, userID, householdID, questID uuid.UUID, act MemberAction) (db.HouseholdQuest, error) {
+// MarkDone records that the acting member finished their quest. In one
+// transaction it locks the member row, then in one statement inserts a
+// pending completion (member, mark-done time now), releases the quest and
+// starts its cooldown from now: the quest comes back at local midnight in the
+// household's timezone, repeat_days days after today, whether or not the
+// administrator has approved by then. No points move until approval. A quest
+// the member does not hold, or a member removed meanwhile, is ErrNotFound.
+//
+// The member lock comes first because FamilyService.Remove takes it before it
+// releases the member's quests; taking the quest row first would deadlock
+// against a concurrent removal.
+func (s *QuestService) MarkDone(ctx context.Context, userID, householdID, questID uuid.UUID, act MemberAction) (QuestView, error) {
 	if err := s.verifyActingMember(ctx, userID, householdID, act); err != nil {
-		return db.HouseholdQuest{}, err
+		return QuestView{}, err
 	}
-	return notFoundIfNoRows(s.q.MarkQuestDone(ctx, db.MarkQuestDoneParams{HouseholdID: householdID, ID: questID, MemberID: &act.MemberID}))
-}
-
-// ListPending returns the quests waiting for approval, oldest first, each
-// with the name of the member who holds it. Admin only, behind the admin PIN
-// once one is set. None waiting is an empty, non-nil slice.
-func (s *QuestService) ListPending(ctx context.Context, userID, householdID uuid.UUID, adminPin string) ([]db.ListPendingQuestsRow, error) {
-	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
-		return nil, err
-	}
-	rows, err := s.q.ListPendingQuests(ctx, householdID)
+	completionID, err := uuid.NewV7()
 	if err != nil {
-		return nil, fmt.Errorf("list pending quests: %w", err)
-	}
-	return rows, nil
-}
-
-// Approve completes a pending quest and credits its points to the member who
-// held it, in one transaction: either both happen or neither does. The
-// quest's repeat countdown starts now. Admin only, behind the admin PIN once
-// one is set. A quest that is not pending (never marked done, sent back, or
-// already approved) is ErrNotFound, so a repeated or concurrent approval
-// credits the points once.
-func (s *QuestService) Approve(ctx context.Context, userID, householdID, questID uuid.UUID, adminPin string) (db.HouseholdQuest, db.FamilyMember, error) {
-	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
-		return db.HouseholdQuest{}, db.FamilyMember{}, err
+		return QuestView{}, fmt.Errorf("new completion id: %w", err)
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return db.HouseholdQuest{}, db.FamilyMember{}, fmt.Errorf("begin tx: %w", err)
+		return QuestView{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	qtx := s.q.WithTx(tx)
+
+	if _, err := notFoundIfNoRows(qtx.LockFamilyMember(ctx, db.LockFamilyMemberParams{HouseholdID: householdID, ID: act.MemberID})); err != nil {
+		// The member was removed between the PIN check and the lock.
+		return QuestView{}, err
+	}
+	row, err := notFoundIfNoRows(qtx.MarkQuestDone(ctx, db.MarkQuestDoneParams{
+		HouseholdID: householdID, ID: questID, MemberID: act.MemberID, CompletionID: completionID,
+	}))
+	if isForeignKeyViolation(err) {
+		return QuestView{}, ErrNotFound
+	}
+	if err != nil {
+		return QuestView{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return QuestView{}, fmt.Errorf("commit: %w", err)
+	}
+	return QuestView{HouseholdQuest: db.HouseholdQuest(row), AwaitingApproval: true}, nil
+}
+
+// ListPending returns the completions waiting for approval, one per
+// mark-done, oldest mark-done first, each with the chore's name and points
+// and the member's name. Admin only, behind the admin PIN once one is set.
+// None waiting is an empty, non-nil slice.
+func (s *QuestService) ListPending(ctx context.Context, userID, householdID uuid.UUID, adminPin string) ([]PendingCompletion, error) {
+	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.ListPendingCompletions(ctx, householdID)
+	if err != nil {
+		return nil, fmt.Errorf("list pending completions: %w", err)
+	}
+	out := make([]PendingCompletion, 0, len(rows))
+	for _, r := range rows {
+		if r.MemberID == nil {
+			// The join on family_members drops completions without a member.
+			continue
+		}
+		out = append(out, PendingCompletion{
+			ID: r.ID, QuestID: r.QuestID, QuestName: r.QuestName, Points: r.Points,
+			MemberID: *r.MemberID, MemberName: r.MemberName, DoneAt: r.DoneAt.Time.UTC(),
+		})
+	}
+	return out, nil
+}
+
+// ComboBonus is one combo bonus paid by an approval.
+type ComboBonus struct {
+	ComboID     uuid.UUID
+	Name        string
+	BonusPoints int32
+}
+
+// Approve approves one pending completion and credits the chore's points to
+// the member who marked it done, in one transaction: either all of it
+// happens or none does. Admin only, behind the admin PIN once one is set. A
+// completion that is not pending (approved, rejected, cancelled, or not in
+// this household) is ErrNotFound, so a repeated or concurrent approval
+// credits the points once. The quest itself is not touched: its cooldown
+// started when the member marked it done.
+//
+// The approval also pays every combo it finishes: a combo of two or more
+// chores each of which the member marked done on the same household-local
+// day (by each completion's done_at, however late the approvals), using
+// approved completions not yet counted toward that combo. The returned
+// member's points include the bonuses; the returned slice is empty, never
+// nil, when none paid.
+func (s *QuestService) Approve(ctx context.Context, userID, householdID, completionID uuid.UUID, adminPin string) (Completion, db.FamilyMember, []ComboBonus, error) {
+	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
+		return Completion{}, db.FamilyMember{}, nil, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Completion{}, db.FamilyMember{}, nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
 	qtx := s.q.WithTx(tx)
-	row, err := notFoundIfNoRows(qtx.ApproveQuest(ctx, db.ApproveQuestParams{HouseholdID: householdID, ID: questID}))
+	row, err := notFoundIfNoRows(qtx.ApproveCompletion(ctx, db.ApproveCompletionParams{HouseholdID: householdID, ID: completionID}))
 	if err != nil {
-		return db.HouseholdQuest{}, db.FamilyMember{}, err
+		return Completion{}, db.FamilyMember{}, nil, err
 	}
-	if row.CreditedMemberID == nil {
-		// The schema forbids a pending quest without a holder.
-		return db.HouseholdQuest{}, db.FamilyMember{}, fmt.Errorf("approve quest %s: pending quest has no holder", questID)
+	if row.MemberID == nil {
+		// The query approves only completions that still have a member.
+		return Completion{}, db.FamilyMember{}, nil, fmt.Errorf("approve completion %s: no member", completionID)
 	}
-	member, err := qtx.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: householdID, ID: *row.CreditedMemberID, Delta: row.Points})
+	memberID := *row.MemberID
+	member, err := qtx.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: householdID, ID: memberID, Delta: row.Points})
 	if err != nil {
-		return db.HouseholdQuest{}, db.FamilyMember{}, fmt.Errorf("credit points: %w", err)
+		return Completion{}, db.FamilyMember{}, nil, fmt.Errorf("credit points: %w", err)
+	}
+	member, bonuses, err := payCombos(ctx, qtx, householdID, row.QuestID, member, row.DoneAt)
+	if err != nil {
+		return Completion{}, db.FamilyMember{}, nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return db.HouseholdQuest{}, db.FamilyMember{}, fmt.Errorf("commit: %w", err)
+		return Completion{}, db.FamilyMember{}, nil, fmt.Errorf("commit: %w", err)
 	}
-	return db.HouseholdQuest{
-		ID:          row.ID,
-		HouseholdID: row.HouseholdID,
-		LibraryID:   row.LibraryID,
-		Name:        row.Name,
-		Points:      row.Points,
-		RepeatDays:  row.RepeatDays,
-		Notes:       row.Notes,
-		ClaimedBy:   row.ClaimedBy,
-		ClaimedAt:   row.ClaimedAt,
-		DoneAt:      row.DoneAt,
-		CompletedAt: row.CompletedAt,
-		AvailableAt: row.AvailableAt,
-		CreatedAt:   row.CreatedAt,
-		UpdatedAt:   row.UpdatedAt,
-	}, member, nil
+	approvedAt := row.ApprovedAt.Time.UTC()
+	return Completion{
+		ID:         row.ID,
+		QuestID:    row.QuestID,
+		MemberID:   &memberID,
+		DoneAt:     row.DoneAt.Time.UTC(),
+		ApprovedAt: &approvedAt,
+		Status:     "approved",
+	}, member, bonuses, nil
 }
 
-// Reject sends a pending quest back to the member who holds it: it stays
-// theirs, no points are added, and they can mark it done again. Admin only,
-// behind the admin PIN once one is set. A quest that is not pending is
-// ErrNotFound.
-func (s *QuestService) Reject(ctx context.Context, userID, householdID, questID uuid.UUID, adminPin string) (db.HouseholdQuest, error) {
-	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
-		return db.HouseholdQuest{}, err
+// payCombos runs inside Approve's transaction (qtx), after the completion
+// was approved. doneAt is that completion's mark-done time, which decides
+// the household day it counts toward. It locks the combos containing the
+// quest (so concurrent approvals of one combo's chores serialize and the
+// later one sees the earlier one's approval), then pays each combo the member
+// has finished: an award row with name and points snapshots, one claimed
+// completion per chore, and the bonus credit. Any error is returned for the
+// caller to roll back.
+func payCombos(ctx context.Context, qtx *db.Queries, householdID, questID uuid.UUID, member db.FamilyMember, doneAt pgtype.Timestamptz) (db.FamilyMember, []ComboBonus, error) {
+	if _, err := qtx.LockCombosForQuest(ctx, db.LockCombosForQuestParams{HouseholdID: householdID, QuestID: questID}); err != nil {
+		return db.FamilyMember{}, nil, fmt.Errorf("lock combos: %w", err)
 	}
-	return notFoundIfNoRows(s.q.RejectQuest(ctx, db.RejectQuestParams{HouseholdID: householdID, ID: questID}))
+	achieved, err := qtx.ListCombosCompletedByMemberOnDay(ctx, db.ListCombosCompletedByMemberOnDayParams{
+		HouseholdID: householdID, QuestID: questID, MemberID: &member.ID, DoneAt: doneAt,
+	})
+	if err != nil {
+		return db.FamilyMember{}, nil, fmt.Errorf("find achieved combos: %w", err)
+	}
+	bonuses := make([]ComboBonus, 0, len(achieved))
+	for _, c := range achieved {
+		awardID, err := uuid.NewV7()
+		if err != nil {
+			return db.FamilyMember{}, nil, fmt.Errorf("new award id: %w", err)
+		}
+		comboID := c.ID
+		if _, err := qtx.InsertComboAward(ctx, db.InsertComboAwardParams{
+			ID: awardID, HouseholdID: householdID, ComboID: &comboID, MemberID: member.ID,
+			ComboName: c.Name, Points: c.BonusPoints, AwardDay: c.AwardDay,
+		}); err != nil {
+			return db.FamilyMember{}, nil, fmt.Errorf("record combo award: %w", err)
+		}
+		claimed, err := qtx.ClaimComboCompletions(ctx, db.ClaimComboCompletionsParams{
+			ComboAwardID: awardID, MemberID: &member.ID, AwardDay: c.AwardDay, HouseholdID: householdID, ComboID: c.ID,
+		})
+		if err != nil {
+			return db.FamilyMember{}, nil, fmt.Errorf("claim combo completions: %w", err)
+		}
+		if claimed != int64(c.ChoreCount) {
+			// Under the combo lock the set just checked must still be there.
+			return db.FamilyMember{}, nil, fmt.Errorf("claim combo %s: claimed %d completions, want %d", c.ID, claimed, c.ChoreCount)
+		}
+		member, err = qtx.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: householdID, ID: member.ID, Delta: c.BonusPoints})
+		if err != nil {
+			return db.FamilyMember{}, nil, fmt.Errorf("credit combo bonus: %w", err)
+		}
+		bonuses = append(bonuses, ComboBonus{ComboID: c.ID, Name: c.Name, BonusPoints: c.BonusPoints})
+	}
+	return member, bonuses, nil
+}
+
+// Reject rejects one pending completion: no points are added. If that
+// completion started the quest's running cooldown and the cooldown has not
+// ended, the cooldown is cancelled and the chore is available again right
+// away. Other completions and the quest's holder are untouched. Admin only,
+// behind the admin PIN once one is set. A completion that is not pending is
+// ErrNotFound.
+func (s *QuestService) Reject(ctx context.Context, userID, householdID, completionID uuid.UUID, adminPin string) (Completion, error) {
+	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
+		return Completion{}, err
+	}
+	row, err := notFoundIfNoRows(s.q.RejectCompletion(ctx, db.RejectCompletionParams{HouseholdID: householdID, ID: completionID}))
+	if err != nil {
+		return Completion{}, err
+	}
+	return Completion{
+		ID:       row.ID,
+		QuestID:  row.QuestID,
+		MemberID: row.MemberID,
+		DoneAt:   row.DoneAt.Time.UTC(),
+		Status:   row.Status,
+	}, nil
 }
 
 // verifyActingMember checks the user belongs to the household and that the
@@ -323,10 +527,12 @@ func (s *QuestService) ListLibrary(ctx context.Context) ([]db.QuestLibrary, erro
 	return items, nil
 }
 
-func (s *QuestService) insert(ctx context.Context, householdID uuid.UUID, libraryID *uuid.UUID, v validQuest) (db.HouseholdQuest, error) {
+// insert creates a quest; a new quest has no completions, so it is never
+// awaiting approval.
+func (s *QuestService) insert(ctx context.Context, householdID uuid.UUID, libraryID *uuid.UUID, v validQuest) (QuestView, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
-		return db.HouseholdQuest{}, fmt.Errorf("generate quest id: %w", err)
+		return QuestView{}, fmt.Errorf("generate quest id: %w", err)
 	}
 	quest, err := s.q.CreateHouseholdQuest(ctx, db.CreateHouseholdQuestParams{
 		ID:          id,
@@ -338,9 +544,9 @@ func (s *QuestService) insert(ctx context.Context, householdID uuid.UUID, librar
 		Notes:       v.notes,
 	})
 	if err != nil {
-		return db.HouseholdQuest{}, fmt.Errorf("create quest: %w", err)
+		return QuestView{}, fmt.Errorf("create quest: %w", err)
 	}
-	return quest, nil
+	return QuestView{HouseholdQuest: quest}, nil
 }
 
 // validQuest is a QuestInput that passed validateQuest.

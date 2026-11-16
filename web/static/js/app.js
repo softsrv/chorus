@@ -50,11 +50,17 @@ function form({ fields, submit, onSubmit, inline = false }) {
   const $error = el('div');
   const inputs = {};
   const hints = {};
+  const multi = new Set(fields.filter((f) => f.type === 'multiselect').map((f) => f.name));
   const rows = fields.map((f) => {
     let input;
     if (f.type === 'select') {
       input = el('select', { name: f.name, class: 'select select-bordered w-full' },
         f.options.map(([value, label]) => el('option', { value, text: label, selected: value === (f.value ?? '') })));
+    } else if (f.type === 'multiselect') {
+      // value is the array of selected option values.
+      const chosen = f.value || [];
+      input = el('select', { name: f.name, multiple: true, class: 'select select-bordered w-full' },
+        f.options.map(([value, label]) => el('option', { value, text: label, selected: chosen.includes(value) })));
     } else if (f.type === 'textarea') {
       input = el('textarea', { name: f.name, class: 'textarea textarea-bordered w-full', rows: 2, text: f.value ?? '' });
     } else if (f.type === 'checkbox') {
@@ -83,7 +89,9 @@ function form({ fields, submit, onSubmit, inline = false }) {
       Object.values(hints).forEach((h) => { h.textContent = ''; });
       const values = {};
       for (const [name, input] of Object.entries(inputs)) {
-        values[name] = input.type === 'checkbox' ? input.checked : input.value;
+        if (input.type === 'checkbox') values[name] = input.checked;
+        else if (multi.has(name)) values[name] = Array.from(input.children).filter((o) => o.selected).map((o) => o.value);
+        else values[name] = input.value;
       }
       $submit.disabled = true;
       try {
@@ -609,8 +617,10 @@ function confirmClick(prompt, fn) {
 // ── Quests ────────────────────────────────────────────────────────────────────
 
 // Quest list partitions come only from the server's fields: available says the
-// quest is in the pool, claimed_by says who holds it. The client does no date
-// arithmetic; a resting quest shows its available_at as the server sent it.
+// quest is in the pool, claimed_by says who holds it. A marked-done chore has
+// no holder (claimed_by is null) and rests until its cooldown ends, then returns
+// to available even if awaiting approval. The client does no date arithmetic;
+// a resting quest shows its available_at as the server sent it.
 function partitionQuests(items, memberId) {
   const out = { available: [], mine: [], claimed: [], resting: [] };
   for (const q of items) {
@@ -635,7 +645,7 @@ function questNotice(err) {
   return null;
 }
 
-const questMeta = (q) => `${q.points} points · ${q.repeat_days} day(s) until available again`;
+const questMeta = (q) => `${q.points} points · resets at midnight after ${q.repeat_days} day(s)`;
 
 async function questsTab(h, $root, notice = null) {
   const rerender = (next = null) => { $root.replaceChildren(); questsTab(h, $root, next).catch((err) => showError($root, err)); };
@@ -647,6 +657,7 @@ async function questsTab(h, $root, notice = null) {
   ]);
   const quests = page.items || [];
   const members = family.items || [];
+  const combosData = managementVisible() ? await loadCombosData(h, page) : null;
   const nameOf = Object.fromEntries(members.map((m) => [m.id, m.name]));
 
   const cards = [
@@ -656,8 +667,31 @@ async function questsTab(h, $root, notice = null) {
       el('p', { class: 'text-sm opacity-70', text: 'Choose a family member to take quests.' })),
     !activeMember && await approvalsCard(h, members, rerender),
     managementVisible() && manageQuestsCard(h, quests, library, page, rerender),
+    combosData && manageCombosCard(h, combosData, rerender),
   ].filter(Boolean);
   $root.replaceChildren(el('div', { class: 'space-y-4' }, cards));
+}
+
+// loadCombosData reads the combos and every page of quests (following
+// next_offset from the first page), so the combos card names and offers every
+// household quest. A failure here is the combos card's alone: it comes back as
+// { error } and the rest of the tab still renders.
+async function loadCombosData(h, firstPage) {
+  try {
+    const comboPage = await api('GET', `/households/${h.id}/combos`);
+    const all = [...(firstPage.items || [])];
+    let next = firstPage.next_offset;
+    for (let pages = 1; next !== null && next !== undefined; pages += 1) {
+      if (pages >= 1000) throw new Error('Too many quest pages.');
+      const more = await api('GET', `/households/${h.id}/quests?limit=100&offset=${next}`);
+      all.push(...(more.items || []));
+      next = more.next_offset;
+    }
+    return { combos: comboPage.items || [], quests: all, error: null };
+  } catch (err) {
+    console.error(err);
+    return { combos: [], quests: [], error: 'Could not load combos. Reload to try again.' };
+  }
 }
 
 // takeCard is the active member's view: Available, Mine and Claimed lists, a
@@ -705,20 +739,32 @@ function takeCard(h, quests, nameOf, rerender) {
     el('h3', { class: 'font-semibold', text: `Quests for ${activeMember.name}` }),
     $err,
     section('Available', parts.available,
-      (q) => row(q, el('button', { class: 'btn btn-sm', text: 'View', onclick: (e) => { e.preventDefault(); showDetail(q); } })),
+      (q) => row(q,
+        q.awaiting_approval && el('span', { class: 'badge badge-sm', text: 'Waiting for approval' }),
+        el('button', { class: 'btn btn-sm', text: 'View', onclick: (e) => { e.preventDefault(); showDetail(q); } })),
       'No quests available right now.'),
     $detail,
-    section('Mine', parts.mine, (q) => row(q, ...(q.awaiting_approval
-      ? [el('span', { class: 'badge badge-sm', text: 'Waiting for approval' })]
-      : [
-        el('button', { class: 'btn btn-primary btn-xs', text: 'Mark done', onclick: act('done', q) }),
-        el('button', { class: 'btn btn-ghost btn-xs', text: 'Abandon', onclick: act('abandon', q) }),
-      ])), 'You have no quests yet.'),
+    section('Mine', parts.mine, (q) => row(q,
+      el('button', { class: 'btn btn-primary btn-xs', text: 'Mark done', onclick: act('done', q) }),
+      el('button', { class: 'btn btn-ghost btn-xs', text: 'Abandon', onclick: act('abandon', q) }),
+    ), 'You have no quests yet.'),
     section('Claimed', parts.claimed,
       (q) => row(q, el('span', { class: 'text-xs opacity-70', text: `Taken by ${nameOf[q.claimed_by] || 'a former member'}` })),
       'Nobody else has a quest.'),
     parts.resting.length > 0 && section('Coming back later', parts.resting,
-      (q) => row(q, q.available_at && el('span', { class: 'text-xs opacity-70', text: `Back ${fmtDate(q.available_at)}` })), ''));
+      (q) => row(q,
+        q.available_at && el('span', { class: 'text-xs opacity-70', text: `Back ${fmtDate(q.available_at)}` }),
+        q.awaiting_approval && el('span', { class: 'badge badge-sm', text: 'Waiting for approval' })), ''));
+}
+
+// comboBonusNotice is the plain-text notice after an approval that paid combo
+// bonuses (the approve response's combo_bonuses), naming the chore and every
+// combo with its bonus; null when none were paid (or for a send-back).
+function comboBonusNotice(q, res) {
+  const bonuses = (res && res.combo_bonuses) || [];
+  if (bonuses.length === 0) return null;
+  const paid = bonuses.map((b) => `combo bonus '${b.name}' +${b.bonus_points}`).join(', ');
+  return `Approved '${q.name}' for ${q.member_name}: +${q.points} points, ${paid}`;
 }
 
 // approvalsCard is the administrator's list of quests marked done. Loading,
@@ -754,21 +800,24 @@ async function approvalsCard(h, members, rerender) {
   }
 
   const act = (verb, q) => action(async () => {
+    let res;
     try {
-      await adminRequest('POST', `/households/${h.id}/quests/${q.id}/${verb}`, {});
+      const cid = q.completion_id || q.id;
+      res = await adminRequest('POST', `/households/${h.id}/quest-completions/${cid}/${verb}`, {});
     } catch (err) {
       if (isAdminPinError(err)) { wrongAdminPin(); return; }
       const msg = questNotice(err);
       if (msg) { rerender(msg); return; }
       throw err;
     }
-    rerender();
+    rerender(comboBonusNotice(q, res));
   }, $err);
 
   const rows = pending.map((q) => el('li', { class: 'flex flex-wrap items-center gap-2 py-2 border-b border-base-300' },
     el('div', { class: 'flex-1 min-w-0' },
       el('div', { class: 'font-medium', text: q.name }),
-      el('div', { class: 'text-xs opacity-60', text: `${q.member_name} · ${q.points} points` })),
+      el('div', { class: 'text-xs opacity-60', text: `${q.member_name} · ${q.points} points` }),
+      q.done_at && el('div', { class: 'text-xs opacity-60', text: fmtDate(q.done_at) })),
     el('button', { class: 'btn btn-success btn-xs', text: 'Approve', onclick: act('approve', q) }),
     el('button', { class: 'btn btn-ghost btn-xs', text: 'Send back', onclick: act('reject', q) })));
 
@@ -800,7 +849,7 @@ function manageQuestsCard(h, quests, library, page, rerender) {
   const questFields = (q = {}) => [
     { name: 'name', label: 'Name', required: true, value: q.name },
     { name: 'points', label: 'Points', type: 'number', value: q.points ?? '' },
-    { name: 'repeat_days', label: 'Days until available again', type: 'number', value: q.repeat_days ?? '' },
+    { name: 'repeat_days', label: 'Repeats after (days, back at midnight)', type: 'number', value: q.repeat_days ?? '' },
     { name: 'notes', label: 'Notes', type: 'textarea', value: q.notes ?? '' },
   ];
 
@@ -864,6 +913,85 @@ function manageQuestsCard(h, quests, library, page, rerender) {
     el('div', { class: 'space-y-2' },
       el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Quest Library' }),
       el('ul', {}, libraryRows)));
+}
+
+// manageCombosCard lists every combo (name, chores, bonus) with the admin's
+// add, edit and delete controls, shown while management is unlocked. Writes
+// carry the admin PIN only in X-Admin-PIN (adminRequest); a refused save keeps
+// the form as typed and shows each field's error under it. quests is every
+// household quest (all pages); if the combos read failed, the card shows only
+// the error.
+function manageCombosCard(h, { combos, quests, error }, rerender) {
+  if (error) {
+    return card(null,
+      el('h3', { class: 'font-semibold', text: 'Manage combos' }),
+      alertBox('error', error));
+  }
+  const unlocked = managementUnlocked();
+  const base = `/households/${h.id}/combos`;
+  const questMap = Object.fromEntries(quests.map((q) => [q.id, q.name]));
+
+  // A blank bonus is sent as typed, never as 0: the server validates it.
+  const toNum = (val) => {
+    if (String(val).trim() === '') return val;
+    const n = Number(val);
+    return Number.isNaN(n) ? val : n;
+  };
+  const toBody = (v) => ({ name: v.name, bonus_points: toNum(v.bonus_points), quest_ids: v.quest_ids });
+  const comboFields = (c = {}) => [
+    { name: 'name', label: 'Name', value: c.name },
+    { name: 'quest_ids', label: 'Quests', type: 'multiselect', value: c.quest_ids || [], options: quests.map((q) => [q.id, q.name]) },
+    { name: 'bonus_points', label: 'Bonus points', type: 'number', value: c.bonus_points ?? '' },
+  ];
+
+  const rows = combos.map((c) => {
+    const choreNames = (c.quest_ids || []).map((id) => questMap[id] || id).join(', ');
+    const $row = el('tr', {},
+      el('td', { class: 'font-medium', text: c.name }),
+      el('td', { text: choreNames }),
+      el('td', { text: `+${c.bonus_points}` }),
+      el('td', {},
+        unlocked && el('button', {
+          class: 'btn btn-ghost btn-xs', text: 'Edit',
+          onclick: () => $row.replaceWith(el('tr', {}, el('td', { colspan: '4' }, form({
+            fields: comboFields(c), submit: 'Save', inline: true,
+            onSubmit: async (v) => {
+              // An id the picker had no option for was never deselectable: keep it.
+              const unseen = (c.quest_ids || []).filter((id) => !Object.hasOwn(questMap, id) && !v.quest_ids.includes(id));
+              await adminRequest('PUT', `${base}/${c.id}`, toBody({ ...v, quest_ids: [...v.quest_ids, ...unseen] }));
+              rerender();
+            },
+          })))),
+        }),
+        unlocked && el('button', {
+          class: 'btn btn-ghost btn-xs text-error', text: 'Delete',
+          onclick: confirmClick('Sure?', async () => { await adminRequest('DELETE', `${base}/${c.id}`); rerender(); }),
+        })));
+    return $row;
+  });
+
+  const list = combos.length
+    ? el('table', { class: 'table w-full' },
+      el('thead', {},
+        el('tr', {},
+          el('th', { text: 'Combo' }),
+          el('th', { text: 'Quests' }),
+          el('th', { text: 'Bonus' }),
+          el('th', {}))),
+      el('tbody', {}, rows))
+    : el('div', { class: 'text-sm' },
+      el('p', { class: 'font-medium', text: 'No combos yet' }),
+      el('p', { class: 'opacity-70', text: 'Create one to reward chores done together on the same day.' }));
+
+  const addForm = unlocked && form({
+    fields: comboFields(), submit: 'Create combo', inline: true,
+    onSubmit: async (v) => { await adminRequest('POST', base, toBody(v)); rerender(); },
+  });
+
+  return card(null,
+    el('h3', { class: 'font-semibold', text: 'Manage combos' }),
+    list,
+    addForm);
 }
 
 // ── Rewards ───────────────────────────────────────────────────────────────────
