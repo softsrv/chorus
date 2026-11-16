@@ -645,6 +645,9 @@ function questNotice(err) {
   return null;
 }
 
+// waitingBadge marks a quest that has a completion waiting for approval.
+const waitingBadge = (q) => q.awaiting_approval && el('span', { class: 'badge badge-sm', text: 'Waiting for approval' });
+
 const questMeta = (q) => `${q.points} points · resets at midnight after ${q.repeat_days} day(s)`;
 
 async function questsTab(h, $root, notice = null) {
@@ -697,7 +700,11 @@ async function loadCombosData(h, firstPage) {
 // takeCard is the active member's view: Available, Mine and Claimed lists, a
 // quest detail with Accept/Decline, and Abandon/Mark done on their own quests.
 // Every action sends activeMemberAction(); the server decides the outcome and
-// the list is re-read from it afterwards.
+// the list is re-read from it afterwards. Every row whose quest still has a
+// completion waiting for approval shows 'Waiting for approval', whoever holds
+// it now: a chore re-taken after its cooldown keeps showing the earlier
+// completion that waits, and Mark done stays, since each marking is its own
+// completion.
 function takeCard(h, quests, nameOf, rerender) {
   const $err = el('div');
   const $detail = el('div');
@@ -740,21 +747,23 @@ function takeCard(h, quests, nameOf, rerender) {
     $err,
     section('Available', parts.available,
       (q) => row(q,
-        q.awaiting_approval && el('span', { class: 'badge badge-sm', text: 'Waiting for approval' }),
+        waitingBadge(q),
         el('button', { class: 'btn btn-sm', text: 'View', onclick: (e) => { e.preventDefault(); showDetail(q); } })),
       'No quests available right now.'),
     $detail,
     section('Mine', parts.mine, (q) => row(q,
+      waitingBadge(q),
       el('button', { class: 'btn btn-primary btn-xs', text: 'Mark done', onclick: act('done', q) }),
       el('button', { class: 'btn btn-ghost btn-xs', text: 'Abandon', onclick: act('abandon', q) }),
     ), 'You have no quests yet.'),
     section('Claimed', parts.claimed,
-      (q) => row(q, el('span', { class: 'text-xs opacity-70', text: `Taken by ${nameOf[q.claimed_by] || 'a former member'}` })),
+      (q) => row(q, el('span', { class: 'text-xs opacity-70', text: `Taken by ${nameOf[q.claimed_by] || 'a former member'}` }),
+        waitingBadge(q)),
       'Nobody else has a quest.'),
     parts.resting.length > 0 && section('Coming back later', parts.resting,
       (q) => row(q,
         q.available_at && el('span', { class: 'text-xs opacity-70', text: `Back ${fmtDate(q.available_at)}` }),
-        q.awaiting_approval && el('span', { class: 'badge badge-sm', text: 'Waiting for approval' })), ''));
+        waitingBadge(q)), ''));
 }
 
 // comboBonusNotice is the plain-text notice after an approval that paid combo
