@@ -212,9 +212,10 @@ type QuestCompletion struct {
 	ID          uuid.UUID          `json:"id"`
 	HouseholdID uuid.UUID          `json:"household_id"`
 	QuestID     uuid.UUID          `json:"quest_id"`
-	MemberID    uuid.UUID          `json:"member_id"`
+	MemberID    *uuid.UUID         `json:"member_id"`
 	DoneAt      pgtype.Timestamptz `json:"done_at"`
 	ApprovedAt  pgtype.Timestamptz `json:"approved_at"`
+	Status      string             `json:"status"`
 }
 
 type QuestLibrary struct {
