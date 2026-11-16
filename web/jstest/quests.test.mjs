@@ -539,3 +539,29 @@ test('combos CLM-6: a combo name with markup stays literal text in the bonus not
   assert.ok(span.childNodes[0].data.includes(`combo bonus '${evil}' +5`));
   assert.equal(walk(env.$app).filter((n) => n.tagName === 'IMG').length, 0);
 });
+
+// ── fix CLM-1: the combos read is the combos card's alone ───────────────────
+
+const comboReads = () => calls.filter((c) => c.method === 'GET' && c.path === `${HP}/combos`);
+
+test('fix CLM-1: a 500 from GET /combos shows the error in the combos card and the rest of the tab renders', async () => {
+  srv.extra[`GET ${HP}/combos`] = () => err(500, 'internal', 'Internal server error.');
+  await loadApp();
+  assert.equal(comboReads().length, 1);
+  assert.match(text(), /Manage quests/);
+  assert.match(text(), /Approvals/);
+  const combosCard = walk(env.$app).find((n) => n.tagName === 'H3' && n.textContent === 'Manage combos').parentNode;
+  assert.match(combosCard.textContent, /Could not load combos\./);
+  assert.equal(buttons(combosCard, 'Create combo').length, 0);
+});
+
+test('fix CLM-1: the member view sends no combos request', async () => {
+  srv.adminPinSet = true; // with no admin PIN, management stays visible to members
+  await loadApp();
+  const before = comboReads().length;
+  await becomeAnn();
+  assert.match(section(env.$app, 'Available'), /Feed the cat/);
+  assert.ok(calls.filter((c) => c.method === 'GET' && c.path === `${HP}/quests`).length > 1, 'tab re-read for Ann');
+  assert.equal(comboReads().length, before, 'combos requested in member view');
+  assert.doesNotMatch(text(), /Manage combos/);
+});
