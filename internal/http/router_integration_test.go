@@ -462,7 +462,7 @@ func TestAPI_EndToEnd(t *testing.T) {
 	}
 	s.expect(http.StatusOK, "GET", hp+"/quests/pending", parent.AccessToken, nil, &pendingList)
 	if len(pendingList.Items) != 1 || pendingList.Items[0].QuestID != acceptQuest.ID || pendingList.Items[0].MemberName != "Kid" ||
-		pendingList.Items[0].Name != acceptQuest.Name || pendingList.Items[0].Points != 0 ||
+		pendingList.Items[0].Name != "Take out trash" || pendingList.Items[0].Points != 0 ||
 		pendingList.Items[0].CompletionID == uuid.Nil || pendingList.Items[0].DoneAt == nil {
 		t.Errorf("pending list: %+v", pendingList.Items)
 	}
