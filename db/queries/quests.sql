@@ -10,13 +10,35 @@ SELECT * FROM quest_library ORDER BY name ASC, id ASC;
 SELECT * FROM quest_library WHERE id = $1;
 
 -- name: ListHouseholdQuests :many
-SELECT * FROM household_quests
-WHERE household_id = sqlc.arg(household_id)
-ORDER BY created_at ASC, id ASC
+-- awaiting_approval: the quest has a completion waiting for the administrator.
+SELECT sqlc.embed(q), EXISTS (
+    SELECT 1 FROM quest_completions c
+    WHERE c.household_id = q.household_id AND c.quest_id = q.id AND c.status = 'pending'
+) AS awaiting_approval
+FROM household_quests q
+WHERE q.household_id = sqlc.arg(household_id)
+ORDER BY q.created_at ASC, q.id ASC
 LIMIT sqlc.arg(row_limit) OFFSET sqlc.arg(row_offset);
 
 -- name: GetHouseholdQuest :one
 SELECT * FROM household_quests WHERE household_id = $1 AND id = $2;
+
+-- name: GetHouseholdQuestView :one
+-- One quest with awaiting_approval, as ListHouseholdQuests reads it.
+SELECT sqlc.embed(q), EXISTS (
+    SELECT 1 FROM quest_completions c
+    WHERE c.household_id = q.household_id AND c.quest_id = q.id AND c.status = 'pending'
+) AS awaiting_approval
+FROM household_quests q
+WHERE q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id);
+
+-- name: QuestHasPendingCompletion :one
+-- Whether the quest has a completion waiting for the administrator.
+SELECT EXISTS (
+    SELECT 1 FROM quest_completions c
+    WHERE c.household_id = sqlc.arg(household_id) AND c.quest_id = sqlc.arg(quest_id)
+      AND c.status = 'pending'
+) AS awaiting_approval;
 
 -- name: CreateHouseholdQuest :one
 INSERT INTO household_quests (id, household_id, library_id, name, points, repeat_days, notes, created_at, updated_at)
@@ -44,73 +66,106 @@ WHERE household_id = sqlc.arg(household_id) AND id = sqlc.arg(id)
 RETURNING *;
 
 -- name: AbandonQuest :one
--- Puts a quest back in the pool. Only its current holder can abandon it, and
--- not while it waits for approval.
+-- Puts a quest back in the pool. Only its current holder can abandon it.
 UPDATE household_quests
 SET claimed_by = NULL, claimed_at = NULL, updated_at = NOW()
 WHERE household_id = sqlc.arg(household_id) AND id = sqlc.arg(id)
   AND claimed_by = sqlc.arg(member_id)
-  AND done_at IS NULL
 RETURNING *;
 
 -- name: ReleaseMemberQuests :exec
--- Returns every quest the member holds to the pool, a quest awaiting approval
--- included. done_at is cleared with the holder, so the done_at-needs-a-holder
--- CHECK holds. No points move.
+-- Returns every quest the member holds to the pool. done_at is cleared with
+-- the holder, so the done_at-needs-a-holder CHECK holds. No points move.
 UPDATE household_quests
 SET claimed_by = NULL, claimed_at = NULL, done_at = NULL, updated_at = NOW()
 WHERE household_id = sqlc.arg(household_id) AND claimed_by = sqlc.arg(member_id);
 
+-- name: CancelMemberPendingCompletions :exec
+-- Cancels every completion of the member still waiting for approval. No
+-- points move and the quests' cooldowns stay as they are.
+UPDATE quest_completions
+SET status = 'cancelled'
+WHERE household_id = sqlc.arg(household_id) AND member_id = sqlc.arg(member_id)
+  AND status = 'pending';
+
 -- name: MarkQuestDone :one
--- The holder marks the quest done; it then waits for the administrator.
--- No points move here.
-UPDATE household_quests
-SET done_at = NOW(), updated_at = NOW()
-WHERE household_id = sqlc.arg(household_id) AND id = sqlc.arg(id)
-  AND claimed_by = sqlc.arg(member_id)
-  AND done_at IS NULL
-RETURNING *;
-
--- name: ListPendingQuests :many
--- Quests waiting for approval, oldest first, with the name of the member who
--- holds each one.
-SELECT sqlc.embed(q), m.name AS member_name
-FROM household_quests q
-JOIN family_members m ON m.household_id = q.household_id AND m.id = q.claimed_by
-WHERE q.household_id = sqlc.arg(household_id) AND q.done_at IS NOT NULL
-ORDER BY q.done_at ASC, q.id ASC;
-
--- name: ApproveQuest :one
--- Completes a pending quest. The pending row is locked first, and the
--- done_at check is re-read under the lock, so of two concurrent approvals
--- exactly one gets a row; the households row is read, not locked. The quest
--- comes back at local midnight in the household's timezone, repeat_days days
--- after the local day it was marked done (done_at), however late the approval.
--- credited_member_id is the holder to credit, read before claimed_by is cleared;
--- credited_done_at is when they marked it done, read before done_at is cleared
--- (it decides the household day the completion counts toward for combos).
-WITH pending AS (
-    SELECT hq.id, hq.claimed_by, hq.done_at, h.timezone
-    FROM household_quests hq
-    JOIN households h ON h.id = hq.household_id
-    WHERE hq.household_id = sqlc.arg(household_id) AND hq.id = sqlc.arg(id)
-      AND hq.done_at IS NOT NULL
-    FOR UPDATE OF hq
+-- The holder marks the quest done. In one statement the quest is released
+-- and starts its cooldown from now (quest_next_available_at: local midnight
+-- in the household's timezone, repeat_days days after today), and a pending
+-- completion recording the member and the mark-done time is inserted for the
+-- administrator. NOW() is one instant per transaction, so completed_at equals
+-- the completion's done_at. A quest the member does not hold matches no row
+-- and inserts nothing. No points move here.
+WITH done AS (
+    UPDATE household_quests q
+    SET claimed_by = NULL, claimed_at = NULL,
+        completed_at = NOW(),
+        available_at = quest_next_available_at(NOW(), h.timezone, q.repeat_days),
+        updated_at = NOW()
+    FROM households h
+    WHERE h.id = q.household_id
+      AND q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id)
+      AND q.claimed_by = sqlc.arg(member_id)::uuid
+    RETURNING q.*
+), recorded AS (
+    INSERT INTO quest_completions (id, household_id, quest_id, member_id, done_at, status)
+    SELECT sqlc.arg(completion_id)::uuid, d.household_id, d.id, sqlc.arg(member_id)::uuid, NOW(), 'pending'
+    FROM done d
+    RETURNING id
 )
-UPDATE household_quests q
-SET claimed_by = NULL, claimed_at = NULL, done_at = NULL,
-    completed_at = NOW(),
-    available_at = (date_trunc('day', p.done_at AT TIME ZONE p.timezone)
-        + make_interval(days => q.repeat_days)) AT TIME ZONE p.timezone,
-    updated_at = NOW()
-FROM pending p
-WHERE q.household_id = sqlc.arg(household_id) AND q.id = p.id
-RETURNING q.*, p.claimed_by AS credited_member_id, p.done_at AS credited_done_at;
+SELECT d.id, d.household_id, d.library_id, d.name, d.points, d.repeat_days, d.notes,
+       d.claimed_by, d.claimed_at, d.done_at, d.completed_at, d.available_at,
+       d.created_at, d.updated_at
+FROM done d;
 
--- name: RejectQuest :one
--- Sends a pending quest back to its holder: it stays theirs, unfinished.
-UPDATE household_quests
-SET done_at = NULL, updated_at = NOW()
-WHERE household_id = sqlc.arg(household_id) AND id = sqlc.arg(id)
-  AND done_at IS NOT NULL
-RETURNING *;
+-- name: ListPendingCompletions :many
+-- Completions waiting for approval, one row each, oldest mark-done first,
+-- with the chore's name and points and the name of the member who did it.
+SELECT c.id, c.quest_id, q.name AS quest_name, q.points, c.member_id,
+       m.name AS member_name, c.done_at
+FROM quest_completions c
+JOIN household_quests q ON q.household_id = c.household_id AND q.id = c.quest_id
+JOIN family_members m ON m.household_id = c.household_id AND m.id = c.member_id
+WHERE c.household_id = sqlc.arg(household_id) AND c.status = 'pending'
+ORDER BY c.done_at ASC, c.id ASC;
+
+-- name: ApproveCompletion :one
+-- Approves one pending completion. The completion is locked first and its
+-- status re-read under the lock, so of two concurrent approvals exactly one
+-- gets a row. The quest is not touched: its cooldown already started at
+-- mark-done. points is the chore's current points, to credit to member_id.
+WITH pending AS (
+    SELECT pc.id, q.points
+    FROM quest_completions pc
+    JOIN household_quests q ON q.household_id = pc.household_id AND q.id = pc.quest_id
+    WHERE pc.household_id = sqlc.arg(household_id) AND pc.id = sqlc.arg(id)
+      AND pc.status = 'pending' AND pc.member_id IS NOT NULL
+    FOR UPDATE OF pc
+)
+UPDATE quest_completions c
+SET status = 'approved', approved_at = NOW()
+FROM pending p
+WHERE c.id = p.id AND c.status = 'pending'
+RETURNING c.id, c.quest_id, c.member_id, c.done_at, c.approved_at, p.points;
+
+-- name: RejectCompletion :one
+-- Rejects one pending completion: no points. If it started the quest's
+-- running cooldown (the quest's completed_at is its done_at) and that
+-- cooldown has not ended, the cooldown is cancelled so the chore is available
+-- again right away. Other completions and the quest's holder are untouched.
+WITH rejected AS (
+    UPDATE quest_completions rc
+    SET status = 'rejected'
+    WHERE rc.household_id = sqlc.arg(household_id) AND rc.id = sqlc.arg(id)
+      AND rc.status = 'pending'
+    RETURNING rc.id, rc.household_id, rc.quest_id, rc.member_id, rc.done_at, rc.status
+), reopened AS (
+    UPDATE household_quests q
+    SET available_at = NOW(), updated_at = NOW()
+    FROM rejected r
+    WHERE q.household_id = r.household_id AND q.id = r.quest_id
+      AND q.completed_at = r.done_at AND q.available_at > NOW()
+    RETURNING q.id
+)
+SELECT r.id, r.quest_id, r.member_id, r.done_at, r.status
+FROM rejected r;

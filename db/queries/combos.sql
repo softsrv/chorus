@@ -48,13 +48,6 @@ VALUES ($1, $2, $3);
 SELECT count(*) FROM household_quests
 WHERE household_id = $1 AND id = ANY(sqlc.arg(quest_ids)::uuid[]);
 
--- name: InsertQuestCompletion :one
--- Records one approved completion: who did the chore and when they marked it
--- done. Combos are judged from these rows.
-INSERT INTO quest_completions (id, household_id, quest_id, member_id, done_at)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING *;
-
 -- name: LockCombosForQuest :many
 -- Locks, in one statement and in id order, every combo of the household that
 -- contains the quest. Concurrent approvals touching the same combo serialize
@@ -71,8 +64,8 @@ FOR UPDATE OF c;
 
 -- name: ListCombosCompletedByMemberOnDay :many
 -- The combos containing the quest that the member has just finished: the
--- combo still has two or more chores, and every one of them has a completion
--- by the member, not yet counted toward this combo, whose done_at falls on the
+-- combo still has two or more chores, and every one of them has an approved
+-- completion by the member, not yet counted toward this combo, whose done_at falls on the
 -- same household-local day (households.timezone) as done_at. award_day is
 -- that day; chore_count is how many completions paying it will claim.
 WITH day AS (
@@ -102,6 +95,7 @@ WHERE c.household_id = sqlc.arg(household_id)
             WHERE qc.household_id = c.household_id
               AND qc.quest_id = cq.quest_id
               AND qc.member_id = sqlc.arg(member_id)
+              AND qc.status = 'approved'
               AND (qc.done_at AT TIME ZONE d.timezone)::date = d.local_day
               AND NOT EXISTS (
                   SELECT 1 FROM combo_award_completions cac
@@ -120,7 +114,7 @@ RETURNING *;
 
 -- name: ClaimComboCompletions :execrows
 -- Counts one completion per chore of the combo toward the award: for each
--- chore, the member's earliest completion on award_day (household-local) not
+-- chore, the member's earliest approved completion on award_day (household-local) not
 -- yet counted toward this combo. No ON CONFLICT: a completion counted twice
 -- toward one combo is a unique violation that rolls the approval back.
 INSERT INTO combo_award_completions (combo_award_id, combo_id, quest_completion_id)
@@ -132,6 +126,7 @@ CROSS JOIN LATERAL (
     WHERE qc.household_id = cq.household_id
       AND qc.quest_id = cq.quest_id
       AND qc.member_id = sqlc.arg(member_id)
+      AND qc.status = 'approved'
       AND (qc.done_at AT TIME ZONE h.timezone)::date = sqlc.arg(award_day)::date
       AND NOT EXISTS (
           SELECT 1 FROM combo_award_completions cac
