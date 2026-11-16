@@ -462,7 +462,7 @@ func payCombos(ctx context.Context, qtx *db.Queries, householdID, questID uuid.U
 		return db.FamilyMember{}, nil, fmt.Errorf("lock combos: %w", err)
 	}
 	achieved, err := qtx.ListCombosCompletedByMemberOnDay(ctx, db.ListCombosCompletedByMemberOnDayParams{
-		HouseholdID: householdID, QuestID: questID, MemberID: &member.ID, DoneAt: doneAt,
+		HouseholdID: householdID, QuestID: questID, MemberID: member.ID, DoneAt: doneAt,
 	})
 	if err != nil {
 		return db.FamilyMember{}, nil, fmt.Errorf("find achieved combos: %w", err)
