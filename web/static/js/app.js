@@ -648,15 +648,14 @@ const questMeta = (q) => `${q.points} points · resets at midnight after ${q.rep
 async function questsTab(h, $root, notice = null) {
   const rerender = (next = null) => { $root.replaceChildren(); questsTab(h, $root, next).catch((err) => showError($root, err)); };
 
-  const [page, comboPage, library, family] = await Promise.all([
+  const [page, library, family] = await Promise.all([
     api('GET', `/households/${h.id}/quests?limit=100`),
-    api('GET', `/households/${h.id}/combos`),
     api('GET', '/quest-library'),
     api('GET', `/households/${h.id}/family-members`),
   ]);
   const quests = page.items || [];
-  const combos = comboPage.items || [];
   const members = family.items || [];
+  const combosData = managementVisible() ? await loadCombosData(h, page) : null;
   const nameOf = Object.fromEntries(members.map((m) => [m.id, m.name]));
 
   const cards = [
@@ -666,9 +665,31 @@ async function questsTab(h, $root, notice = null) {
       el('p', { class: 'text-sm opacity-70', text: 'Choose a family member to take quests.' })),
     !activeMember && await approvalsCard(h, members, rerender),
     managementVisible() && manageQuestsCard(h, quests, library, page, rerender),
-    managementVisible() && manageCombosCard(h, combos, quests, rerender),
+    combosData && manageCombosCard(h, combosData, rerender),
   ].filter(Boolean);
   $root.replaceChildren(el('div', { class: 'space-y-4' }, cards));
+}
+
+// loadCombosData reads the combos and every page of quests (following
+// next_offset from the first page), so the combos card names and offers every
+// household quest. A failure here is the combos card's alone: it comes back as
+// { error } and the rest of the tab still renders.
+async function loadCombosData(h, firstPage) {
+  try {
+    const comboPage = await api('GET', `/households/${h.id}/combos`);
+    const all = [...(firstPage.items || [])];
+    let next = firstPage.next_offset;
+    for (let pages = 1; next !== null && next !== undefined; pages += 1) {
+      if (pages >= 1000) throw new Error('Too many quest pages.');
+      const more = await api('GET', `/households/${h.id}/quests?limit=100&offset=${next}`);
+      all.push(...(more.items || []));
+      next = more.next_offset;
+    }
+    return { combos: comboPage.items || [], quests: all, error: null };
+  } catch (err) {
+    console.error(err);
+    return { combos: [], quests: [], error: 'Could not load combos. Reload to try again.' };
+  }
 }
 
 // takeCard is the active member's view: Available, Mine and Claimed lists, a
@@ -891,8 +912,15 @@ function manageQuestsCard(h, quests, library, page, rerender) {
 // manageCombosCard lists every combo (name, chores, bonus) with the admin's
 // add, edit and delete controls, shown while management is unlocked. Writes
 // carry the admin PIN only in X-Admin-PIN (adminRequest); a refused save keeps
-// the form as typed and shows each field's error under it.
-function manageCombosCard(h, combos, quests, rerender) {
+// the form as typed and shows each field's error under it. quests is every
+// household quest (all pages); if the combos read failed, the card shows only
+// the error.
+function manageCombosCard(h, { combos, quests, error }, rerender) {
+  if (error) {
+    return card(null,
+      el('h3', { class: 'font-semibold', text: 'Manage combos' }),
+      alertBox('error', error));
+  }
   const unlocked = managementUnlocked();
   const base = `/households/${h.id}/combos`;
   const questMap = Object.fromEntries(quests.map((q) => [q.id, q.name]));
@@ -921,7 +949,12 @@ function manageCombosCard(h, combos, quests, rerender) {
           class: 'btn btn-ghost btn-xs', text: 'Edit',
           onclick: () => $row.replaceWith(el('tr', {}, el('td', { colspan: '4' }, form({
             fields: comboFields(c), submit: 'Save', inline: true,
-            onSubmit: async (v) => { await adminRequest('PUT', `${base}/${c.id}`, toBody(v)); rerender(); },
+            onSubmit: async (v) => {
+              // An id the picker had no option for was never deselectable: keep it.
+              const unseen = (c.quest_ids || []).filter((id) => !Object.hasOwn(questMap, id) && !v.quest_ids.includes(id));
+              await adminRequest('PUT', `${base}/${c.id}`, toBody({ ...v, quest_ids: [...v.quest_ids, ...unseen] }));
+              rerender();
+            },
           })))),
         }),
         unlocked && el('button', {

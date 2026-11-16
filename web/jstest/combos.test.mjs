@@ -271,3 +271,44 @@ test('CLM-6: combo and chore names with markup render as literal text in the lis
   assert.equal(opt.childNodes[0].data, evil);
   assert.equal(walk(env.$app).filter((n) => n.tagName === 'IMG').length, 0);
 });
+
+// ── fix CLM-2: households with more than one page of quests ─────────────────
+
+test('fix CLM-2: picker and names come from every quest page; an Edit PUT keeps every combo quest_id', async () => {
+  const first = Array.from({ length: 100 }, (_, i) => quest({ id: `p${i}`, name: `Chore ${i}` }));
+  const second = [quest({ id: 'q101', name: 'Scrub tub' }), quest({ id: 'q102', name: 'Mop floor' })];
+  srv.extra[`GET ${HP}/quests`] = (r) => {
+    const offset = new URLSearchParams(r.url.split('?')[1]).get('offset');
+    if (offset === null) return [200, { items: first, next_offset: 100 }];
+    if (offset === '100') return [200, { items: second, next_offset: null }];
+    return [400, { error: { code: 'bad_offset', message: 'bad offset' } }];
+  };
+  // gone: an id no page lists (the picker cannot show it); deselecting is impossible.
+  srv.combos = [combo({ id: 'c1', name: 'Bath Night', quest_ids: ['p0', 'q101', 'gone'] })];
+  srv.adminPinSet = true;
+  crudServer();
+  await loadApp();
+  await unlockAdmin('9999');
+
+  const pageReads = calls.filter((c) => c.method === 'GET' && c.path === `${HP}/quests`).map((c) => c.url);
+  assert.ok(pageReads.includes(`${HP}/quests?limit=100&offset=100`), 'second page read');
+  assert.match(comboRow('Bath Night').textContent, /Chore 0, Scrub tub, gone/);
+  const options = Array.from(inputIn(formWithSubmit('Create combo'), 'quest_ids').children).map((o) => o.value);
+  assert.equal(options.length, 102);
+  assert.ok(options.includes('q101') && options.includes('q102'));
+
+  // A rename only: every existing id goes back, including the one with no option.
+  await click(buttons(comboRow('Bath Night'), 'Edit')[0]);
+  const editForm = formWithSubmit('Save');
+  inputIn(editForm, 'name').value = 'Bath Time';
+  await submit(editForm);
+  const put = comboWrites().at(-1);
+  assert.equal(put.method, 'PUT');
+  assert.deepEqual(put.body.quest_ids, ['p0', 'q101', 'gone']);
+  assert.equal(put.body.name, 'Bath Time');
+
+  // Deselecting a chore that has an option drops it; the unseen id still stays.
+  await click(buttons(comboRow('Bath Time'), 'Edit')[0]);
+  await fillCombo(formWithSubmit('Save'), { name: 'Bath Time', bonus: '20', questIds: ['p0', 'q102'] });
+  assert.deepEqual(comboWrites().at(-1).body.quest_ids, ['p0', 'q102', 'gone']);
+});
