@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1179,6 +1180,390 @@ func TestIntegration_QuestApproval(t *testing.T) {
 	if mem2.Points != 7+3+10 {
 		t.Errorf("Ann's points after combo: %d, want 20", mem2.Points)
 	}
+
+	// Helper to accept, mark done, and back-date a completion to an explicit doneAt instant
+	markDoneAt := func(questID uuid.UUID, action app.MemberAction, doneAt time.Time) uuid.UUID {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `UPDATE household_quests SET available_at = NOW() - interval '1 minute' WHERE id = $1`, questID); err != nil {
+			t.Fatalf("make quest available: %v", err)
+		}
+		if _, err := quests.Accept(ctx, alice, h.ID, questID, action); err != nil {
+			t.Fatalf("accept quest %s: %v", questID, err)
+		}
+		if _, err := quests.MarkDone(ctx, alice, h.ID, questID, action); err != nil {
+			t.Fatalf("mark done quest %s: %v", questID, err)
+		}
+		var compID uuid.UUID
+		if err := pool.QueryRow(ctx, `
+			UPDATE quest_completions
+			SET done_at = $2
+			WHERE id = (SELECT id FROM quest_completions WHERE quest_id = $1 AND status = 'pending' ORDER BY done_at DESC, id DESC LIMIT 1)
+			RETURNING id
+		`, questID, doneAt).Scan(&compID); err != nil {
+			t.Fatalf("back-date completion %s: %v", compID, err)
+		}
+		return compID
+	}
+
+	// CLM-1: Two-chore combo, Ann marks both done, back-date both to same Chicago local day,
+	// approve on different days: first approval pays chore points only, second pays points plus bonus once.
+	t.Run("CLM-1: same local day approved on different days", func(t *testing.T) {
+		annBase := points(ann.ID)
+		q1, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "CLM1 Chores 1", Points: num(5), RepeatDays: num(1)}, "")
+		if err != nil {
+			t.Fatalf("create q1: %v", err)
+		}
+		q2, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "CLM1 Chores 2", Points: num(8), RepeatDays: num(1)}, "")
+		if err != nil {
+			t.Fatalf("create q2: %v", err)
+		}
+		c1, err := combos.Create(ctx, alice, h.ID, app.ComboInput{
+			Name:        "CLM1 Combo",
+			BonusPoints: num(15),
+			QuestIDs:    []uuid.UUID{q1.ID, q2.ID},
+		}, "")
+		if err != nil {
+			t.Fatalf("create combo: %v", err)
+		}
+
+		jan15_10am := time.Date(2025, time.January, 15, 10, 0, 0, 0, chicagoTZ)
+		jan15_2pm := time.Date(2025, time.January, 15, 14, 0, 0, 0, chicagoTZ)
+
+		cID1 := markDoneAt(q1.ID, asAnn, jan15_10am)
+		cID2 := markDoneAt(q2.ID, asAnn, jan15_2pm)
+
+		// First approval (e.g. earlier): pays chore points only (5 pts), 0 bonus
+		_, memFirst, bonusesFirst, err := quests.Approve(ctx, alice, h.ID, cID1, "")
+		if err != nil {
+			t.Fatalf("first approval: %v", err)
+		}
+		if len(bonusesFirst) != 0 {
+			t.Errorf("first approval bonuses: got %+v, want none", bonusesFirst)
+		}
+		if memFirst.Points != annBase+5 || points(ann.ID) != annBase+5 {
+			t.Errorf("ann points after first approval: got %d (stored %d), want %d", memFirst.Points, points(ann.ID), annBase+5)
+		}
+
+		// Second approval (e.g. later day): pays chore points (8 pts) + combo bonus (15 pts)
+		_, memSecond, bonusesSecond, err := quests.Approve(ctx, alice, h.ID, cID2, "")
+		if err != nil {
+			t.Fatalf("second approval: %v", err)
+		}
+		if len(bonusesSecond) != 1 || bonusesSecond[0].ComboID != c1.ID || bonusesSecond[0].BonusPoints != 15 {
+			t.Errorf("second approval bonuses: got %+v, want 1 bonus of 15", bonusesSecond)
+		}
+		wantPoints := annBase + 5 + 8 + 15
+		if memSecond.Points != wantPoints || points(ann.ID) != wantPoints {
+			t.Errorf("ann points after second approval: got %d (stored %d), want %d", memSecond.Points, points(ann.ID), wantPoints)
+		}
+
+		var awardCount int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM combo_awards WHERE combo_id = $1`, c1.ID).Scan(&awardCount); err != nil {
+			t.Fatalf("query awards: %v", err)
+		}
+		if awardCount != 1 {
+			t.Errorf("award count for c1 = %d, want 1", awardCount)
+		}
+	})
+
+	// CLM-2: Chicago household timezone cases:
+	// A) done on different local days, approved together -> no bonus
+	// B) 1h apart across Chicago local midnight (same UTC date) -> no bonus
+	// C) same Chicago local date but different UTC dates -> bonus
+	t.Run("CLM-2: Chicago timezone boundaries", func(t *testing.T) {
+		// Case A: done on different local days, approved together -> no bonus
+		{
+			annBase := points(ann.ID)
+			qA1, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "CLM2A Chores 1", Points: num(4), RepeatDays: num(1)}, "")
+			if err != nil {
+				t.Fatalf("create qA1: %v", err)
+			}
+			qA2, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "CLM2A Chores 2", Points: num(6), RepeatDays: num(1)}, "")
+			if err != nil {
+				t.Fatalf("create qA2: %v", err)
+			}
+			cA, err := combos.Create(ctx, alice, h.ID, app.ComboInput{
+				Name:        "CLM2A Combo",
+				BonusPoints: num(10),
+				QuestIDs:    []uuid.UUID{qA1.ID, qA2.ID},
+			}, "")
+			if err != nil {
+				t.Fatalf("create combo: %v", err)
+			}
+
+			day1 := time.Date(2025, time.January, 16, 12, 0, 0, 0, chicagoTZ)
+			day2 := time.Date(2025, time.January, 17, 12, 0, 0, 0, chicagoTZ)
+			cA_id1 := markDoneAt(qA1.ID, asAnn, day1)
+			cA_id2 := markDoneAt(qA2.ID, asAnn, day2)
+
+			_, _, b1, err := quests.Approve(ctx, alice, h.ID, cA_id1, "")
+			if err != nil || len(b1) != 0 {
+				t.Errorf("approve cA1: bonuses %+v, err %v", b1, err)
+			}
+			_, _, b2, err := quests.Approve(ctx, alice, h.ID, cA_id2, "")
+			if err != nil || len(b2) != 0 {
+				t.Errorf("approve cA2: bonuses %+v, err %v", b2, err)
+			}
+			if p := points(ann.ID); p != annBase+4+6 {
+				t.Errorf("ann points after different local days: got %d, want %d", p, annBase+10)
+			}
+			var awardsA int
+			if err := pool.QueryRow(ctx, `SELECT count(*) FROM combo_awards WHERE combo_id = $1`, cA.ID).Scan(&awardsA); err != nil || awardsA != 0 {
+				t.Errorf("awards for cA: got %d %v, want 0", awardsA, err)
+			}
+		}
+
+		// Case B: 1h apart across Chicago local midnight (same UTC date) -> no bonus
+		// 2025-01-11 05:30:00 UTC = 2025-01-10 23:30:00 Chicago (local Jan 10)
+		// 2025-01-11 06:30:00 UTC = 2025-01-11 00:30:00 Chicago (local Jan 11)
+		{
+			annBase := points(ann.ID)
+			qB1, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "CLM2B Chores 1", Points: num(4), RepeatDays: num(1)}, "")
+			if err != nil {
+				t.Fatalf("create qB1: %v", err)
+			}
+			qB2, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "CLM2B Chores 2", Points: num(6), RepeatDays: num(1)}, "")
+			if err != nil {
+				t.Fatalf("create qB2: %v", err)
+			}
+			cB, err := combos.Create(ctx, alice, h.ID, app.ComboInput{
+				Name:        "CLM2B Combo",
+				BonusPoints: num(12),
+				QuestIDs:    []uuid.UUID{qB1.ID, qB2.ID},
+			}, "")
+			if err != nil {
+				t.Fatalf("create combo: %v", err)
+			}
+
+			t1 := time.Date(2025, time.January, 11, 5, 30, 0, 0, time.UTC)
+			t2 := time.Date(2025, time.January, 11, 6, 30, 0, 0, time.UTC)
+			if t1.UTC().Day() != t2.UTC().Day() {
+				t.Fatalf("UTC days should match: %v vs %v", t1.UTC(), t2.UTC())
+			}
+			if t1.In(chicagoTZ).Day() == t2.In(chicagoTZ).Day() {
+				t.Fatalf("Chicago local days should differ: %v vs %v", t1.In(chicagoTZ), t2.In(chicagoTZ))
+			}
+
+			cB_id1 := markDoneAt(qB1.ID, asAnn, t1)
+			cB_id2 := markDoneAt(qB2.ID, asAnn, t2)
+
+			_, _, b1, err := quests.Approve(ctx, alice, h.ID, cB_id1, "")
+			if err != nil || len(b1) != 0 {
+				t.Errorf("approve cB1: bonuses %+v, err %v", b1, err)
+			}
+			_, _, b2, err := quests.Approve(ctx, alice, h.ID, cB_id2, "")
+			if err != nil || len(b2) != 0 {
+				t.Errorf("approve cB2: bonuses %+v, err %v", b2, err)
+			}
+			if p := points(ann.ID); p != annBase+4+6 {
+				t.Errorf("ann points after midnight straddle: got %d, want %d", p, annBase+10)
+			}
+			var awardsB int
+			if err := pool.QueryRow(ctx, `SELECT count(*) FROM combo_awards WHERE combo_id = $1`, cB.ID).Scan(&awardsB); err != nil || awardsB != 0 {
+				t.Errorf("awards for cB: got %d %v, want 0", awardsB, err)
+			}
+		}
+
+		// Case C: same Chicago local date but different UTC dates -> bonus
+		// 2025-01-10 10:00:00 Chicago = 2025-01-10 16:00:00 UTC (Jan 10 UTC)
+		// 2025-01-10 23:00:00 Chicago = 2025-01-11 05:00:00 UTC (Jan 11 UTC)
+		{
+			annBase := points(ann.ID)
+			qC1, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "CLM2C Chores 1", Points: num(4), RepeatDays: num(1)}, "")
+			if err != nil {
+				t.Fatalf("create qC1: %v", err)
+			}
+			qC2, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "CLM2C Chores 2", Points: num(6), RepeatDays: num(1)}, "")
+			if err != nil {
+				t.Fatalf("create qC2: %v", err)
+			}
+			cC, err := combos.Create(ctx, alice, h.ID, app.ComboInput{
+				Name:        "CLM2C Combo",
+				BonusPoints: num(14),
+				QuestIDs:    []uuid.UUID{qC1.ID, qC2.ID},
+			}, "")
+			if err != nil {
+				t.Fatalf("create combo: %v", err)
+			}
+
+			tC1 := time.Date(2025, time.January, 10, 10, 0, 0, 0, chicagoTZ)
+			tC2 := time.Date(2025, time.January, 10, 23, 0, 0, 0, chicagoTZ)
+			if tC1.UTC().Day() == tC2.UTC().Day() {
+				t.Fatalf("UTC days should differ: %v vs %v", tC1.UTC(), tC2.UTC())
+			}
+			if tC1.In(chicagoTZ).Day() != tC2.In(chicagoTZ).Day() {
+				t.Fatalf("Chicago local days should match: %v vs %v", tC1.In(chicagoTZ), tC2.In(chicagoTZ))
+			}
+
+			cC_id1 := markDoneAt(qC1.ID, asAnn, tC1)
+			cC_id2 := markDoneAt(qC2.ID, asAnn, tC2)
+
+			_, _, b1, err := quests.Approve(ctx, alice, h.ID, cC_id1, "")
+			if err != nil || len(b1) != 0 {
+				t.Errorf("approve cC1: bonuses %+v, err %v", b1, err)
+			}
+			_, _, b2, err := quests.Approve(ctx, alice, h.ID, cC_id2, "")
+			if err != nil || len(b2) != 1 || b2[0].ComboID != cC.ID || b2[0].BonusPoints != 14 {
+				t.Errorf("approve cC2: bonuses %+v, err %v", b2, err)
+			}
+			wantPoints := annBase + 4 + 6 + 14
+			if p := points(ann.ID); p != wantPoints {
+				t.Errorf("ann points after same Chicago date / different UTC: got %d, want %d", p, wantPoints)
+			}
+			var awardsC int
+			if err := pool.QueryRow(ctx, `SELECT count(*) FROM combo_awards WHERE combo_id = $1`, cC.ID).Scan(&awardsC); err != nil || awardsC != 1 {
+				t.Errorf("awards for cC: got %d %v, want 1", awardsC, err)
+			}
+		}
+	})
+
+	// CLM-3: Once-per-combo:
+	// - After a combo pays, approving a later unrelated completion pays no second bonus
+	// - Re-approving the paid completion returns app.ErrNotFound
+	// - Two concurrent approvals of a full pending set pay exactly one bonus (sync.WaitGroup)
+	// - A later new set completed later pays again
+	t.Run("CLM-3: once per combo and concurrency", func(t *testing.T) {
+		annBase := points(ann.ID)
+		q3A, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "CLM3 Chores A", Points: num(10), RepeatDays: num(1)}, "")
+		if err != nil {
+			t.Fatalf("create q3A: %v", err)
+		}
+		q3B, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "CLM3 Chores B", Points: num(15), RepeatDays: num(1)}, "")
+		if err != nil {
+			t.Fatalf("create q3B: %v", err)
+		}
+		q3Solo, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "CLM3 Solo", Points: num(5), RepeatDays: num(1)}, "")
+		if err != nil {
+			t.Fatalf("create q3Solo: %v", err)
+		}
+		c3, err := combos.Create(ctx, alice, h.ID, app.ComboInput{
+			Name:        "CLM3 Combo",
+			BonusPoints: num(20),
+			QuestIDs:    []uuid.UUID{q3A.ID, q3B.ID},
+		}, "")
+		if err != nil {
+			t.Fatalf("create combo: %v", err)
+		}
+
+		jan18 := time.Date(2025, time.January, 18, 10, 0, 0, 0, chicagoTZ)
+		c3_idA := markDoneAt(q3A.ID, asAnn, jan18)
+		c3_idB := markDoneAt(q3B.ID, asAnn, jan18.Add(time.Hour))
+
+		// Approve A (no bonus), then B (pays combo bonus)
+		_, _, bA, err := quests.Approve(ctx, alice, h.ID, c3_idA, "")
+		if err != nil || len(bA) != 0 {
+			t.Fatalf("approve c3A: bonuses %+v, err %v", bA, err)
+		}
+		_, _, bB, err := quests.Approve(ctx, alice, h.ID, c3_idB, "")
+		if err != nil || len(bB) != 1 || bB[0].BonusPoints != 20 {
+			t.Fatalf("approve c3B: bonuses %+v, err %v", bB, err)
+		}
+		if p := points(ann.ID); p != annBase+10+15+20 {
+			t.Errorf("ann points after initial c3: got %d, want %d", p, annBase+45)
+		}
+
+		// 1. Approve a later unrelated completion: pays only its chore points, no bonus
+		c3_idSolo := markDoneAt(q3Solo.ID, asAnn, jan18.Add(2*time.Hour))
+		_, memSolo, bSolo, err := quests.Approve(ctx, alice, h.ID, c3_idSolo, "")
+		if err != nil || len(bSolo) != 0 {
+			t.Fatalf("approve solo: bonuses %+v, err %v", bSolo, err)
+		}
+		if memSolo.Points != annBase+45+5 || points(ann.ID) != annBase+50 {
+			t.Errorf("ann points after solo: got %d (stored %d), want %d", memSolo.Points, points(ann.ID), annBase+50)
+		}
+
+		// 2. Re-approving the paid completion returns app.ErrNotFound
+		if _, _, _, err := quests.Approve(ctx, alice, h.ID, c3_idB, ""); !errors.Is(err, app.ErrNotFound) {
+			t.Fatalf("re-approve paid completion: got err %v, want app.ErrNotFound", err)
+		}
+		if p := points(ann.ID); p != annBase+50 {
+			t.Errorf("points changed after re-approve attempt: got %d, want %d", p, annBase+50)
+		}
+
+		// 3. Concurrent approvals of a full pending set pay exactly one bonus
+		qConcA, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "CLM3 Conc A", Points: num(10), RepeatDays: num(1)}, "")
+		if err != nil {
+			t.Fatalf("create qConcA: %v", err)
+		}
+		qConcB, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "CLM3 Conc B", Points: num(12), RepeatDays: num(1)}, "")
+		if err != nil {
+			t.Fatalf("create qConcB: %v", err)
+		}
+		cConc, err := combos.Create(ctx, alice, h.ID, app.ComboInput{
+			Name:        "CLM3 Conc Combo",
+			BonusPoints: num(25),
+			QuestIDs:    []uuid.UUID{qConcA.ID, qConcB.ID},
+		}, "")
+		if err != nil {
+			t.Fatalf("create cConc: %v", err)
+		}
+
+		jan19 := time.Date(2025, time.January, 19, 11, 0, 0, 0, chicagoTZ)
+		cConcIDA := markDoneAt(qConcA.ID, asAnn, jan19)
+		cConcIDB := markDoneAt(qConcB.ID, asAnn, jan19.Add(time.Minute))
+
+		annBeforeConc := points(ann.ID)
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		paidBonuses := make([][]app.ComboBonus, 2)
+		start := make(chan struct{})
+		for i, compID := range []uuid.UUID{cConcIDA, cConcIDB} {
+			wg.Add(1)
+			go func(idx int, cID uuid.UUID) {
+				defer wg.Done()
+				<-start
+				_, _, b, err := quests.Approve(ctx, alice, h.ID, cID, "")
+				errs[idx] = err
+				paidBonuses[idx] = b
+			}(i, compID)
+		}
+		close(start)
+		wg.Wait()
+
+		if errs[0] != nil || errs[1] != nil {
+			t.Fatalf("concurrent approvals failed: %v, %v", errs[0], errs[1])
+		}
+		totalBonuses := len(paidBonuses[0]) + len(paidBonuses[1])
+		if totalBonuses != 1 {
+			t.Fatalf("concurrent approvals total bonuses = %d, want 1", totalBonuses)
+		}
+		wantPointsConc := annBeforeConc + 10 + 12 + 25
+		if p := points(ann.ID); p != wantPointsConc {
+			t.Errorf("ann points after concurrent approvals: got %d, want %d", p, wantPointsConc)
+		}
+		var awardConcCount int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM combo_awards WHERE combo_id = $1`, cConc.ID).Scan(&awardConcCount); err != nil {
+			t.Fatalf("query cConc awards: %v", err)
+		}
+		if awardConcCount != 1 {
+			t.Errorf("cConc award count = %d, want 1", awardConcCount)
+		}
+
+		// 4. A later new set pays again
+		jan20 := time.Date(2025, time.January, 20, 10, 0, 0, 0, chicagoTZ)
+		cNewIDA := markDoneAt(qConcA.ID, asAnn, jan20)
+		cNewIDB := markDoneAt(qConcB.ID, asAnn, jan20.Add(time.Hour))
+
+		annBeforeNew := points(ann.ID)
+		_, _, bNewA, err := quests.Approve(ctx, alice, h.ID, cNewIDA, "")
+		if err != nil || len(bNewA) != 0 {
+			t.Fatalf("approve new set A: bonuses %+v, err %v", bNewA, err)
+		}
+		_, _, bNewB, err := quests.Approve(ctx, alice, h.ID, cNewIDB, "")
+		if err != nil || len(bNewB) != 1 || bNewB[0].BonusPoints != 25 {
+			t.Fatalf("approve new set B: bonuses %+v, err %v", bNewB, err)
+		}
+		wantPointsNew := annBeforeNew + 10 + 12 + 25
+		if p := points(ann.ID); p != wantPointsNew {
+			t.Errorf("ann points after later new set: got %d, want %d", p, wantPointsNew)
+		}
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM combo_awards WHERE combo_id = $1`, cConc.ID).Scan(&awardConcCount); err != nil {
+			t.Fatalf("query cConc awards round 2: %v", err)
+		}
+		if awardConcCount != 2 {
+			t.Errorf("cConc award count after second set = %d, want 2", awardConcCount)
+		}
+	})
 }
 
 // TestIntegration_QuestMarkDoneCooldown_CLM2 directly proves CLM-2:
