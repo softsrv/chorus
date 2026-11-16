@@ -617,8 +617,10 @@ function confirmClick(prompt, fn) {
 // ── Quests ────────────────────────────────────────────────────────────────────
 
 // Quest list partitions come only from the server's fields: available says the
-// quest is in the pool, claimed_by says who holds it. The client does no date
-// arithmetic; a resting quest shows its available_at as the server sent it.
+// quest is in the pool, claimed_by says who holds it. A marked-done chore has
+// no holder (claimed_by is null) and rests until its cooldown ends, then returns
+// to available even if awaiting approval. The client does no date arithmetic;
+// a resting quest shows its available_at as the server sent it.
 function partitionQuests(items, memberId) {
   const out = { available: [], mine: [], claimed: [], resting: [] };
   for (const q of items) {
@@ -737,20 +739,22 @@ function takeCard(h, quests, nameOf, rerender) {
     el('h3', { class: 'font-semibold', text: `Quests for ${activeMember.name}` }),
     $err,
     section('Available', parts.available,
-      (q) => row(q, el('button', { class: 'btn btn-sm', text: 'View', onclick: (e) => { e.preventDefault(); showDetail(q); } })),
+      (q) => row(q,
+        q.awaiting_approval && el('span', { class: 'badge badge-sm', text: 'Waiting for approval' }),
+        el('button', { class: 'btn btn-sm', text: 'View', onclick: (e) => { e.preventDefault(); showDetail(q); } })),
       'No quests available right now.'),
     $detail,
-    section('Mine', parts.mine, (q) => row(q, ...(q.awaiting_approval
-      ? [el('span', { class: 'badge badge-sm', text: 'Waiting for approval' })]
-      : [
-        el('button', { class: 'btn btn-primary btn-xs', text: 'Mark done', onclick: act('done', q) }),
-        el('button', { class: 'btn btn-ghost btn-xs', text: 'Abandon', onclick: act('abandon', q) }),
-      ])), 'You have no quests yet.'),
+    section('Mine', parts.mine, (q) => row(q,
+      el('button', { class: 'btn btn-primary btn-xs', text: 'Mark done', onclick: act('done', q) }),
+      el('button', { class: 'btn btn-ghost btn-xs', text: 'Abandon', onclick: act('abandon', q) }),
+    ), 'You have no quests yet.'),
     section('Claimed', parts.claimed,
       (q) => row(q, el('span', { class: 'text-xs opacity-70', text: `Taken by ${nameOf[q.claimed_by] || 'a former member'}` })),
       'Nobody else has a quest.'),
     parts.resting.length > 0 && section('Coming back later', parts.resting,
-      (q) => row(q, q.available_at && el('span', { class: 'text-xs opacity-70', text: `Back ${fmtDate(q.available_at)}` })), ''));
+      (q) => row(q,
+        q.available_at && el('span', { class: 'text-xs opacity-70', text: `Back ${fmtDate(q.available_at)}` }),
+        q.awaiting_approval && el('span', { class: 'badge badge-sm', text: 'Waiting for approval' })), ''));
 }
 
 // comboBonusNotice is the plain-text notice after an approval that paid combo
@@ -798,7 +802,8 @@ async function approvalsCard(h, members, rerender) {
   const act = (verb, q) => action(async () => {
     let res;
     try {
-      res = await adminRequest('POST', `/households/${h.id}/quests/${q.id}/${verb}`, {});
+      const cid = q.completion_id || q.id;
+      res = await adminRequest('POST', `/households/${h.id}/quest-completions/${cid}/${verb}`, {});
     } catch (err) {
       if (isAdminPinError(err)) { wrongAdminPin(); return; }
       const msg = questNotice(err);
@@ -811,7 +816,8 @@ async function approvalsCard(h, members, rerender) {
   const rows = pending.map((q) => el('li', { class: 'flex flex-wrap items-center gap-2 py-2 border-b border-base-300' },
     el('div', { class: 'flex-1 min-w-0' },
       el('div', { class: 'font-medium', text: q.name }),
-      el('div', { class: 'text-xs opacity-60', text: `${q.member_name} · ${q.points} points` })),
+      el('div', { class: 'text-xs opacity-60', text: `${q.member_name} · ${q.points} points` }),
+      q.done_at && el('div', { class: 'text-xs opacity-60', text: fmtDate(q.done_at) })),
     el('button', { class: 'btn btn-success btn-xs', text: 'Approve', onclick: act('approve', q) }),
     el('button', { class: 'btn btn-ghost btn-xs', text: 'Send back', onclick: act('reject', q) })));
 
