@@ -68,7 +68,7 @@ SET claimed_by = NULL, claimed_at = NULL, done_at = NULL,
     updated_at = NOW()
 FROM pending p
 WHERE q.household_id = $1 AND q.id = p.id
-RETURNING q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at, p.claimed_by AS credited_member_id
+RETURNING q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at, p.claimed_by AS credited_member_id, p.done_at AS credited_done_at
 `
 
 type ApproveQuestParams struct {
@@ -92,6 +92,7 @@ type ApproveQuestRow struct {
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
 	CreditedMemberID *uuid.UUID         `json:"credited_member_id"`
+	CreditedDoneAt   pgtype.Timestamptz `json:"credited_done_at"`
 }
 
 // Completes a pending quest. The pending row is locked first, and the
@@ -99,7 +100,9 @@ type ApproveQuestRow struct {
 // exactly one gets a row; the households row is read, not locked. The quest
 // comes back at local midnight in the household's timezone, repeat_days days
 // after the local day it was marked done (done_at), however late the approval.
-// credited_member_id is the holder to credit, read before claimed_by is cleared.
+// credited_member_id is the holder to credit, read before claimed_by is cleared;
+// credited_done_at is when they marked it done, read before done_at is cleared
+// (it decides the household day the completion counts toward for combos).
 func (q *Queries) ApproveQuest(ctx context.Context, arg ApproveQuestParams) (ApproveQuestRow, error) {
 	row := q.db.QueryRow(ctx, approveQuest, arg.HouseholdID, arg.ID)
 	var i ApproveQuestRow
@@ -119,6 +122,7 @@ func (q *Queries) ApproveQuest(ctx context.Context, arg ApproveQuestParams) (App
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.CreditedMemberID,
+		&i.CreditedDoneAt,
 	)
 	return i, err
 }

@@ -214,6 +214,38 @@ func toLibraryReward(r db.RewardLibrary) libraryRewardJSON {
 	return libraryRewardJSON{ID: r.ID, Description: r.Description, Cost: r.Cost}
 }
 
+// comboJSON is the wire representation of a household combo.
+type comboJSON struct {
+	ID          uuid.UUID   `json:"id"`
+	Name        string      `json:"name"`
+	BonusPoints int32       `json:"bonus_points"`
+	QuestIDs    []uuid.UUID `json:"quest_ids"`
+}
+
+func toCombo(c app.Combo) comboJSON {
+	qids := c.QuestIDs
+	if qids == nil {
+		qids = []uuid.UUID{}
+	}
+	return comboJSON{
+		ID:          c.ID,
+		Name:        c.Name,
+		BonusPoints: c.BonusPoints,
+		QuestIDs:    qids,
+	}
+}
+
+// comboAwardJSON is one combo bonus paid by an approval.
+type comboAwardJSON struct {
+	ComboID     uuid.UUID `json:"combo_id"`
+	Name        string    `json:"name"`
+	BonusPoints int32     `json:"bonus_points"`
+}
+
+func toComboAward(b app.ComboBonus) comboAwardJSON {
+	return comboAwardJSON{ComboID: b.ComboID, Name: b.Name, BonusPoints: b.BonusPoints}
+}
+
 func mapSlice[T, U any](in []T, f func(T) U) []U {
 	out := make([]U, len(in))
 	for i, v := range in {
