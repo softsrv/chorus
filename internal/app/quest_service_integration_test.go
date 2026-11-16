@@ -1455,7 +1455,7 @@ func TestIntegration_QuestApproval(t *testing.T) {
 			t.Fatalf("approve c3A: bonuses %+v, err %v", bA, err)
 		}
 		_, _, bB, err := quests.Approve(ctx, alice, h.ID, c3_idB, "")
-		if err != nil || len(bB) != 1 || bB[0].BonusPoints != 20 {
+		if err != nil || len(bB) != 1 || bB[0].BonusPoints != 20 || bB[0].ComboID != c3.ID {
 			t.Fatalf("approve c3B: bonuses %+v, err %v", bB, err)
 		}
 		if p := points(ann.ID); p != annBase+10+15+20 {
@@ -1478,6 +1478,10 @@ func TestIntegration_QuestApproval(t *testing.T) {
 		}
 		if p := points(ann.ID); p != annBase+50 {
 			t.Errorf("points changed after re-approve attempt: got %d, want %d", p, annBase+50)
+		}
+		var awardsCount int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM combo_awards WHERE combo_id = $1`, c3.ID).Scan(&awardsCount); err != nil || awardsCount != 1 {
+			t.Errorf("awards for c3: got %d %v, want 1", awardsCount, err)
 		}
 
 		// 3. Concurrent approvals of a full pending set pay exactly one bonus
