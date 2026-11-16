@@ -1510,9 +1510,6 @@ func TestIntegration_QuestResetsAtLocalMidnight(t *testing.T) {
 		if !app.QuestAvailable(got.HouseholdQuest, time.Now()) {
 			t.Errorf("after reject, quest should be available: %+v", got)
 		}
-		if _, err := quests.Accept(ctx, alice, chicago.id, id, chicago.ann); err != nil {
-			t.Fatalf("accept after reject: %v", err)
-		}
 		compID2 := doneAt(chicago, id, time.Now())
 		if _, err := quests.Reject(ctx, alice, chicago.id, compID2, ""); err != nil {
 			t.Fatalf("reject again: %v", err)

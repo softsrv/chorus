@@ -258,8 +258,22 @@ func (s *QuestService) Accept(ctx context.Context, userID, householdID, questID 
 	if err := s.verifyActingMember(ctx, userID, householdID, act); err != nil {
 		return QuestView{}, err
 	}
-	quest, err := s.q.ClaimQuest(ctx, db.ClaimQuestParams{HouseholdID: householdID, ID: questID, MemberID: &act.MemberID})
+	// The member row is locked before the quest row, the order
+	// FamilyService.Remove uses, so a concurrent removal cannot deadlock.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return QuestView{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	qtx := s.q.WithTx(tx)
+	if _, err := notFoundIfNoRows(qtx.LockFamilyMember(ctx, db.LockFamilyMemberParams{HouseholdID: householdID, ID: act.MemberID})); err != nil {
+		return QuestView{}, err
+	}
+	quest, err := qtx.ClaimQuest(ctx, db.ClaimQuestParams{HouseholdID: householdID, ID: questID, MemberID: &act.MemberID})
 	if err == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return QuestView{}, fmt.Errorf("commit: %w", err)
+		}
 		return s.view(ctx, quest)
 	}
 	if isForeignKeyViolation(err) {
@@ -269,7 +283,7 @@ func (s *QuestService) Accept(ctx context.Context, userID, householdID, questID 
 		return QuestView{}, fmt.Errorf("claim quest: %w", err)
 	}
 	// No row: either the quest is not in this household, or it is not available.
-	if _, err := notFoundIfNoRows(s.q.GetHouseholdQuest(ctx, db.GetHouseholdQuestParams{HouseholdID: householdID, ID: questID})); err != nil {
+	if _, err := notFoundIfNoRows(qtx.GetHouseholdQuest(ctx, db.GetHouseholdQuestParams{HouseholdID: householdID, ID: questID})); err != nil {
 		return QuestView{}, err
 	}
 	return QuestView{}, ErrQuestTaken
@@ -287,11 +301,16 @@ func (s *QuestService) Abandon(ctx context.Context, userID, householdID, questID
 }
 
 // MarkDone records that the acting member finished their quest. In one
-// statement it inserts a pending completion (member, mark-done time now),
-// releases the quest and starts its cooldown from now: the quest comes back
-// at local midnight in the household's timezone, repeat_days days after
-// today, whether or not the administrator has approved by then. No points
-// move until approval. A quest the member does not hold is ErrNotFound.
+// transaction it locks the member row, then in one statement inserts a
+// pending completion (member, mark-done time now), releases the quest and
+// starts its cooldown from now: the quest comes back at local midnight in the
+// household's timezone, repeat_days days after today, whether or not the
+// administrator has approved by then. No points move until approval. A quest
+// the member does not hold, or a member removed meanwhile, is ErrNotFound.
+//
+// The member lock comes first because FamilyService.Remove takes it before it
+// releases the member's quests; taking the quest row first would deadlock
+// against a concurrent removal.
 func (s *QuestService) MarkDone(ctx context.Context, userID, householdID, questID uuid.UUID, act MemberAction) (QuestView, error) {
 	if err := s.verifyActingMember(ctx, userID, householdID, act); err != nil {
 		return QuestView{}, err
@@ -300,15 +319,28 @@ func (s *QuestService) MarkDone(ctx context.Context, userID, householdID, questI
 	if err != nil {
 		return QuestView{}, fmt.Errorf("new completion id: %w", err)
 	}
-	row, err := notFoundIfNoRows(s.q.MarkQuestDone(ctx, db.MarkQuestDoneParams{
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return QuestView{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	qtx := s.q.WithTx(tx)
+
+	if _, err := notFoundIfNoRows(qtx.LockFamilyMember(ctx, db.LockFamilyMemberParams{HouseholdID: householdID, ID: act.MemberID})); err != nil {
+		// The member was removed between the PIN check and the lock.
+		return QuestView{}, err
+	}
+	row, err := notFoundIfNoRows(qtx.MarkQuestDone(ctx, db.MarkQuestDoneParams{
 		HouseholdID: householdID, ID: questID, MemberID: act.MemberID, CompletionID: completionID,
 	}))
 	if isForeignKeyViolation(err) {
-		// The member was removed between the PIN check and the write.
 		return QuestView{}, ErrNotFound
 	}
 	if err != nil {
 		return QuestView{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return QuestView{}, fmt.Errorf("commit: %w", err)
 	}
 	return QuestView{HouseholdQuest: db.HouseholdQuest(row), AwaitingApproval: true}, nil
 }
