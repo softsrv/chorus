@@ -20,9 +20,11 @@ services:
       DATABASE_URL: postgres://chorus:chorus@postgres:5432/chorus?sslmode=disable
       SMTP_HOST: smtp4dev
       SMTP_PORT: "25"
-      PORT: "8080"
+      PORT: ${PORT:-8080}
     ports:
-      - "127.0.0.1:8080:8080"
+      # PORT comes from .env (compose reads it for interpolation), so the
+      # listen port and the published host port always match.
+      - "127.0.0.1:${PORT:-8080}:${PORT:-8080}"
     volumes:
       - .:/src                            # hot reload: air watches the mounted source
       - gomod:/go/pkg/mod                 # keep module + build caches across restarts
