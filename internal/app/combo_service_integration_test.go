@@ -487,18 +487,23 @@ func TestIntegration_ComboBonusPayment(t *testing.T) {
 		}
 	})
 
-	// CLM-5: the full set again pays again, the same day and a later day; a
-	// repeat approval is ErrNotFound and pays nothing.
+	// CLM-5, criterion 2.1/3: a combo pays once per member and household day.
+	// A second full set the same day (a chore redone after a reject, say)
+	// pays chore points only; a full set on a later day pays again. A repeat
+	// approval is ErrNotFound and pays nothing.
 	t.Run("every full set pays once", func(t *testing.T) {
 		w := newComboWorld(t, base, "Combo Again")
 		ann := w.member("Ann")
 		a, b := w.chore("Load dishwasher", 10), w.chore("Wipe counters", 15)
 		w.combo("Kitchen Crew", 20, a, b)
 
-		sets := []struct{ a, b time.Time }{
-			{utc(10, 14, 0), utc(10, 15, 0)}, // Jan 10 morning NY
-			{utc(10, 20, 0), utc(10, 21, 0)}, // Jan 10 afternoon NY: same day again
-			{utc(12, 14, 0), utc(12, 15, 0)}, // a later day
+		sets := []struct {
+			a, b   time.Time
+			awards int
+		}{
+			{utc(10, 14, 0), utc(10, 15, 0), 1}, // Jan 10 morning NY
+			{utc(10, 20, 0), utc(10, 21, 0), 1}, // Jan 10 afternoon NY: same day again, no second bonus
+			{utc(12, 14, 0), utc(12, 15, 0), 2}, // a later day pays again
 		}
 		for i, s := range sets {
 			w.markDone(a, ann, s.a)
@@ -506,21 +511,22 @@ func TestIntegration_ComboBonusPayment(t *testing.T) {
 				t.Fatalf("set %d: first chore paid %+v", i, bonuses)
 			}
 			w.markDone(b, ann, s.b)
-			if _, bonuses := w.approve(b); len(bonuses) != 1 {
-				t.Fatalf("set %d: completing chore paid %+v, want one bonus", i, bonuses)
+			wantPaid := s.awards - w.awards()
+			if _, bonuses := w.approve(b); len(bonuses) != wantPaid {
+				t.Fatalf("set %d: completing chore paid %+v, want %d bonus", i, bonuses, wantPaid)
 			}
-			if w.awards() != i+1 {
-				t.Fatalf("set %d: %d awards, want %d", i, w.awards(), i+1)
+			if w.awards() != s.awards {
+				t.Fatalf("set %d: %d awards, want %d", i, w.awards(), s.awards)
 			}
 		}
 		if _, _, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, w.last[b], ""); !errors.Is(err, app.ErrNotFound) {
 			t.Fatalf("repeat approval: %v, want ErrNotFound", err)
 		}
-		if w.awards() != 3 || w.points(ann) != 3*(10+15+20) {
-			t.Fatalf("after repeat: awards %d points %d, want 3 and %d", w.awards(), w.points(ann), 3*45)
+		if w.awards() != 2 || w.points(ann) != 3*(10+15)+2*20 {
+			t.Fatalf("after repeat: awards %d points %d, want 2 and %d", w.awards(), w.points(ann), 3*25+40)
 		}
-		if n := w.count(`SELECT count(*) FROM combo_award_completions cac JOIN combo_awards ca ON ca.id = cac.combo_award_id WHERE ca.household_id = $1`, w.h.ID); n != 6 {
-			t.Fatalf("claimed completions: %d, want 6", n)
+		if n := w.count(`SELECT count(*) FROM combo_award_completions cac JOIN combo_awards ca ON ca.id = cac.combo_award_id WHERE ca.household_id = $1`, w.h.ID); n != 4 {
+			t.Fatalf("claimed completions: %d, want 4", n)
 		}
 	})
 

@@ -55,7 +55,7 @@ WITH pending AS (
     FROM quest_completions pc
     JOIN household_quests q ON q.household_id = pc.household_id AND q.id = pc.quest_id
     WHERE pc.household_id = $1 AND pc.id = $2
-      AND pc.status = 'pending' AND pc.member_id IS NOT NULL
+      AND pc.status = 'pending' AND pc.member_id = $3::uuid
     FOR UPDATE OF pc
 )
 UPDATE quest_completions c
@@ -68,6 +68,7 @@ RETURNING c.id, c.quest_id, c.member_id, c.done_at, c.approved_at, p.points
 type ApproveCompletionParams struct {
 	HouseholdID uuid.UUID `json:"household_id"`
 	ID          uuid.UUID `json:"id"`
+	MemberID    uuid.UUID `json:"member_id"`
 }
 
 type ApproveCompletionRow struct {
@@ -83,8 +84,9 @@ type ApproveCompletionRow struct {
 // status re-read under the lock, so of two concurrent approvals exactly one
 // gets a row. The quest is not touched: its cooldown already started at
 // mark-done. points is the chore's current points, to credit to member_id.
+// member_id must match the member the caller already locked.
 func (q *Queries) ApproveCompletion(ctx context.Context, arg ApproveCompletionParams) (ApproveCompletionRow, error) {
-	row := q.db.QueryRow(ctx, approveCompletion, arg.HouseholdID, arg.ID)
+	row := q.db.QueryRow(ctx, approveCompletion, arg.HouseholdID, arg.ID, arg.MemberID)
 	var i ApproveCompletionRow
 	err := row.Scan(
 		&i.ID,
@@ -98,10 +100,18 @@ func (q *Queries) ApproveCompletion(ctx context.Context, arg ApproveCompletionPa
 }
 
 const cancelMemberPendingCompletions = `-- name: CancelMemberPendingCompletions :exec
-UPDATE quest_completions
-SET status = 'cancelled'
-WHERE household_id = $1 AND member_id = $2
-  AND status = 'pending'
+WITH cancelled AS (
+    UPDATE quest_completions cc
+    SET status = 'cancelled'
+    WHERE cc.household_id = $1 AND cc.member_id = $2
+      AND cc.status = 'pending'
+    RETURNING cc.household_id, cc.quest_id, cc.done_at
+)
+UPDATE household_quests q
+SET available_at = NOW(), updated_at = NOW()
+FROM cancelled c
+WHERE q.household_id = c.household_id AND q.id = c.quest_id
+  AND q.completed_at = c.done_at AND q.available_at > NOW()
 `
 
 type CancelMemberPendingCompletionsParams struct {
@@ -110,7 +120,10 @@ type CancelMemberPendingCompletionsParams struct {
 }
 
 // Cancels every completion of the member still waiting for approval. No
-// points move and the quests' cooldowns stay as they are.
+// points move. As on reject, a quest whose running cooldown one of those
+// completions started (the quest's completed_at is its done_at, available_at
+// still ahead) is available again right away: the chore was never approved,
+// so it does not sit resting. Cooldowns started by anyone else stay.
 func (q *Queries) CancelMemberPendingCompletions(ctx context.Context, arg CancelMemberPendingCompletionsParams) error {
 	_, err := q.db.Exec(ctx, cancelMemberPendingCompletions, arg.HouseholdID, arg.MemberID)
 	return err
@@ -291,6 +304,27 @@ func (q *Queries) GetHouseholdQuestView(ctx context.Context, arg GetHouseholdQue
 		&i.AwaitingApproval,
 	)
 	return i, err
+}
+
+const getPendingCompletionMember = `-- name: GetPendingCompletionMember :one
+SELECT member_id FROM quest_completions
+WHERE household_id = $1 AND id = $2
+  AND status = 'pending' AND member_id IS NOT NULL
+`
+
+type GetPendingCompletionMemberParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	ID          uuid.UUID `json:"id"`
+}
+
+// The member of a pending completion, read without a lock so Approve can
+// lock that member's row before it locks the completion (the order
+// FamilyService.Remove uses).
+func (q *Queries) GetPendingCompletionMember(ctx context.Context, arg GetPendingCompletionMemberParams) (*uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, getPendingCompletionMember, arg.HouseholdID, arg.ID)
+	var member_id *uuid.UUID
+	err := row.Scan(&member_id)
+	return member_id, err
 }
 
 const getQuestLibraryItem = `-- name: GetQuestLibraryItem :one

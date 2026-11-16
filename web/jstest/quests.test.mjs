@@ -179,6 +179,23 @@ test('CLM-4: Abandon and Mark done only on own quests; Mine row has no badge', a
   assert.doesNotMatch(rowOf('Own quest').textContent, /Waiting for approval/);
 });
 
+test('CLM-8: a re-taken chore whose earlier completion still waits shows Waiting for approval in Mine (with Mark done) and in Claimed', async () => {
+  srv.quests = [
+    quest({ id: 'q1', name: 'Own retaken', available: false, claimed_by: 'm-a', awaiting_approval: true }),
+    quest({ id: 'q2', name: 'Bens retaken', available: false, claimed_by: 'm-b', awaiting_approval: true }),
+  ];
+  await loadApp();
+  await becomeAnn();
+  const rowOf = (name) => walk(env.$app).find((n) => n.tagName === 'LI' && n.textContent.startsWith(name));
+  assert.match(section(env.$app, 'Mine'), /Own retaken/);
+  assert.match(rowOf('Own retaken').textContent, /Waiting for approval/);
+  assert.equal(buttons(rowOf('Own retaken'), 'Mark done').length, 1);
+  assert.equal(buttons(rowOf('Own retaken'), 'Abandon').length, 1);
+  assert.match(section(env.$app, 'Claimed'), /Bens retaken/);
+  assert.match(rowOf('Bens retaken').textContent, /Taken by Ben/);
+  assert.match(rowOf('Bens retaken').textContent, /Waiting for approval/);
+});
+
 test('CLM-5: Mark done posts the member, moves to Coming back later with Back date and Waiting for approval badge', async () => {
   const future = '2030-01-02T00:00:00Z';
   srv.quests = [quest({ available: false, claimed_by: 'm-a' })];

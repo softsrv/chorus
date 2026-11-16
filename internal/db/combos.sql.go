@@ -276,6 +276,11 @@ WHERE c.household_id = $1
   AND (SELECT count(*) FROM combo_quests n
        WHERE n.household_id = c.household_id AND n.combo_id = c.id) >= 2
   AND NOT EXISTS (
+      SELECT 1 FROM combo_awards ca
+      WHERE ca.household_id = c.household_id AND ca.combo_id = c.id
+        AND ca.member_id = $3 AND ca.award_day = d.local_day
+  )
+  AND NOT EXISTS (
       SELECT 1 FROM combo_quests cq
       WHERE cq.household_id = c.household_id AND cq.combo_id = c.id
         AND NOT EXISTS (
@@ -297,7 +302,7 @@ ORDER BY c.id
 type ListCombosCompletedByMemberOnDayParams struct {
 	HouseholdID uuid.UUID          `json:"household_id"`
 	QuestID     uuid.UUID          `json:"quest_id"`
-	MemberID    *uuid.UUID         `json:"member_id"`
+	MemberID    uuid.UUID          `json:"member_id"`
 	DoneAt      pgtype.Timestamptz `json:"done_at"`
 }
 
@@ -310,10 +315,13 @@ type ListCombosCompletedByMemberOnDayRow struct {
 }
 
 // The combos containing the quest that the member has just finished: the
-// combo still has two or more chores, and every one of them has an approved
-// completion by the member, not yet counted toward this combo, whose done_at falls on the
-// same household-local day (households.timezone) as done_at. award_day is
-// that day; chore_count is how many completions paying it will claim.
+// combo still has two or more chores, the member has not yet been paid it for
+// this household-local day (one award per combo, member and day), and every
+// one of its chores has an approved completion by the member, not yet counted
+// toward this combo, whose done_at falls on the same household-local day
+// (households.timezone) as done_at. award_day is that day; chore_count is how
+// many completions paying it will claim. The caller holds the combo locks
+// (LockCombosForQuest), so the award check cannot race another payer.
 func (q *Queries) ListCombosCompletedByMemberOnDay(ctx context.Context, arg ListCombosCompletedByMemberOnDayParams) ([]ListCombosCompletedByMemberOnDayRow, error) {
 	rows, err := q.db.Query(ctx, listCombosCompletedByMemberOnDay,
 		arg.HouseholdID,
