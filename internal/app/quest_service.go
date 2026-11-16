@@ -92,7 +92,9 @@ type PendingCompletion struct {
 // pool and cancels the member's completions still waiting for approval. It is
 // the one place that clears a quest's holder when a member goes; qtx is the
 // caller's transaction, so the release commits or rolls back with the
-// removal. No points move and no quest's cooldown changes.
+// removal. No points move. A quest resting on a cooldown that one of the
+// cancelled completions started is available again right away, as on reject;
+// every other cooldown stays.
 func releaseMemberQuests(ctx context.Context, qtx *db.Queries, householdID, memberID uuid.UUID) error {
 	if err := qtx.ReleaseMemberQuests(ctx, db.ReleaseMemberQuestsParams{HouseholdID: householdID, MemberID: &memberID}); err != nil {
 		return fmt.Errorf("release member quests: %w", err)
@@ -403,15 +405,28 @@ func (s *QuestService) Approve(ctx context.Context, userID, householdID, complet
 	defer tx.Rollback(ctx) //nolint:errcheck
 
 	qtx := s.q.WithTx(tx)
-	row, err := notFoundIfNoRows(qtx.ApproveCompletion(ctx, db.ApproveCompletionParams{HouseholdID: householdID, ID: completionID}))
+	// Lock order is member row, then completion, the order FamilyService.Remove
+	// uses (it locks the member, then cancels the member's completions).
+	// Locking the completion first would deadlock against a concurrent removal.
+	memberRef, err := notFoundIfNoRows(qtx.GetPendingCompletionMember(ctx, db.GetPendingCompletionMemberParams{HouseholdID: householdID, ID: completionID}))
 	if err != nil {
 		return Completion{}, db.FamilyMember{}, nil, err
 	}
-	if row.MemberID == nil {
-		// The query approves only completions that still have a member.
+	if memberRef == nil {
+		// The query reads only completions that still have a member.
 		return Completion{}, db.FamilyMember{}, nil, fmt.Errorf("approve completion %s: no member", completionID)
 	}
-	memberID := *row.MemberID
+	memberID := *memberRef
+	if _, err := notFoundIfNoRows(qtx.LockFamilyMember(ctx, db.LockFamilyMemberParams{HouseholdID: householdID, ID: memberID})); err != nil {
+		// The member was removed meanwhile; their completion is cancelled.
+		return Completion{}, db.FamilyMember{}, nil, err
+	}
+	// Re-read under the locks: a concurrent approval, reject or removal that
+	// committed first leaves no pending row, so this one is ErrNotFound.
+	row, err := notFoundIfNoRows(qtx.ApproveCompletion(ctx, db.ApproveCompletionParams{HouseholdID: householdID, ID: completionID, MemberID: memberID}))
+	if err != nil {
+		return Completion{}, db.FamilyMember{}, nil, err
+	}
 	member, err := qtx.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: householdID, ID: memberID, Delta: row.Points})
 	if err != nil {
 		return Completion{}, db.FamilyMember{}, nil, fmt.Errorf("credit points: %w", err)

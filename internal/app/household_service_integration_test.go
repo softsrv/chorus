@@ -193,6 +193,12 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		(pendingBefore.AvailableAt.Valid && !pendingAfter.AvailableAt.Time.Equal(pendingBefore.AvailableAt.Time)) {
 		t.Errorf("alice pending quest available_at changed: before %v, after %v", pendingBefore.AvailableAt, pendingAfter.AvailableAt)
 	}
+	// completed_at is the cooldown anchor (it equals the pending completion's
+	// done_at); no outsider MarkDone, Approve or Reject may re-stamp it.
+	if !pendingBefore.CompletedAt.Valid || pendingAfter.CompletedAt.Valid != pendingBefore.CompletedAt.Valid ||
+		!pendingAfter.CompletedAt.Time.Equal(pendingBefore.CompletedAt.Time) {
+		t.Errorf("alice pending quest completed_at changed: before %v, after %v", pendingBefore.CompletedAt, pendingAfter.CompletedAt)
+	}
 	memberAfter, err := familySvc.Get(ctx, alice, h.ID, aliceMember.ID)
 	if err != nil {
 		t.Fatalf("get alice member after outsider approve attempts: %v", err)
@@ -205,8 +211,17 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		t.Errorf("alice pending completion touched by outsider: %+v, %v", aliceCompletionsAfter, err)
 	}
 	var compStatus string
-	if err := pool.QueryRow(ctx, `SELECT status FROM quest_completions WHERE id = $1 AND household_id = $2`, aliceCompletionID, h.ID).Scan(&compStatus); err != nil || compStatus != "pending" {
-		t.Errorf("alice completion status in db = %q, %v, want pending", compStatus, err)
+	var compApprovedAt pgtype.Timestamptz
+	var compDoneAt time.Time
+	if err := pool.QueryRow(ctx, `SELECT status, approved_at, done_at FROM quest_completions WHERE id = $1 AND household_id = $2`, aliceCompletionID, h.ID).Scan(&compStatus, &compApprovedAt, &compDoneAt); err != nil || compStatus != "pending" || compApprovedAt.Valid {
+		t.Errorf("alice completion in db = status %q approved_at %v, %v; want pending, no approved_at", compStatus, compApprovedAt, err)
+	}
+	if !compDoneAt.Equal(pendingBefore.CompletedAt.Time) {
+		t.Errorf("alice completion done_at %v no longer anchors the quest's completed_at %v", compDoneAt, pendingBefore.CompletedAt.Time)
+	}
+	var aliceCompletionRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM quest_completions WHERE household_id = $1 AND quest_id = $2`, h.ID, alicePending.ID).Scan(&aliceCompletionRows); err != nil || aliceCompletionRows != 1 {
+		t.Errorf("alice quest completion rows after outsider MarkDone = %d, %v; want 1", aliceCompletionRows, err)
 	}
 	if rows, err := quests.ListPending(ctx, mallory, mh.ID, ""); err != nil || len(rows) != 0 {
 		t.Errorf("mallory's own pending list shows other households' quests: %+v, %v", rows, err)

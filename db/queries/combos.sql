@@ -64,10 +64,13 @@ FOR UPDATE OF c;
 
 -- name: ListCombosCompletedByMemberOnDay :many
 -- The combos containing the quest that the member has just finished: the
--- combo still has two or more chores, and every one of them has an approved
--- completion by the member, not yet counted toward this combo, whose done_at falls on the
--- same household-local day (households.timezone) as done_at. award_day is
--- that day; chore_count is how many completions paying it will claim.
+-- combo still has two or more chores, the member has not yet been paid it for
+-- this household-local day (one award per combo, member and day), and every
+-- one of its chores has an approved completion by the member, not yet counted
+-- toward this combo, whose done_at falls on the same household-local day
+-- (households.timezone) as done_at. award_day is that day; chore_count is how
+-- many completions paying it will claim. The caller holds the combo locks
+-- (LockCombosForQuest), so the award check cannot race another payer.
 WITH day AS (
     SELECT h.timezone,
            (sqlc.arg(done_at)::timestamptz AT TIME ZONE h.timezone)::date AS local_day
@@ -87,6 +90,11 @@ WHERE c.household_id = sqlc.arg(household_id)
   )
   AND (SELECT count(*) FROM combo_quests n
        WHERE n.household_id = c.household_id AND n.combo_id = c.id) >= 2
+  AND NOT EXISTS (
+      SELECT 1 FROM combo_awards ca
+      WHERE ca.household_id = c.household_id AND ca.combo_id = c.id
+        AND ca.member_id = sqlc.arg(member_id) AND ca.award_day = d.local_day
+  )
   AND NOT EXISTS (
       SELECT 1 FROM combo_quests cq
       WHERE cq.household_id = c.household_id AND cq.combo_id = c.id

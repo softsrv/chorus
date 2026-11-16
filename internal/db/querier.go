@@ -20,9 +20,13 @@ type Querier interface {
 	// status re-read under the lock, so of two concurrent approvals exactly one
 	// gets a row. The quest is not touched: its cooldown already started at
 	// mark-done. points is the chore's current points, to credit to member_id.
+	// member_id must match the member the caller already locked.
 	ApproveCompletion(ctx context.Context, arg ApproveCompletionParams) (ApproveCompletionRow, error)
 	// Cancels every completion of the member still waiting for approval. No
-	// points move and the quests' cooldowns stay as they are.
+	// points move. As on reject, a quest whose running cooldown one of those
+	// completions started (the quest's completed_at is its done_at, available_at
+	// still ahead) is available again right away: the chore was never approved,
+	// so it does not sit resting. Cooldowns started by anyone else stay.
 	CancelMemberPendingCompletions(ctx context.Context, arg CancelMemberPendingCompletionsParams) error
 	// Counts one completion per chore of the combo toward the award: for each
 	// chore, the member's earliest approved completion on award_day (household-local) not
@@ -90,6 +94,10 @@ type Querier interface {
 	GetHouseholdReward(ctx context.Context, arg GetHouseholdRewardParams) (HouseholdReward, error)
 	GetOldestRecentVerificationCode(ctx context.Context, userID uuid.UUID) (pgtype.Timestamptz, error)
 	GetPasswordResetTokenByHash(ctx context.Context, tokenHash string) (PasswordResetToken, error)
+	// The member of a pending completion, read without a lock so Approve can
+	// lock that member's row before it locks the completion (the order
+	// FamilyService.Remove uses).
+	GetPendingCompletionMember(ctx context.Context, arg GetPendingCompletionMemberParams) (*uuid.UUID, error)
 	GetQuestLibraryItem(ctx context.Context, id uuid.UUID) (QuestLibrary, error)
 	GetRefreshTokenByHash(ctx context.Context, tokenHash string) (RefreshToken, error)
 	GetRefreshTokenByID(ctx context.Context, id uuid.UUID) (RefreshToken, error)
@@ -115,10 +123,13 @@ type Querier interface {
 	ListActiveRefreshTokensByUserID(ctx context.Context, userID uuid.UUID) ([]RefreshToken, error)
 	ListComboQuests(ctx context.Context, arg ListComboQuestsParams) ([]uuid.UUID, error)
 	// The combos containing the quest that the member has just finished: the
-	// combo still has two or more chores, and every one of them has an approved
-	// completion by the member, not yet counted toward this combo, whose done_at falls on the
-	// same household-local day (households.timezone) as done_at. award_day is
-	// that day; chore_count is how many completions paying it will claim.
+	// combo still has two or more chores, the member has not yet been paid it for
+	// this household-local day (one award per combo, member and day), and every
+	// one of its chores has an approved completion by the member, not yet counted
+	// toward this combo, whose done_at falls on the same household-local day
+	// (households.timezone) as done_at. award_day is that day; chore_count is how
+	// many completions paying it will claim. The caller holds the combo locks
+	// (LockCombosForQuest), so the award check cannot race another payer.
 	ListCombosCompletedByMemberOnDay(ctx context.Context, arg ListCombosCompletedByMemberOnDayParams) ([]ListCombosCompletedByMemberOnDayRow, error)
 	// Events overlapping [range_start, range_end).
 	ListEventsInRange(ctx context.Context, arg ListEventsInRangeParams) ([]Event, error)
