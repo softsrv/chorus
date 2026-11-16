@@ -54,19 +54,19 @@ func TestIntegration_QuestCRUD(t *testing.T) {
 			t.Errorf("%s: got %+v", label, got)
 		}
 	}
-	want("created", created, "Mow the lawn", 25, 7, "Front and back")
+	want("created", created.HouseholdQuest, "Mow the lawn", 25, 7, "Front and back")
 
 	got, err := quests.Get(ctx, alice, h.ID, created.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	want("get", got, "Mow the lawn", 25, 7, "Front and back")
+	want("get", got.HouseholdQuest, "Mow the lawn", 25, 7, "Front and back")
 
 	list, more, err := quests.List(ctx, alice, h.ID, app.QuestPage{Limit: 10})
 	if err != nil || len(list) != 1 || more {
 		t.Fatalf("list: %d items, more=%v, err=%v", len(list), more, err)
 	}
-	want("list", list[0], "Mow the lawn", 25, 7, "Front and back")
+	want("list", list[0].HouseholdQuest, "Mow the lawn", 25, 7, "Front and back")
 
 	updated, err := quests.Update(ctx, alice, h.ID, created.ID, app.QuestInput{
 		Name: "Mow the lawn (front)", Points: num(30), RepeatDays: num(14), Notes: "",
@@ -74,7 +74,7 @@ func TestIntegration_QuestCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	want("updated", updated, "Mow the lawn (front)", 30, 14, "")
+	want("updated", updated.HouseholdQuest, "Mow the lawn (front)", 30, 14, "")
 
 	// Omitted numbers default to 0 points, every 1 day.
 	defaulted, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "Water plants"}, "")
@@ -593,7 +593,7 @@ func TestIntegration_QuestAccept(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create quest: %v", err)
 	}
-	if !app.QuestAvailable(quest, time.Now()) {
+	if !app.QuestAvailable(quest.HouseholdQuest, time.Now()) {
 		t.Fatalf("a new quest is not available: %+v", quest)
 	}
 
@@ -613,7 +613,7 @@ func TestIntegration_QuestAccept(t *testing.T) {
 		t.Fatalf("accept: %v", err)
 	}
 	if accepted.ClaimedBy == nil || *accepted.ClaimedBy != memberA.ID || !accepted.ClaimedAt.Valid ||
-		accepted.Notes != "Half a scoop" || app.QuestAvailable(accepted, time.Now()) {
+		accepted.Notes != "Half a scoop" || app.QuestAvailable(accepted.HouseholdQuest, time.Now()) {
 		t.Errorf("accepted quest: %+v", accepted)
 	}
 
@@ -622,7 +622,7 @@ func TestIntegration_QuestAccept(t *testing.T) {
 	if err != nil || len(list) != 1 {
 		t.Fatalf("list: %+v %v", list, err)
 	}
-	if list[0].ClaimedBy == nil || *list[0].ClaimedBy != memberA.ID || app.QuestAvailable(list[0], time.Now()) {
+	if list[0].ClaimedBy == nil || *list[0].ClaimedBy != memberA.ID || app.QuestAvailable(list[0].HouseholdQuest, time.Now()) {
 		t.Errorf("listed quest still available: %+v", list[0])
 	}
 
@@ -672,7 +672,7 @@ func TestIntegration_QuestAcceptConcurrent(t *testing.T) {
 	start := make(chan struct{})
 	type result struct {
 		memberID uuid.UUID
-		quest    db.HouseholdQuest
+		quest    app.QuestView
 		err      error
 	}
 	results := make(chan result, n)
