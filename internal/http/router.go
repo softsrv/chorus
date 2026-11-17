@@ -98,10 +98,12 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 		pinLimit = 120
 	}
 	pinRL := middleware.NewRateLimiter(ctx, pinLimit, 10*time.Minute, userKey)
-	// The points-history read also checks a PIN, so it is limited the same
-	// way, but on its own budget: the Quests tab reads it on member
-	// selection, and that read must never spend the budget member actions
-	// (accept, abandon, done) need.
+	// The points-history read also checks a PIN. Every wrong or missing PIN
+	// on it (403) is charged to pinRL, the one budget of PIN guesses all
+	// PIN-checking routes share, so it opens no second budget to guess
+	// with. Its reads are limited by historyRL instead: the Quests tab reads
+	// it on member selection, and a correct read must never spend the
+	// budget member actions (accept, abandon, done) need.
 	historyRL := middleware.NewRateLimiter(ctx, pinLimit, 10*time.Minute, userKey)
 	googleStartRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
 	googleCallbackRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
@@ -168,7 +170,7 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("PUT /api/v1/households/{householdID}/family-members/{memberID}/pin", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.SetPin))))
 	api.Handle("DELETE /api/v1/households/{householdID}/family-members/{memberID}/pin", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.ClearPin))))
 	api.Handle("POST /api/v1/households/{householdID}/family-members/{memberID}/verify", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.Verify))))
-	api.Handle("GET /api/v1/households/{householdID}/family-members/{memberID}/points-history", authMW(middleware.RequireEmailVerified(limit(historyRL, familyMemberH.PointsHistory))))
+	api.Handle("GET /api/v1/households/{householdID}/family-members/{memberID}/points-history", authMW(middleware.RequireEmailVerified(historyRL.Middleware(pinRL.FailuresOnly(http.HandlerFunc(familyMemberH.PointsHistory))))))
 	api.Handle("GET /api/v1/households/{householdID}/admin-pin", verified(familyMemberH.AdminPinStatus))
 	api.Handle("PUT /api/v1/households/{householdID}/admin-pin", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.SetAdminPin))))
 	api.Handle("DELETE /api/v1/households/{householdID}/admin-pin", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.ClearAdminPin))))

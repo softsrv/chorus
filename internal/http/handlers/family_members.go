@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"time"
 
@@ -336,8 +337,13 @@ func (h *FamilyMemberHandler) PointsHistory(w http.ResponseWriter, r *http.Reque
 	} else if limit > 100 {
 		limit = 100
 	}
+	// Offset is clamped to [0, MaxInt32] as a plain int, before the int32
+	// conversion below, so an oversized offset reads past the end (an empty
+	// page) instead of wrapping into a different page.
 	if offset < 0 {
 		offset = 0
+	} else if offset > math.MaxInt32 {
+		offset = math.MaxInt32
 	}
 	memberPin := r.Header.Get("X-Member-PIN")
 	adminPin := r.Header.Get("X-Admin-PIN")

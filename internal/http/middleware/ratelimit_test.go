@@ -82,4 +82,44 @@ func TestRateLimiter(t *testing.T) {
 		_ = middleware.NewRateLimiter(ctx, 5, time.Minute, middleware.IPKeyFunc(0))
 		cancel() // sweep goroutine should exit on its next tick
 	})
+
+	t.Run("FailuresOnly charges only 403s, and shares the budget with Middleware", func(t *testing.T) {
+		t.Parallel()
+		rl := middleware.NewRateLimiter(context.Background(), 2, time.Minute, middleware.IPKeyFunc(0))
+		status := http.StatusOK
+		read := rl.FailuresOnly(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+		}))
+		action := rl.Middleware(alwaysOK)
+		do := func(h http.Handler) int {
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.RemoteAddr = "9.9.9.9:1"
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+			return rr.Code
+		}
+
+		// Successful reads are refunded: many of them spend nothing.
+		for i := 0; i < 5; i++ {
+			if got := do(read); got != http.StatusOK {
+				t.Fatalf("successful read %d: got %d, want 200", i+1, got)
+			}
+		}
+		// One wrong guess on the read spends one slot of the shared budget.
+		status = http.StatusForbidden
+		if got := do(read); got != http.StatusForbidden {
+			t.Fatalf("failed read: got %d, want 403", got)
+		}
+		if got := do(action); got != http.StatusOK {
+			t.Fatalf("action within budget: got %d, want 200", got)
+		}
+		// Budget spent (1 failed read + 1 action): both routes are refused.
+		if got := do(action); got != http.StatusTooManyRequests {
+			t.Errorf("action past budget: got %d, want 429", got)
+		}
+		status = http.StatusOK
+		if got := do(read); got != http.StatusTooManyRequests {
+			t.Errorf("read past budget: got %d, want 429", got)
+		}
+	})
 }

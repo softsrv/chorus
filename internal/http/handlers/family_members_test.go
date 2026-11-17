@@ -78,6 +78,24 @@ func TestPointsHistory_ClampsPaging(t *testing.T) {
 			wantOffset: 0,
 		},
 		{
+			name:       "offset 2^31 clamped to MaxInt32",
+			query:      "?offset=2147483648",
+			wantLimit:  50,
+			wantOffset: 2147483647,
+		},
+		{
+			name:       "offset 2^32 clamped to MaxInt32, never wrapped to 0",
+			query:      "?offset=4294967296",
+			wantLimit:  50,
+			wantOffset: 2147483647,
+		},
+		{
+			name:       "offset MaxInt32 passes through",
+			query:      "?offset=2147483647",
+			wantLimit:  50,
+			wantOffset: 2147483647,
+		},
+		{
 			name:       "limit 0 gives 1",
 			query:      "?limit=0",
 			wantLimit:  1,

@@ -1603,8 +1603,10 @@ func TestAPI_QuestPINRateLimit(t *testing.T) {
 }
 
 // TestAPI_PointsHistoryHasItsOwnPINBudget proves the points-history read is
-// rate limited on a budget of its own: reading it never spends the PIN
-// budget member actions need, and it is still limited itself.
+// rate limited on a budget of its own for correct reads (reading it never
+// spends the PIN budget member actions need, and it is still limited
+// itself), while every wrong PIN on it is charged to the shared PIN budget,
+// so it gives no second budget of guesses.
 func TestAPI_PointsHistoryHasItsOwnPINBudget(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
@@ -1627,8 +1629,9 @@ func TestAPI_PointsHistoryHasItsOwnPINBudget(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	// PIN budget: member create + quest create + one accept.
-	const pinLimit = 3
+	// PIN budget: member create + quest create + one accept + one wrong
+	// history PIN. History budget: three correct reads + the wrong one.
+	const pinLimit = 4
 	handler := internalhttp.NewRouter(ctx, internalhttp.RouterConfig{
 		Queries: q, Pool: pool, AuthSvc: authSvc,
 		UserSvc:      app.NewUserService(q),
@@ -1657,13 +1660,29 @@ func TestAPI_PointsHistoryHasItsOwnPINBudget(t *testing.T) {
 
 	histPath := hp + "/family-members/" + m.ID.String() + "/points-history"
 	pinHdr := map[string]string{"X-Member-PIN": "1234"}
-	for i := 0; i < pinLimit; i++ {
+	for i := 0; i < pinLimit-1; i++ {
 		ts.expectWithHeaders(http.StatusOK, "GET", histPath, u.AccessToken, pinHdr, nil, nil)
 	}
 
 	// The history reads spent none of the action budget: accept still runs.
-	ts.expect(http.StatusOK, "POST", hp+"/quests/"+quest.ID.String()+"/accept", u.AccessToken,
+	acceptPath := hp + "/quests/" + quest.ID.String() + "/accept"
+	ts.expect(http.StatusOK, "POST", acceptPath, u.AccessToken,
 		map[string]any{"member_id": m.ID, "pin": "1234"}, nil)
+
+	// A wrong PIN on the history read is refused and charged to the shared
+	// PIN budget, which it now fills: the next member action is limited.
+	var wrongPin apiError
+	ts.expectWithHeaders(http.StatusForbidden, "GET", histPath, u.AccessToken,
+		map[string]string{"X-Member-PIN": "0000"}, nil, &wrongPin)
+	if wrongPin.Error.Code != "wrong_pin" {
+		t.Errorf("expected wrong_pin, got %q", wrongPin.Error.Code)
+	}
+	var actionRL apiError
+	ts.expect(http.StatusTooManyRequests, "POST", acceptPath, u.AccessToken,
+		map[string]any{"member_id": m.ID, "pin": "1234"}, &actionRL)
+	if actionRL.Error.Code != "rate_limited" {
+		t.Errorf("accept after wrong history PIN: expected rate_limited, got %q", actionRL.Error.Code)
+	}
 
 	// The history read is still limited on its own budget.
 	var rlErr apiError
