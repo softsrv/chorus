@@ -30,12 +30,17 @@ type NumberField struct {
 }
 
 // QuestInput is the editable part of a household quest. An absent Points
-// means 0 and an absent RepeatDays means 1 (daily).
+// means 0 and an absent RepeatDays means 1 (daily). Shareable says whether
+// the holder may share the quest with other members; TeamworkBonus is what
+// each member of a shared completion earns on top of their split. An absent
+// TeamworkBonus means 0, and a bonus above 0 needs Shareable.
 type QuestInput struct {
-	Name       string
-	Points     NumberField
-	RepeatDays NumberField
-	Notes      string
+	Name          string
+	Points        NumberField
+	RepeatDays    NumberField
+	Notes         string
+	Shareable     bool
+	TeamworkBonus NumberField
 }
 
 // QuestPage narrows List to one page.
@@ -207,12 +212,14 @@ func (s *QuestService) Update(ctx context.Context, userID, householdID, questID 
 		return QuestView{}, err
 	}
 	quest, err := s.q.UpdateHouseholdQuest(ctx, db.UpdateHouseholdQuestParams{
-		HouseholdID: householdID,
-		ID:          questID,
-		Name:        v.name,
-		Points:      v.points,
-		RepeatDays:  v.repeatDays,
-		Notes:       v.notes,
+		HouseholdID:   householdID,
+		ID:            questID,
+		Name:          v.name,
+		Points:        v.points,
+		RepeatDays:    v.repeatDays,
+		Notes:         v.notes,
+		Shareable:     v.shareable,
+		TeamworkBonus: v.teamworkBonus,
 	})
 	return s.viewOf(ctx, quest, err)
 }
@@ -628,13 +635,15 @@ func (s *QuestService) insert(ctx context.Context, householdID uuid.UUID, librar
 		return QuestView{}, fmt.Errorf("generate quest id: %w", err)
 	}
 	quest, err := s.q.CreateHouseholdQuest(ctx, db.CreateHouseholdQuestParams{
-		ID:          id,
-		HouseholdID: householdID,
-		LibraryID:   libraryID,
-		Name:        v.name,
-		Points:      v.points,
-		RepeatDays:  v.repeatDays,
-		Notes:       v.notes,
+		ID:            id,
+		HouseholdID:   householdID,
+		LibraryID:     libraryID,
+		Name:          v.name,
+		Points:        v.points,
+		RepeatDays:    v.repeatDays,
+		Notes:         v.notes,
+		Shareable:     v.shareable,
+		TeamworkBonus: v.teamworkBonus,
 	})
 	if err != nil {
 		return QuestView{}, fmt.Errorf("create quest: %w", err)
@@ -642,24 +651,33 @@ func (s *QuestService) insert(ctx context.Context, householdID uuid.UUID, librar
 	return QuestView{HouseholdQuest: quest}, nil
 }
 
-// validQuest is a QuestInput that passed validateQuest.
+// validQuest is a QuestInput that passed validateQuest. A library copy
+// leaves shareable false and teamworkBonus 0.
 type validQuest struct {
-	name       string
-	points     int32
-	repeatDays int32
-	notes      string
+	name          string
+	points        int32
+	repeatDays    int32
+	notes         string
+	shareable     bool
+	teamworkBonus int32
 }
 
 // validateQuest checks every field and reports each bad one: name 1-200
 // characters, points a whole number >= 0, repeat_days a whole number >= 1,
-// notes at most 2000 characters.
+// notes at most 2000 characters, teamwork_bonus a whole number >= 0 and
+// above 0 only on a shareable quest.
 func validateQuest(in QuestInput) (validQuest, error) {
 	var v validator
 	out := validQuest{
-		name:       v.text("name", in.Name, 1, 200, false),
-		points:     v.intField("points", in.Points, 0, 0),
-		repeatDays: v.intField("repeat_days", in.RepeatDays, 1, 1),
-		notes:      v.text("notes", in.Notes, 0, 2000, true),
+		name:          v.text("name", in.Name, 1, 200, false),
+		points:        v.intField("points", in.Points, 0, 0),
+		repeatDays:    v.intField("repeat_days", in.RepeatDays, 1, 1),
+		notes:         v.text("notes", in.Notes, 0, 2000, true),
+		shareable:     in.Shareable,
+		teamworkBonus: v.intField("teamwork_bonus", in.TeamworkBonus, 0, 0),
+	}
+	if out.teamworkBonus > 0 && !out.shareable {
+		v.fail("teamwork_bonus", "needs shareable")
 	}
 	return out, v.err()
 }

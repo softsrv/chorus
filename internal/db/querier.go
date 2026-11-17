@@ -226,6 +226,9 @@ type Querier interface {
 	UpdateGoogleCalendarAccessToken(ctx context.Context, arg UpdateGoogleCalendarAccessTokenParams) (int64, error)
 	UpdateHousehold(ctx context.Context, arg UpdateHouseholdParams) (Household, error)
 	UpdateHouseholdCombo(ctx context.Context, arg UpdateHouseholdComboParams) (Combo, error)
+	// Full replacement of the editable fields. A new points, shareable or
+	// teamwork_bonus applies from the next approval: a pending completion is
+	// paid from the quest as it stands when it is approved.
 	UpdateHouseholdQuest(ctx context.Context, arg UpdateHouseholdQuestParams) (HouseholdQuest, error)
 	UpdateHouseholdReward(ctx context.Context, arg UpdateHouseholdRewardParams) (HouseholdReward, error)
 	UpdatePasswordHash(ctx context.Context, arg UpdatePasswordHashParams) error

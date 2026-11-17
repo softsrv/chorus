@@ -143,6 +143,8 @@ type questJSON struct {
 	AvailableAt      *time.Time  `json:"available_at"`
 	CreatedAt        time.Time   `json:"created_at"`
 	UpdatedAt        time.Time   `json:"updated_at"`
+	Shareable        bool        `json:"shareable"`
+	TeamworkBonus    int32       `json:"teamwork_bonus"`
 	Shared           bool        `json:"shared"`
 	Participants     []uuid.UUID `json:"participants"`
 }
@@ -171,6 +173,8 @@ func toQuest(v app.QuestView) questJSON {
 		AvailableAt:      timePtr(q.AvailableAt),
 		CreatedAt:        q.CreatedAt.Time.UTC(),
 		UpdatedAt:        q.UpdatedAt.Time.UTC(),
+		Shareable:        q.Shareable,
+		TeamworkBonus:    q.TeamworkBonus,
 		Shared:           v.Shared(),
 		Participants:     participants,
 	}

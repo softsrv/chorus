@@ -46,21 +46,26 @@ func NewQuestHandler(svc questServicer) *QuestHandler {
 }
 
 // questRequest is the body for create and update. Update is a full
-// replacement (PUT). points and repeat_days stay raw so a wrong-typed value
-// is reported as its own field error alongside the others.
+// replacement (PUT). points, repeat_days and teamwork_bonus stay raw so a
+// wrong-typed value is reported as its own field error alongside the others.
+// An absent shareable is false.
 type questRequest struct {
-	Name       string          `json:"name"`
-	Points     json.RawMessage `json:"points"`
-	RepeatDays json.RawMessage `json:"repeat_days"`
-	Notes      string          `json:"notes"`
+	Name          string          `json:"name"`
+	Points        json.RawMessage `json:"points"`
+	RepeatDays    json.RawMessage `json:"repeat_days"`
+	Notes         string          `json:"notes"`
+	Shareable     *bool           `json:"shareable"`
+	TeamworkBonus json.RawMessage `json:"teamwork_bonus"`
 }
 
 func (req questRequest) toInput() app.QuestInput {
 	return app.QuestInput{
-		Name:       req.Name,
-		Points:     numberField(req.Points),
-		RepeatDays: numberField(req.RepeatDays),
-		Notes:      req.Notes,
+		Name:          req.Name,
+		Points:        numberField(req.Points),
+		RepeatDays:    numberField(req.RepeatDays),
+		Notes:         req.Notes,
+		Shareable:     req.Shareable != nil && *req.Shareable,
+		TeamworkBonus: numberField(req.TeamworkBonus),
 	}
 }
 

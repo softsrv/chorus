@@ -53,13 +53,17 @@ SELECT EXISTS (
 ) AS awaiting_approval;
 
 -- name: CreateHouseholdQuest :one
-INSERT INTO household_quests (id, household_id, library_id, name, points, repeat_days, notes, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+INSERT INTO household_quests (id, household_id, library_id, name, points, repeat_days, notes, shareable, teamwork_bonus, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
 RETURNING *;
 
 -- name: UpdateHouseholdQuest :one
+-- Full replacement of the editable fields. A new points, shareable or
+-- teamwork_bonus applies from the next approval: a pending completion is
+-- paid from the quest as it stands when it is approved.
 UPDATE household_quests
-SET name = $3, points = $4, repeat_days = $5, notes = $6, updated_at = NOW()
+SET name = $3, points = $4, repeat_days = $5, notes = $6,
+    shareable = $7, teamwork_bonus = $8, updated_at = NOW()
 WHERE household_id = $1 AND id = $2
 RETURNING *;
 

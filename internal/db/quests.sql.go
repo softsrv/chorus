@@ -174,19 +174,21 @@ func (q *Queries) ClaimQuest(ctx context.Context, arg ClaimQuestParams) (Househo
 }
 
 const createHouseholdQuest = `-- name: CreateHouseholdQuest :one
-INSERT INTO household_quests (id, household_id, library_id, name, points, repeat_days, notes, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+INSERT INTO household_quests (id, household_id, library_id, name, points, repeat_days, notes, shareable, teamwork_bonus, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
 RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at, shareable, teamwork_bonus
 `
 
 type CreateHouseholdQuestParams struct {
-	ID          uuid.UUID  `json:"id"`
-	HouseholdID uuid.UUID  `json:"household_id"`
-	LibraryID   *uuid.UUID `json:"library_id"`
-	Name        string     `json:"name"`
-	Points      int32      `json:"points"`
-	RepeatDays  int32      `json:"repeat_days"`
-	Notes       string     `json:"notes"`
+	ID            uuid.UUID  `json:"id"`
+	HouseholdID   uuid.UUID  `json:"household_id"`
+	LibraryID     *uuid.UUID `json:"library_id"`
+	Name          string     `json:"name"`
+	Points        int32      `json:"points"`
+	RepeatDays    int32      `json:"repeat_days"`
+	Notes         string     `json:"notes"`
+	Shareable     bool       `json:"shareable"`
+	TeamworkBonus int32      `json:"teamwork_bonus"`
 }
 
 func (q *Queries) CreateHouseholdQuest(ctx context.Context, arg CreateHouseholdQuestParams) (HouseholdQuest, error) {
@@ -198,6 +200,8 @@ func (q *Queries) CreateHouseholdQuest(ctx context.Context, arg CreateHouseholdQ
 		arg.Points,
 		arg.RepeatDays,
 		arg.Notes,
+		arg.Shareable,
+		arg.TeamworkBonus,
 	)
 	var i HouseholdQuest
 	err := row.Scan(
@@ -796,20 +800,26 @@ func (q *Queries) ShareQuest(ctx context.Context, arg ShareQuestParams) ([]uuid.
 
 const updateHouseholdQuest = `-- name: UpdateHouseholdQuest :one
 UPDATE household_quests
-SET name = $3, points = $4, repeat_days = $5, notes = $6, updated_at = NOW()
+SET name = $3, points = $4, repeat_days = $5, notes = $6,
+    shareable = $7, teamwork_bonus = $8, updated_at = NOW()
 WHERE household_id = $1 AND id = $2
 RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at, shareable, teamwork_bonus
 `
 
 type UpdateHouseholdQuestParams struct {
-	HouseholdID uuid.UUID `json:"household_id"`
-	ID          uuid.UUID `json:"id"`
-	Name        string    `json:"name"`
-	Points      int32     `json:"points"`
-	RepeatDays  int32     `json:"repeat_days"`
-	Notes       string    `json:"notes"`
+	HouseholdID   uuid.UUID `json:"household_id"`
+	ID            uuid.UUID `json:"id"`
+	Name          string    `json:"name"`
+	Points        int32     `json:"points"`
+	RepeatDays    int32     `json:"repeat_days"`
+	Notes         string    `json:"notes"`
+	Shareable     bool      `json:"shareable"`
+	TeamworkBonus int32     `json:"teamwork_bonus"`
 }
 
+// Full replacement of the editable fields. A new points, shareable or
+// teamwork_bonus applies from the next approval: a pending completion is
+// paid from the quest as it stands when it is approved.
 func (q *Queries) UpdateHouseholdQuest(ctx context.Context, arg UpdateHouseholdQuestParams) (HouseholdQuest, error) {
 	row := q.db.QueryRow(ctx, updateHouseholdQuest,
 		arg.HouseholdID,
@@ -818,6 +828,8 @@ func (q *Queries) UpdateHouseholdQuest(ctx context.Context, arg UpdateHouseholdQ
 		arg.Points,
 		arg.RepeatDays,
 		arg.Notes,
+		arg.Shareable,
+		arg.TeamworkBonus,
 	)
 	var i HouseholdQuest
 	err := row.Scan(

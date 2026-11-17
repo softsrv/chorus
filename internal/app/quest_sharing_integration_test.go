@@ -15,13 +15,156 @@ import (
 	"github.com/softsrv/chorus/internal/db"
 )
 
-// makeShareable marks a quest shareable directly in the database, the state
-// an administrator's edit leaves it in.
-func makeShareable(t *testing.T, pool *pgxpool.Pool, questID uuid.UUID, bonus int) {
+// questShareFields reads a quest's stored shareable and teamwork_bonus.
+func questShareFields(t *testing.T, pool *pgxpool.Pool, questID uuid.UUID) (bool, int32) {
 	t.Helper()
-	if _, err := pool.Exec(context.Background(),
-		`UPDATE household_quests SET shareable = true, teamwork_bonus = $2 WHERE id = $1`, questID, bonus); err != nil {
-		t.Fatalf("make quest shareable: %v", err)
+	var shareable bool
+	var bonus int32
+	if err := pool.QueryRow(context.Background(),
+		`SELECT shareable, teamwork_bonus FROM household_quests WHERE id = $1`, questID).Scan(&shareable, &bonus); err != nil {
+		t.Fatalf("read share fields: %v", err)
+	}
+	return shareable, bonus
+}
+
+// TestIntegration_QuestSharingFields: an administrator creates a quest with
+// shareable and a teamwork bonus, and Get and List return both; an edit
+// replaces them, and turning shareable off with the bonus at 0 stores that.
+// Quests created without the fields, and library copies, are not shareable
+// with bonus 0. A teamwork_bonus that is negative, not a whole number, or
+// above 0 on a quest that is not shareable is a 422 on teamwork_bonus and
+// saves nothing; the database refuses a bonus without shareable too.
+func TestIntegration_QuestSharingFields(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	households := app.NewHouseholdService(q, pool)
+	quests := app.NewQuestService(q, pool)
+	ctx := context.Background()
+
+	admin := registerVerified(t, pool, authSvc, mailer, "questsharefields").User.ID
+	h, err := households.Create(ctx, admin, app.HouseholdInput{Name: "Fields"})
+	if err != nil {
+		t.Fatalf("create household: %v", err)
+	}
+
+	created, err := quests.Create(ctx, admin, h.ID, app.QuestInput{Name: "Clean the living room", Points: num(100), Shareable: true, TeamworkBonus: num(20)}, "")
+	if err != nil {
+		t.Fatalf("create shareable quest: %v", err)
+	}
+	if !created.Shareable || created.TeamworkBonus != 20 {
+		t.Errorf("created: shareable=%v bonus=%d, want true 20", created.Shareable, created.TeamworkBonus)
+	}
+	got, err := quests.Get(ctx, admin, h.ID, created.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !got.Shareable || got.TeamworkBonus != 20 || got.Shared() || len(got.Participants) != 0 {
+		t.Errorf("get: shareable=%v bonus=%d shared=%v participants=%v, want true 20 false []", got.Shareable, got.TeamworkBonus, got.Shared(), got.Participants)
+	}
+	plain, err := quests.Create(ctx, admin, h.ID, app.QuestInput{Name: "Take out trash", Points: num(10)}, "")
+	if err != nil {
+		t.Fatalf("create plain quest: %v", err)
+	}
+	list, _, err := quests.List(ctx, admin, h.ID, app.QuestPage{Limit: 50})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	seen := 0
+	for _, v := range list {
+		switch v.ID {
+		case created.ID:
+			seen++
+			if !v.Shareable || v.TeamworkBonus != 20 {
+				t.Errorf("listed shareable quest: shareable=%v bonus=%d, want true 20", v.Shareable, v.TeamworkBonus)
+			}
+		case plain.ID:
+			seen++
+			if v.Shareable || v.TeamworkBonus != 0 {
+				t.Errorf("listed plain quest: shareable=%v bonus=%d, want false 0", v.Shareable, v.TeamworkBonus)
+			}
+		}
+	}
+	if seen != 2 {
+		t.Errorf("list showed %d of the 2 quests", seen)
+	}
+
+	// Edit: a new bonus, then shareable off with the bonus back to 0.
+	updated, err := quests.Update(ctx, admin, h.ID, created.ID, app.QuestInput{Name: "Clean the living room", Points: num(100), Shareable: true, TeamworkBonus: num(35)}, "")
+	if err != nil {
+		t.Fatalf("update bonus: %v", err)
+	}
+	if !updated.Shareable || updated.TeamworkBonus != 35 {
+		t.Errorf("updated: shareable=%v bonus=%d, want true 35", updated.Shareable, updated.TeamworkBonus)
+	}
+	if s, b := questShareFields(t, pool, created.ID); !s || b != 35 {
+		t.Errorf("stored after update: shareable=%v bonus=%d, want true 35", s, b)
+	}
+	if _, err := quests.Update(ctx, admin, h.ID, plain.ID, app.QuestInput{Name: "Take out trash", Points: num(10), Shareable: true}, ""); err != nil {
+		t.Fatalf("make plain shareable: %v", err)
+	}
+	if s, b := questShareFields(t, pool, plain.ID); !s || b != 0 {
+		t.Errorf("plain made shareable: shareable=%v bonus=%d, want true 0", s, b)
+	}
+	off, err := quests.Update(ctx, admin, h.ID, created.ID, app.QuestInput{Name: "Clean the living room", Points: num(100)}, "")
+	if err != nil {
+		t.Fatalf("update shareable off: %v", err)
+	}
+	if off.Shareable || off.TeamworkBonus != 0 {
+		t.Errorf("shareable off: shareable=%v bonus=%d, want false 0", off.Shareable, off.TeamworkBonus)
+	}
+
+	// Refused bonuses: field error on teamwork_bonus, nothing saved.
+	if _, err := quests.Update(ctx, admin, h.ID, created.ID, app.QuestInput{Name: "Clean the living room", Points: num(100), Shareable: true, TeamworkBonus: num(20)}, ""); err != nil {
+		t.Fatalf("restore bonus: %v", err)
+	}
+	bad := []struct {
+		name string
+		in   app.QuestInput
+	}{
+		{"negative", app.QuestInput{Name: "Bad", Shareable: true, TeamworkBonus: num(-1)}},
+		{"not a whole number", app.QuestInput{Name: "Bad", Shareable: true, TeamworkBonus: app.NumberField{Set: true, Invalid: true}}},
+		{"bonus without shareable", app.QuestInput{Name: "Bad", TeamworkBonus: num(5)}},
+	}
+	for _, c := range bad {
+		var ve *app.ValidationError
+		if _, err := quests.Create(ctx, admin, h.ID, c.in, ""); !errors.As(err, &ve) || ve.Fields["teamwork_bonus"] == "" {
+			t.Errorf("create %s: %v, want a teamwork_bonus field error", c.name, err)
+		}
+		if _, err := quests.Update(ctx, admin, h.ID, created.ID, c.in, ""); !errors.As(err, &ve) || ve.Fields["teamwork_bonus"] == "" {
+			t.Errorf("update %s: %v, want a teamwork_bonus field error", c.name, err)
+		}
+	}
+	var bads int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM household_quests WHERE household_id = $1 AND name = 'Bad'`, h.ID).Scan(&bads); err != nil {
+		t.Fatalf("count bad quests: %v", err)
+	}
+	if bads != 0 {
+		t.Errorf("refused creates saved %d quests", bads)
+	}
+	if s, b := questShareFields(t, pool, created.ID); !s || b != 20 {
+		t.Errorf("after refused updates: shareable=%v bonus=%d, want true 20", s, b)
+	}
+	// The database holds the rule on its own as well.
+	if _, err := pool.Exec(ctx, `UPDATE household_quests SET shareable = false WHERE id = $1`, created.ID); err == nil {
+		t.Error("database stored a teamwork bonus on a quest that is not shareable")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE household_quests SET teamwork_bonus = -1 WHERE id = $1`, created.ID); err == nil {
+		t.Error("database stored a negative teamwork bonus")
+	}
+
+	// A library copy keeps the defaults.
+	library, err := quests.ListLibrary(ctx)
+	if err != nil || len(library) == 0 {
+		t.Fatalf("list library: %d items, %v", len(library), err)
+	}
+	copied, err := quests.CopyFromLibrary(ctx, admin, h.ID, library[0].ID, "")
+	if err != nil {
+		t.Fatalf("copy from library: %v", err)
+	}
+	if copied.Shareable || copied.TeamworkBonus != 0 {
+		t.Errorf("library copy: shareable=%v bonus=%d, want false 0", copied.Shareable, copied.TeamworkBonus)
 	}
 }
 
@@ -81,11 +224,10 @@ func TestIntegration_QuestSharing(t *testing.T) {
 	}
 	outsider := newMember(other.ID, "Out", "")
 
-	shared, err := quests.Create(ctx, admin, h.ID, app.QuestInput{Name: "Clean the living room", Points: num(100)}, "")
+	shared, err := quests.Create(ctx, admin, h.ID, app.QuestInput{Name: "Clean the living room", Points: num(100), Shareable: true, TeamworkBonus: num(20)}, "")
 	if err != nil {
 		t.Fatalf("create quest: %v", err)
 	}
-	makeShareable(t, pool, shared.ID, 20)
 	plain, err := quests.Create(ctx, admin, h.ID, app.QuestInput{Name: "Take out trash", Points: num(10)}, "")
 	if err != nil {
 		t.Fatalf("create quest: %v", err)

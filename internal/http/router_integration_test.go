@@ -413,21 +413,54 @@ func TestAPI_EndToEnd(t *testing.T) {
 	// is then shared, lists both members and stays held; the share route is
 	// a PIN-limited member action like accept.
 	type sharedBody struct {
-		ID           uuid.UUID   `json:"id"`
-		ClaimedBy    *uuid.UUID  `json:"claimed_by"`
-		Shared       bool        `json:"shared"`
-		Participants []uuid.UUID `json:"participants"`
+		ID            uuid.UUID   `json:"id"`
+		ClaimedBy     *uuid.UUID  `json:"claimed_by"`
+		Shareable     bool        `json:"shareable"`
+		TeamworkBonus int32       `json:"teamwork_bonus"`
+		Shared        bool        `json:"shared"`
+		Participants  []uuid.UUID `json:"participants"`
 	}
 	var shareQuest sharedBody
 	s.expect(http.StatusCreated, "POST", hp+"/quests", parent.AccessToken, map[string]any{"name": "Clean the living room", "points": 100}, &shareQuest)
-	if shareQuest.Shared || shareQuest.Participants == nil || len(shareQuest.Participants) != 0 {
-		t.Errorf("new quest: shared=%v participants=%v, want false []", shareQuest.Shared, shareQuest.Participants)
-	}
-	if _, err := s.pool.Exec(context.Background(),
-		`UPDATE household_quests SET shareable = true, teamwork_bonus = 20 WHERE id = $1`, shareQuest.ID); err != nil {
-		t.Fatalf("make quest shareable: %v", err)
+	if shareQuest.Shared || shareQuest.Shareable || shareQuest.TeamworkBonus != 0 || shareQuest.Participants == nil || len(shareQuest.Participants) != 0 {
+		t.Errorf("new quest: %+v, want not shareable, bonus 0, not shared, participants []", shareQuest)
 	}
 	sq := hp + "/quests/" + shareQuest.ID.String()
+	// The administrator makes it shareable with a teamwork bonus by editing it;
+	// a bad bonus is a 422 on teamwork_bonus and changes nothing.
+	for _, bad := range []map[string]any{
+		{"name": "Clean the living room", "points": 100, "shareable": true, "teamwork_bonus": -1},
+		{"name": "Clean the living room", "points": 100, "shareable": true, "teamwork_bonus": 2.5},
+		{"name": "Clean the living room", "points": 100, "shareable": true, "teamwork_bonus": "abc"},
+		{"name": "Clean the living room", "points": 100, "shareable": false, "teamwork_bonus": 20},
+	} {
+		var badBonus apiError
+		s.expect(http.StatusUnprocessableEntity, "PUT", sq, parent.AccessToken, bad, &badBonus)
+		if badBonus.Error.Fields["teamwork_bonus"] == "" {
+			t.Errorf("PUT %v: %+v, want a teamwork_bonus field error", bad, badBonus)
+		}
+	}
+	var badCreate apiError
+	s.expect(http.StatusUnprocessableEntity, "POST", hp+"/quests", parent.AccessToken, map[string]any{"name": "Bonus only", "teamwork_bonus": 5}, &badCreate)
+	if badCreate.Error.Fields["teamwork_bonus"] == "" {
+		t.Errorf("create with bonus but not shareable: %+v, want a teamwork_bonus field error", badCreate)
+	}
+	var madeShareable sharedBody
+	s.expect(http.StatusOK, "PUT", sq, parent.AccessToken, map[string]any{"name": "Clean the living room", "points": 100, "shareable": true, "teamwork_bonus": 20}, &madeShareable)
+	if !madeShareable.Shareable || madeShareable.TeamworkBonus != 20 {
+		t.Errorf("edited quest: %+v, want shareable, bonus 20", madeShareable)
+	}
+	var createdShareable sharedBody
+	s.expect(http.StatusCreated, "POST", hp+"/quests", parent.AccessToken, map[string]any{"name": "Wash the car", "points": 30, "shareable": true, "teamwork_bonus": 5}, &createdShareable)
+	if !createdShareable.Shareable || createdShareable.TeamworkBonus != 5 {
+		t.Errorf("created shareable quest: %+v, want shareable, bonus 5", createdShareable)
+	}
+	var gotShareable sharedBody
+	s.expect(http.StatusOK, "GET", hp+"/quests/"+createdShareable.ID.String(), parent.AccessToken, nil, &gotShareable)
+	if !gotShareable.Shareable || gotShareable.TeamworkBonus != 5 {
+		t.Errorf("get shareable quest: %+v, want shareable, bonus 5", gotShareable)
+	}
+	s.expect(http.StatusNoContent, "DELETE", hp+"/quests/"+createdShareable.ID.String(), parent.AccessToken, nil, nil)
 	s.expect(http.StatusOK, "POST", sq+"/accept", parent.AccessToken, map[string]any{"member_id": member.ID, "pin": "4321"}, nil)
 	var shareErr apiError
 	s.expect(http.StatusUnprocessableEntity, "POST", sq+"/share", parent.AccessToken, map[string]any{"member_id": member.ID, "pin": "4321"}, &shareErr)
