@@ -19,7 +19,7 @@ import (
 // releaseMemberQuests in quest_service.go.
 func TestMemberRemovalLeavesQuestsToQuestCode(t *testing.T) {
 	const repoRoot = "../.."
-	forbidden := regexp.MustCompile(`(?i)household_quests|quest_completions|claimed_by|claimed_at|done_at`)
+	forbidden := regexp.MustCompile(`(?i)household_quests|household_quest_participants|quest_completions|quest_completion_members|claimed_by|claimed_at|done_at`)
 	for _, path := range []string{
 		"family_service.go",
 		filepath.Join(repoRoot, "db", "queries", "family_members.sql"),
@@ -54,6 +54,24 @@ func TestMemberRemovalLeavesQuestsToQuestCode(t *testing.T) {
 	}
 	if len(definedIn) != 1 || definedIn[0] != "quests.sql" {
 		t.Errorf("ReleaseMemberQuests defined in %v, want only quests.sql", definedIn)
+	}
+
+	// Shared-quest removal (participant rows, marker hand-over, completion
+	// member rows) is quest code too: the queries that touch them live in
+	// quests.sql, and nothing outside it deletes from them.
+	for _, path := range queries {
+		if filepath.Base(path) == "quests.sql" {
+			continue
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for i, line := range strings.Split(string(src), "\n") {
+			if regexp.MustCompile(`(?i)(DELETE\s+FROM|UPDATE)\s+(household_quest_participants|quest_completion_members)\b`).MatchString(line) {
+				t.Errorf("%s:%d changes shared-quest membership outside quests.sql: %s", path, i+1, strings.TrimSpace(line))
+			}
+		}
 	}
 
 	// Its only hand-written caller is releaseMemberQuests in quest_service.go.

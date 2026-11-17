@@ -25,12 +25,19 @@ var (
 	ErrNotFound = errors.New("not found")
 	// ErrWrongPIN is returned when a member PIN or admin PIN does not match.
 	ErrWrongPIN = errors.New("wrong PIN")
+	// ErrWrongTargetPIN is a wrong PIN for the member a quest is being shared
+	// with, not the acting member. It is also ErrWrongPIN, so callers that do
+	// not care whose PIN failed see it as one.
+	ErrWrongTargetPIN = fmt.Errorf("target member: %w", ErrWrongPIN)
 	// ErrAdminPinRequired is returned when an admin PIN is set on the household
 	// but was not provided in the request.
 	ErrAdminPinRequired = errors.New("admin PIN is required")
 	// ErrQuestTaken is returned when a quest is accepted but is no longer
 	// available: another member holds it, or it is waiting out its repeat days.
 	ErrQuestTaken = errors.New("quest is already taken")
+	// ErrAlreadyParticipant is returned when a quest is shared with the
+	// sharer themselves or with a member who is already on it.
+	ErrAlreadyParticipant = errors.New("member is already on this quest")
 )
 
 // RateLimitedError is returned when an operation is attempted too frequently.

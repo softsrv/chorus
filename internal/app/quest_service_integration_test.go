@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -167,7 +168,7 @@ func TestIntegration_QuestCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get after invalid update: %v", err)
 	}
-	if beforeInvalidUpdate != afterInvalidUpdate {
+	if !reflect.DeepEqual(beforeInvalidUpdate, afterInvalidUpdate) {
 		t.Fatalf("row changed after rejected update: %+v -> %+v", beforeInvalidUpdate, afterInvalidUpdate)
 	}
 
@@ -226,6 +227,14 @@ func TestIntegration_QuestCopyFromLibrary(t *testing.T) {
 	if copied.LibraryID == nil || *copied.LibraryID != washCar.ID || copied.Name != washCar.Name ||
 		copied.Points != 40 || copied.RepeatDays != 30 || copied.Notes != washCar.Notes {
 		t.Fatalf("copy %+v does not match library %+v", copied, washCar)
+	}
+	// CLM-15: a library copy is not shareable and has no teamwork bonus,
+	// as stored, not only as returned.
+	if copied.Shareable || copied.TeamworkBonus != 0 {
+		t.Fatalf("copy shareable=%v teamwork_bonus=%d, want false and 0", copied.Shareable, copied.TeamworkBonus)
+	}
+	if stored, err := quests.Get(ctx, alice, h.ID, copied.ID); err != nil || stored.Shareable || stored.TeamworkBonus != 0 {
+		t.Fatalf("stored copy shareable=%v teamwork_bonus=%d (err %v), want false and 0", stored.Shareable, stored.TeamworkBonus, err)
 	}
 
 	// CLM-3: CopyFromLibrary-edit path invalid inputs are rejected and leave row unchanged
@@ -1134,6 +1143,72 @@ func TestIntegration_QuestApproval(t *testing.T) {
 	}
 	if len(pending("")) != 0 {
 		t.Error("pending list not empty after all approved")
+	}
+
+	// CLM-16: a shareable quest with a teamwork bonus that was never shared
+	// has one recorded member, who gets the full points and no teamwork bonus,
+	// exactly like a quest that is not shareable.
+	soloShareable, err := quests.Create(ctx, alice, h.ID, app.QuestInput{
+		Name: "Wash the car", Points: num(100), Shareable: true, TeamworkBonus: num(20),
+	}, "")
+	if err != nil {
+		t.Fatalf("create shareable quest: %v", err)
+	}
+	if !soloShareable.Shareable || soloShareable.TeamworkBonus != 20 {
+		t.Fatalf("shareable quest stored as %+v", soloShareable.HouseholdQuest)
+	}
+	if _, err := quests.Accept(ctx, alice, h.ID, soloShareable.ID, asBen); err != nil {
+		t.Fatalf("accept shareable quest: %v", err)
+	}
+	if _, err := quests.MarkDone(ctx, alice, h.ID, soloShareable.ID, asBen); err != nil {
+		t.Fatalf("mark shareable quest done: %v", err)
+	}
+	soloRows := pending("")
+	if len(soloRows) != 1 || soloRows[0].QuestID != soloShareable.ID || soloRows[0].MemberID != ben.ID ||
+		soloRows[0].MemberName != "Ben" || soloRows[0].Points != 100 {
+		t.Fatalf("pending unshared shareable completion: %+v", soloRows)
+	}
+	if m := soloRows[0].Members; len(m) != 1 || m[0].MemberID != ben.ID || m[0].Name != "Ben" || m[0].Award != 100 ||
+		soloRows[0].TeamworkBonus != 0 {
+		t.Errorf("pending unshared shareable members: %+v bonus %d, want Ben alone with 100 and no bonus", m, soloRows[0].TeamworkBonus)
+	}
+	benBeforeSolo := points(ben.ID)
+	annBeforeSolo := points(ann.ID)
+	soloComp, soloMember, soloBonuses, soloApproved, err := quests.Approve(ctx, alice, h.ID, soloRows[0].ID, "")
+	if err != nil {
+		t.Fatalf("approve unshared shareable completion: %v", err)
+	}
+	if len(soloApproved) != 1 || soloApproved[0].Member.ID != ben.ID || soloApproved[0].PointsAwarded != 100 ||
+		soloApproved[0].TeamworkBonus != 0 {
+		t.Errorf("approved members of unshared shareable completion: %+v, want Ben alone with 100 and no bonus", soloApproved)
+	}
+	if soloComp.Status != "approved" || soloComp.MemberID == nil || *soloComp.MemberID != ben.ID {
+		t.Errorf("approved unshared shareable completion: %+v", soloComp)
+	}
+	if len(soloBonuses) != 0 {
+		t.Errorf("combo bonuses for unshared shareable completion: %+v, want none", soloBonuses)
+	}
+	// Full 100 points, not 100 + 20 and not a split.
+	if soloMember.ID != ben.ID || soloMember.Points != benBeforeSolo+100 {
+		t.Errorf("credited member: %+v, want Ben with %d points", soloMember, benBeforeSolo+100)
+	}
+	if p := points(ben.ID); p != benBeforeSolo+100 {
+		t.Errorf("Ben's points after unshared shareable approval: %d, want %d", p, benBeforeSolo+100)
+	}
+	if p := points(ann.ID); p != annBeforeSolo {
+		t.Errorf("Ann's points moved on Ben's approval: %d, want %d", p, annBeforeSolo)
+	}
+	if _, _, _, _, err := quests.Approve(ctx, alice, h.ID, soloRows[0].ID, ""); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("repeat approve unshared shareable: %v, want ErrNotFound", err)
+	}
+	if p := points(ben.ID); p != benBeforeSolo+100 {
+		t.Errorf("Ben's points after repeat approve: %d, want %d", p, benBeforeSolo+100)
+	}
+
+	// The CLM-16 case above credited Ben 100 points; the reject checks below
+	// compare against the balance the earlier approvals left (35).
+	if _, err := pool.Exec(ctx, `UPDATE family_members SET points = 35 WHERE id = $1`, ben.ID); err != nil {
+		t.Fatalf("reset Ben's balance after the unshared shareable case: %v", err)
 	}
 
 	// CLM-5: Reject latest vs earlier:

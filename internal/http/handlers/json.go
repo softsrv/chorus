@@ -105,12 +105,20 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 		respond.Error(w, http.StatusForbidden, "not_editable", "This calendar entry can't be edited.")
 	case errors.Is(err, app.ErrGoogleRejected):
 		respond.Error(w, http.StatusBadGateway, "google_rejected", "Google Calendar rejected the change.")
+	case errors.Is(err, app.ErrWrongTargetPIN):
+		// Same code as any wrong PIN; fields names the target's PIN so a
+		// client can tell it from the acting member's.
+		respond.JSON(w, http.StatusForbidden, respond.ErrorBody{Error: respond.ErrorDetail{
+			Code: "wrong_pin", Message: "Wrong PIN.", Fields: map[string]string{"target_pin": "is wrong"},
+		}})
 	case errors.Is(err, app.ErrWrongPIN):
 		respond.Error(w, http.StatusForbidden, "wrong_pin", "Wrong PIN.")
 	case errors.Is(err, app.ErrAdminPinRequired):
 		respond.Error(w, http.StatusForbidden, "admin_pin_required", "Admin PIN is required.")
 	case errors.Is(err, app.ErrQuestTaken):
 		respond.Error(w, http.StatusConflict, "quest_taken", "This quest has already been taken.")
+	case errors.Is(err, app.ErrAlreadyParticipant):
+		respond.Error(w, http.StatusConflict, "already_participant", "That member is already on this quest.")
 	default:
 		slog.ErrorContext(r.Context(), "unhandled error",
 			"request_id", middleware.GetRequestID(r.Context()),

@@ -194,6 +194,7 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("POST /api/v1/households/{householdID}/quests/{questID}/accept", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Accept))))
 	api.Handle("POST /api/v1/households/{householdID}/quests/{questID}/abandon", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Abandon))))
 	api.Handle("POST /api/v1/households/{householdID}/quests/{questID}/done", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.MarkDone))))
+	api.Handle("POST /api/v1/households/{householdID}/quests/{questID}/share", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Share))))
 	// Approval is per completion (one per mark-done), admin-only and, once an
 	// admin PIN is set, needs X-Admin-PIN.
 	api.Handle("POST /api/v1/households/{householdID}/quest-completions/{completionID}/approve", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Approve))))

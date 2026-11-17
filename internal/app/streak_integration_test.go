@@ -300,9 +300,16 @@ func (w *streakWorld) awardsWithReason(kind, reason string) []db.PointsAward {
 func (w *streakWorld) approve(label string, completionID uuid.UUID, wantDelta int32, want app.StreakBonus) {
 	w.t.Helper()
 	before := w.points()
-	_, m, _, streak, err := w.quests.Approve(w.ctx, w.admin, w.hID, completionID, "")
+	_, m, _, members, err := w.quests.Approve(w.ctx, w.admin, w.hID, completionID, "")
 	if err != nil {
 		w.t.Fatalf("%s: approve: %v", label, err)
+	}
+	// Only the marker's streak moves at mark-done, so it is on their entry.
+	var streak app.StreakBonus
+	for _, am := range members {
+		if am.Member.ID == m.ID {
+			streak = am.Streak
+		}
 	}
 	if streak != want {
 		w.t.Errorf("%s: streak %+v, want %+v", label, streak, want)
