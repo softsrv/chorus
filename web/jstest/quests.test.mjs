@@ -447,6 +447,33 @@ test('CLM-10: takeCard fetches points-history with X-Member-PIN and renders tabl
   assert.equal(rowData[2][2], 'Clean sweep');
 });
 
+test('a failing points-history read keeps the quest lists and actions; the error shows in the history section', async () => {
+  srv.quests = [quest(), quest({ id: 'q2', name: 'Fold laundry', available: false, claimed_by: 'm-a' })];
+  srv.pointsHistory = () => err(429, 'rate_limited', 'Too many requests.');
+  await loadApp();
+  await becomeAnn();
+
+  assert.match(section(env.$app, 'Available'), /Feed the cat/);
+  assert.match(section(env.$app, 'Mine'), /Fold laundry/);
+  assert.equal(buttons(env.$app, 'Mark done').length, 1);
+  assert.equal(buttons(env.$app, 'Abandon').length, 1);
+  const historyNode = sectionNode(env.$app, 'Points history');
+  assert.ok(historyNode, 'Points history section exists');
+  assert.match(historyNode.textContent, /Could not load points history/);
+  assert.equal(walk(historyNode).filter((n) => n.tagName === 'TABLE').length, 0);
+});
+
+test('a 403 wrong_pin on points-history returns to the member picker, not a blank tab', async () => {
+  await loadApp();
+  srv.pointsHistory = () => err(403, 'wrong_pin', 'Wrong PIN.');
+  await becomeBen();
+
+  assert.match(text(), /Viewing as: Administrator/);
+  assert.match(text(), /Choose a family member to take quests\./);
+  assert.equal(sessionStorage.getItem(REFRESH_KEY), 'rt', 'session kept');
+  assert.equal(signedOut, 0);
+});
+
 test('CLM-11: empty points-history renders empty message and no table', async () => {
   srv.history = [];
   await loadApp();

@@ -709,10 +709,22 @@ async function takeCard(h, quests, nameOf, rerender) {
   const $err = el('div');
   const $detail = el('div');
   const parts = partitionQuests(quests, activeMember.id);
-  const historyRes = await api('GET', `/households/${h.id}/family-members/${activeMember.id}/points-history`, undefined, {
-    headers: { 'X-Member-PIN': activeMember.pin ?? '' },
-  });
-  const history = historyRes?.items || [];
+  // The points history is this card's own read: its failure (a 429 from the
+  // shared PIN limiter, a 5xx, a network error) shows inside the history
+  // section and the quest lists still render. A 403 wrong_pin goes to the
+  // same handler member actions use, which returns to the picker.
+  let history = [];
+  let historyError = null;
+  try {
+    const historyRes = await api('GET', `/households/${h.id}/family-members/${activeMember.id}/points-history`, undefined, {
+      headers: { 'X-Member-PIN': activeMember.pin ?? '' },
+    });
+    history = historyRes?.items || [];
+  } catch (err) {
+    if (memberActionFailed(err)) return null;
+    console.error('points history', err);
+    historyError = 'Could not load points history. Reload to try again.';
+  }
 
   const act = (verb, q) => action(async () => {
     const body = activeMemberAction();
@@ -770,7 +782,7 @@ async function takeCard(h, quests, nameOf, rerender) {
         waitingBadge(q)), ''),
     el('div', { class: 'space-y-1' },
       el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Points history' }),
-      history.length
+      historyError ? alertBox('error', historyError) : history.length
         ? el('table', { class: 'table table-sm' },
             el('thead', {}, el('tr', {},
               el('th', { text: 'Date' }),
