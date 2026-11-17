@@ -59,11 +59,12 @@ Allowed import directions are enforced by `make boundaries` and owned by `intern
   - `internal/http/handlers` → `app`, `db`, `middleware`, `respond`
   - `internal/http/middleware` → `auth`, `db`, `respond`
   - `internal/app` → `auth`, `db`, `email`, `users`
-  - `internal/auth`, `internal/users`, `internal/email`, `internal/http/respond`, `internal/db`, `web` → no chorus package imports
+  - `internal/auth`, `internal/users`, `internal/email`, `internal/http/respond`, `internal/db`, `internal/testnet`, `web` → no chorus package imports
   - Nothing imports `cmd/app`
 - **Test rules (`_test.go` files):**
   - Tests may import the package under test plus anything that package is allowed to import.
   - `internal/http` tests may additionally import `internal/auth` (for token minting in integration tests).
+  - `internal/app` and `internal/http` tests may additionally import `internal/testnet` (to refuse outbound dials); no production file may import it.
   - Tests may never import `cmd/app`.
 - **Web client rules:**
   - `web/static/js/*.js` and `web/jstest/*.mjs` imports must resolve within `web/` or be `node:`-prefixed Node builtins (for example `node:fs`); they may never import from `internal/` or `cmd/`.

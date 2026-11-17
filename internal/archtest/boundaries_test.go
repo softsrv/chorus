@@ -39,13 +39,17 @@ var prodAllow = map[string][]string{
 	"internal/db":              nil,
 	"web":                      nil,
 	"internal/archtest":        nil,
+	"internal/testnet":         nil,
 }
 
 // testExtra is what a package's _test.go files (internal and external test
 // packages) may import beyond the package under test and its production
-// allowlist. internal/http's integration tests mint tokens with internal/auth.
+// allowlist. internal/http's integration tests mint tokens with internal/auth;
+// internal/app and internal/http tests refuse outbound dials with
+// internal/testnet, a test-only helper no production file may import.
 var testExtra = map[string][]string{
-	"internal/http": {"internal/auth"},
+	"internal/http": {"internal/auth", "internal/testnet"},
+	"internal/app":  {"internal/testnet"},
 }
 
 // edge is one chorus import: the importing file, its package directory, the
@@ -65,7 +69,7 @@ func allowed(list []string, to string) bool { return slices.Contains(list, to) }
 // else is held to prodAllow.
 func prodAllowed(from, to string) bool {
 	if from == "cmd/app" {
-		return strings.HasPrefix(to, "internal/") && to != "internal/archtest"
+		return strings.HasPrefix(to, "internal/") && to != "internal/archtest" && to != "internal/testnet"
 	}
 	return allowed(prodAllow[from], to)
 }
