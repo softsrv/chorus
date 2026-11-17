@@ -643,12 +643,18 @@ func TestAPI_EndToEnd(t *testing.T) {
 	// Points history (CLM-6):
 	// A second quest approval for member so two awards are present.
 	var quest2 acceptedBody
-	s.expect(http.StatusCreated, "POST", hp+"/quests", parent.AccessToken, map[string]any{"name": "Dishes", "points": 5}, &quest2)
+	s.expectWithHeaders(http.StatusCreated, "POST", hp+"/quests", parent.AccessToken, adminHdr, map[string]any{"name": "Dishes", "points": 5}, &quest2)
 	q2base := hp + "/quests/" + quest2.ID.String()
 	s.expect(http.StatusOK, "POST", q2base+"/accept", parent.AccessToken, map[string]any{"member_id": member.ID, "pin": "4321"}, nil)
 	s.expect(http.StatusOK, "POST", q2base+"/done", parent.AccessToken, map[string]any{"member_id": member.ID, "pin": "4321"}, nil)
-	s.expectWithHeaders(http.StatusOK, "POST", q2base+"/approve", parent.AccessToken, adminHdr, map[string]any{}, nil)
-	s.expect(http.StatusNoContent, "DELETE", q2base, parent.AccessToken, nil, nil)
+	pendingList.Items = nil
+	s.expectWithHeaders(http.StatusOK, "GET", hp+"/quests/pending", parent.AccessToken, adminHdr, nil, &pendingList)
+	if len(pendingList.Items) != 1 {
+		t.Fatalf("pending after quest2 mark-done: %+v", pendingList.Items)
+	}
+	c2base := hp + "/quest-completions/" + pendingList.Items[0].CompletionID.String()
+	s.expectWithHeaders(http.StatusOK, "POST", c2base+"/approve", parent.AccessToken, adminHdr, map[string]any{}, nil)
+	s.expectWithHeaders(http.StatusNoContent, "DELETE", q2base, parent.AccessToken, adminHdr, nil, nil)
 
 	histPath := hp + "/family-members/" + member.ID.String() + "/points-history"
 

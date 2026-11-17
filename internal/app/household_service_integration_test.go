@@ -713,6 +713,22 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	}
 	_ = aliceDelTx.Rollback(ctx)
 
+	// Capture Bob's PointsHistory right before Alice deletes household A.
+	bobHistBefore, err := familySvc.PointsHistory(ctx, bob, bh.ID, bobMember.ID, "4321", "", 50, 0)
+	if err != nil {
+		t.Fatalf("bob PointsHistory before alice delete: %v", err)
+	}
+	var foundBobAward bool
+	for _, a := range bobHistBefore {
+		if a.ID == bobAwardID {
+			foundBobAward = true
+			break
+		}
+	}
+	if !foundBobAward {
+		t.Fatalf("bob points history before alice delete missing award %v: %+v", bobAwardID, bobHistBefore)
+	}
+
 	// Alice deletes household A via HouseholdService.Delete
 	if err := households.Delete(ctx, alice, h.ID); err != nil {
 		t.Fatalf("alice Delete household A: %v", err)
@@ -758,8 +774,16 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		t.Errorf("bob reward changed: %+v, %v", gotBobReward, err)
 	}
 	gotBobHist, err := familySvc.PointsHistory(ctx, bob, bh.ID, bobMember.ID, "4321", "", 50, 0)
-	if err != nil || len(gotBobHist) != 1 || gotBobHist[0].ID != bobAwardID {
-		t.Errorf("bob points history changed or missing after alice delete: %+v, %v", gotBobHist, err)
+	if err != nil {
+		t.Errorf("bob points history changed or missing after alice delete: %v", err)
+	} else if len(gotBobHist) != len(bobHistBefore) {
+		t.Errorf("bob points history length changed after alice delete: got %d, want %d", len(gotBobHist), len(bobHistBefore))
+	} else {
+		for i := range bobHistBefore {
+			if gotBobHist[i].ID != bobHistBefore[i].ID {
+				t.Errorf("bob points history award %d id changed: got %v, want %v", i, gotBobHist[i].ID, bobHistBefore[i].ID)
+			}
+		}
 	}
 
 	// Assert Bob's household_provisioned_at is unchanged.
