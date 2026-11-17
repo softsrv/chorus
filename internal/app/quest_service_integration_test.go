@@ -865,7 +865,7 @@ func TestIntegration_QuestApproval(t *testing.T) {
 	if _, err := quests.Reject(ctx, alice, h.ID, compID, ""); !errors.Is(err, app.ErrNotFound) {
 		t.Errorf("reject completion not pending: %v, want ErrNotFound", err)
 	}
-	if _, _, _, err := quests.Approve(ctx, alice, h.ID, compID, ""); !errors.Is(err, app.ErrNotFound) {
+	if _, _, _, _, err := quests.Approve(ctx, alice, h.ID, compID, ""); !errors.Is(err, app.ErrNotFound) {
 		t.Errorf("approve completion not pending: %v, want ErrNotFound", err)
 	}
 
@@ -886,10 +886,10 @@ func TestIntegration_QuestApproval(t *testing.T) {
 	if err := familySvc.SetAdminPin(ctx, alice, h.ID, "2468", ""); err != nil {
 		t.Fatalf("set admin pin: %v", err)
 	}
-	if _, _, _, err := quests.Approve(ctx, alice, h.ID, comp2ID, ""); !errors.Is(err, app.ErrAdminPinRequired) {
+	if _, _, _, _, err := quests.Approve(ctx, alice, h.ID, comp2ID, ""); !errors.Is(err, app.ErrAdminPinRequired) {
 		t.Errorf("approve without admin pin: %v, want ErrAdminPinRequired", err)
 	}
-	if _, _, _, err := quests.Approve(ctx, alice, h.ID, comp2ID, "0000"); !errors.Is(err, app.ErrWrongPIN) {
+	if _, _, _, _, err := quests.Approve(ctx, alice, h.ID, comp2ID, "0000"); !errors.Is(err, app.ErrWrongPIN) {
 		t.Errorf("approve with wrong admin pin: %v, want ErrWrongPIN", err)
 	}
 	if _, err := quests.Reject(ctx, alice, h.ID, comp2ID, "0000"); !errors.Is(err, app.ErrWrongPIN) {
@@ -916,7 +916,7 @@ func TestIntegration_QuestApproval(t *testing.T) {
 		FOR EACH ROW WHEN (NEW.id = '`+ben.ID.String()+`') EXECUTE FUNCTION test_fail_points()`); err != nil {
 		t.Fatalf("create trigger: %v", err)
 	}
-	if _, _, _, err := quests.Approve(ctx, alice, h.ID, comp2ID, "2468"); err == nil {
+	if _, _, _, _, err := quests.Approve(ctx, alice, h.ID, comp2ID, "2468"); err == nil {
 		t.Fatal("approve succeeded although the points credit failed")
 	}
 	if _, err := pool.Exec(ctx, `DROP FUNCTION test_fail_points() CASCADE`); err != nil {
@@ -945,7 +945,7 @@ func TestIntegration_QuestApproval(t *testing.T) {
 	for range N {
 		go func() {
 			<-start
-			c, m, _, err := quests.Approve(ctx, alice, h.ID, comp2ID, "2468")
+			c, m, _, _, err := quests.Approve(ctx, alice, h.ID, comp2ID, "2468")
 			results <- result{c, m, err}
 		}()
 	}
@@ -975,25 +975,25 @@ func TestIntegration_QuestApproval(t *testing.T) {
 		t.Errorf("Ben's points after approval: %d, want 7", p)
 	}
 	// Approving again credits nothing more.
-	if _, _, _, err := quests.Approve(ctx, alice, h.ID, comp2ID, "2468"); !errors.Is(err, app.ErrNotFound) {
+	if _, _, _, _, err := quests.Approve(ctx, alice, h.ID, comp2ID, "2468"); !errors.Is(err, app.ErrNotFound) {
 		t.Errorf("repeat approve: %v, want ErrNotFound", err)
 	}
 	if p := points(ben.ID); p != 7 {
 		t.Errorf("Ben's points after repeat approve: %d, want 7", p)
 	}
 	// The concurrent and repeated approvals wrote exactly one history entry,
-	// for the credited points, earned at the approval time.
+	// for the credited points, earned at the completion's mark-done time.
 	benAwards := awards(ben.ID)
 	if len(benAwards) != 1 {
 		t.Fatalf("Ben's history after approval: %d entries, want 1: %+v", len(benAwards), benAwards)
 	}
-	var approvedAt time.Time
-	if err := pool.QueryRow(ctx, `SELECT approved_at FROM quest_completions WHERE id = $1`, comp2ID).Scan(&approvedAt); err != nil {
-		t.Fatalf("read approved_at: %v", err)
+	var markedDoneAt time.Time
+	if err := pool.QueryRow(ctx, `SELECT done_at FROM quest_completions WHERE id = $1`, comp2ID).Scan(&markedDoneAt); err != nil {
+		t.Fatalf("read done_at: %v", err)
 	}
 	if a := benAwards[0]; a.HouseholdID != h.ID || a.MemberID != ben.ID || a.Kind != "quest" || a.Reason != "Mow the lawn" ||
-		a.Points != 7 || !a.EarnedAt.Valid || !a.EarnedAt.Time.Equal(approvedAt) {
-		t.Errorf("Ben's history entry: %+v, want quest 'Mow the lawn' 7 points earned at %v", a, approvedAt)
+		a.Points != 7 || !a.EarnedAt.Valid || !a.EarnedAt.Time.Equal(markedDoneAt) {
+		t.Errorf("Ben's history entry: %+v, want quest 'Mow the lawn' 7 points earned at %v", a, markedDoneAt)
 	}
 	if len(pending("2468")) != 0 {
 		t.Error("approved completion is still waiting")
@@ -1058,7 +1058,7 @@ func TestIntegration_QuestApproval(t *testing.T) {
 	// each completion's done_at equals marked time, quest available_at/completed_at unchanged.
 	beforeQuest := get()
 	for _, r := range rows4 {
-		approvedComp, mem, _, err := quests.Approve(ctx, alice, h.ID, r.ID, "")
+		approvedComp, mem, _, _, err := quests.Approve(ctx, alice, h.ID, r.ID, "")
 		if err != nil {
 			t.Fatalf("approve completion %s: %v", r.ID, err)
 		}
@@ -1196,12 +1196,12 @@ func TestIntegration_QuestApproval(t *testing.T) {
 		t.Fatalf("Ann pending count = %d, want 2", len(annPending))
 	}
 	// Approve first completion: no combo bonus yet
-	_, mem1, bonuses1, err := quests.Approve(ctx, alice, h.ID, annPending[0].ID, "")
+	_, mem1, bonuses1, _, err := quests.Approve(ctx, alice, h.ID, annPending[0].ID, "")
 	if err != nil || len(bonuses1) != 0 || mem1.Points != 7 {
 		t.Errorf("first combo approval: mem points %d, bonuses %+v, err %v", mem1.Points, bonuses1, err)
 	}
 	// Approve second completion: pays combo bonus (10 points)!
-	_, mem2, bonuses2, err := quests.Approve(ctx, alice, h.ID, annPending[1].ID, "")
+	_, mem2, bonuses2, _, err := quests.Approve(ctx, alice, h.ID, annPending[1].ID, "")
 	if err != nil || len(bonuses2) != 1 || bonuses2[0].ComboID != combo.ID || bonuses2[0].BonusPoints != 10 {
 		t.Errorf("second combo approval: bonuses %+v, err %v", bonuses2, err)
 	}
@@ -1261,7 +1261,7 @@ func TestIntegration_QuestApproval(t *testing.T) {
 		cID2 := markDoneAt(q2.ID, asAnn, jan15_2pm)
 
 		// First approval (e.g. earlier): pays chore points only (5 pts), 0 bonus
-		_, memFirst, bonusesFirst, err := quests.Approve(ctx, alice, h.ID, cID1, "")
+		_, memFirst, bonusesFirst, _, err := quests.Approve(ctx, alice, h.ID, cID1, "")
 		if err != nil {
 			t.Fatalf("first approval: %v", err)
 		}
@@ -1273,7 +1273,7 @@ func TestIntegration_QuestApproval(t *testing.T) {
 		}
 
 		// Second approval (e.g. later day): pays chore points (8 pts) + combo bonus (15 pts)
-		_, memSecond, bonusesSecond, err := quests.Approve(ctx, alice, h.ID, cID2, "")
+		_, memSecond, bonusesSecond, _, err := quests.Approve(ctx, alice, h.ID, cID2, "")
 		if err != nil {
 			t.Fatalf("second approval: %v", err)
 		}
@@ -1324,11 +1324,11 @@ func TestIntegration_QuestApproval(t *testing.T) {
 			cA_id1 := markDoneAt(qA1.ID, asAnn, day1)
 			cA_id2 := markDoneAt(qA2.ID, asAnn, day2)
 
-			_, _, b1, err := quests.Approve(ctx, alice, h.ID, cA_id1, "")
+			_, _, b1, _, err := quests.Approve(ctx, alice, h.ID, cA_id1, "")
 			if err != nil || len(b1) != 0 {
 				t.Errorf("approve cA1: bonuses %+v, err %v", b1, err)
 			}
-			_, _, b2, err := quests.Approve(ctx, alice, h.ID, cA_id2, "")
+			_, _, b2, _, err := quests.Approve(ctx, alice, h.ID, cA_id2, "")
 			if err != nil || len(b2) != 0 {
 				t.Errorf("approve cA2: bonuses %+v, err %v", b2, err)
 			}
@@ -1375,11 +1375,11 @@ func TestIntegration_QuestApproval(t *testing.T) {
 			cB_id1 := markDoneAt(qB1.ID, asAnn, t1)
 			cB_id2 := markDoneAt(qB2.ID, asAnn, t2)
 
-			_, _, b1, err := quests.Approve(ctx, alice, h.ID, cB_id1, "")
+			_, _, b1, _, err := quests.Approve(ctx, alice, h.ID, cB_id1, "")
 			if err != nil || len(b1) != 0 {
 				t.Errorf("approve cB1: bonuses %+v, err %v", b1, err)
 			}
-			_, _, b2, err := quests.Approve(ctx, alice, h.ID, cB_id2, "")
+			_, _, b2, _, err := quests.Approve(ctx, alice, h.ID, cB_id2, "")
 			if err != nil || len(b2) != 0 {
 				t.Errorf("approve cB2: bonuses %+v, err %v", b2, err)
 			}
@@ -1426,11 +1426,11 @@ func TestIntegration_QuestApproval(t *testing.T) {
 			cC_id1 := markDoneAt(qC1.ID, asAnn, tC1)
 			cC_id2 := markDoneAt(qC2.ID, asAnn, tC2)
 
-			_, _, b1, err := quests.Approve(ctx, alice, h.ID, cC_id1, "")
+			_, _, b1, _, err := quests.Approve(ctx, alice, h.ID, cC_id1, "")
 			if err != nil || len(b1) != 0 {
 				t.Errorf("approve cC1: bonuses %+v, err %v", b1, err)
 			}
-			_, _, b2, err := quests.Approve(ctx, alice, h.ID, cC_id2, "")
+			_, _, b2, _, err := quests.Approve(ctx, alice, h.ID, cC_id2, "")
 			if err != nil || len(b2) != 1 || b2[0].ComboID != cC.ID || b2[0].BonusPoints != 14 {
 				t.Errorf("approve cC2: bonuses %+v, err %v", b2, err)
 			}
@@ -1478,11 +1478,11 @@ func TestIntegration_QuestApproval(t *testing.T) {
 		c3_idB := markDoneAt(q3B.ID, asAnn, jan18.Add(time.Hour))
 
 		// Approve A (no bonus), then B (pays combo bonus)
-		_, _, bA, err := quests.Approve(ctx, alice, h.ID, c3_idA, "")
+		_, _, bA, _, err := quests.Approve(ctx, alice, h.ID, c3_idA, "")
 		if err != nil || len(bA) != 0 {
 			t.Fatalf("approve c3A: bonuses %+v, err %v", bA, err)
 		}
-		_, _, bB, err := quests.Approve(ctx, alice, h.ID, c3_idB, "")
+		_, _, bB, _, err := quests.Approve(ctx, alice, h.ID, c3_idB, "")
 		if err != nil || len(bB) != 1 || bB[0].BonusPoints != 20 || bB[0].ComboID != c3.ID {
 			t.Fatalf("approve c3B: bonuses %+v, err %v", bB, err)
 		}
@@ -1492,7 +1492,7 @@ func TestIntegration_QuestApproval(t *testing.T) {
 
 		// 1. Approve a later unrelated completion: pays only its chore points, no bonus
 		c3_idSolo := markDoneAt(q3Solo.ID, asAnn, jan18.Add(2*time.Hour))
-		_, memSolo, bSolo, err := quests.Approve(ctx, alice, h.ID, c3_idSolo, "")
+		_, memSolo, bSolo, _, err := quests.Approve(ctx, alice, h.ID, c3_idSolo, "")
 		if err != nil || len(bSolo) != 0 {
 			t.Fatalf("approve solo: bonuses %+v, err %v", bSolo, err)
 		}
@@ -1501,7 +1501,7 @@ func TestIntegration_QuestApproval(t *testing.T) {
 		}
 
 		// 2. Re-approving the paid completion returns app.ErrNotFound
-		if _, _, _, err := quests.Approve(ctx, alice, h.ID, c3_idB, ""); !errors.Is(err, app.ErrNotFound) {
+		if _, _, _, _, err := quests.Approve(ctx, alice, h.ID, c3_idB, ""); !errors.Is(err, app.ErrNotFound) {
 			t.Fatalf("re-approve paid completion: got err %v, want app.ErrNotFound", err)
 		}
 		if p := points(ann.ID); p != annBase+50 {
@@ -1544,7 +1544,7 @@ func TestIntegration_QuestApproval(t *testing.T) {
 			go func(idx int, cID uuid.UUID) {
 				defer wg.Done()
 				<-start
-				_, _, b, err := quests.Approve(ctx, alice, h.ID, cID, "")
+				_, _, b, _, err := quests.Approve(ctx, alice, h.ID, cID, "")
 				errs[idx] = err
 				paidBonuses[idx] = b
 			}(i, compID)
@@ -1577,11 +1577,11 @@ func TestIntegration_QuestApproval(t *testing.T) {
 		cNewIDB := markDoneAt(qConcB.ID, asAnn, jan20.Add(time.Hour))
 
 		annBeforeNew := points(ann.ID)
-		_, _, bNewA, err := quests.Approve(ctx, alice, h.ID, cNewIDA, "")
+		_, _, bNewA, _, err := quests.Approve(ctx, alice, h.ID, cNewIDA, "")
 		if err != nil || len(bNewA) != 0 {
 			t.Fatalf("approve new set A: bonuses %+v, err %v", bNewA, err)
 		}
-		_, _, bNewB, err := quests.Approve(ctx, alice, h.ID, cNewIDB, "")
+		_, _, bNewB, _, err := quests.Approve(ctx, alice, h.ID, cNewIDB, "")
 		if err != nil || len(bNewB) != 1 || bNewB[0].BonusPoints != 25 {
 			t.Fatalf("approve new set B: bonuses %+v, err %v", bNewB, err)
 		}
@@ -1748,7 +1748,7 @@ func TestIntegration_QuestApproval_RollbackOnPointsAwardFailure(t *testing.T) {
 	}
 
 	// Attempt approve: must fail because points_awards insert fails.
-	if _, _, _, err := quests.Approve(ctx, alice, h.ID, compID, ""); err == nil {
+	if _, _, _, _, err := quests.Approve(ctx, alice, h.ID, compID, ""); err == nil {
 		t.Fatal("approve succeeded despite points_awards trigger failure")
 	}
 
@@ -1787,7 +1787,7 @@ func TestIntegration_QuestApproval_RollbackOnPointsAwardFailure(t *testing.T) {
 		t.Fatalf("drop trigger: %v", err)
 	}
 
-	approved, creditedMember, _, err := quests.Approve(ctx, alice, h.ID, compID, "")
+	approved, creditedMember, _, _, err := quests.Approve(ctx, alice, h.ID, compID, "")
 	if err != nil {
 		t.Fatalf("retry approve after dropping trigger: %v", err)
 	}
@@ -1902,7 +1902,7 @@ func TestIntegration_QuestResetsAtLocalMidnight(t *testing.T) {
 	}
 	approve := func(f family, compID uuid.UUID) app.Completion {
 		t.Helper()
-		comp, _, _, err := quests.Approve(ctx, alice, f.id, compID, "")
+		comp, _, _, _, err := quests.Approve(ctx, alice, f.id, compID, "")
 		if err != nil {
 			t.Fatalf("approve: %v", err)
 		}

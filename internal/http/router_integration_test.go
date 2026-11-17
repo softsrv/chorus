@@ -350,6 +350,65 @@ func TestAPI_EndToEnd(t *testing.T) {
 	if unchangedAfterPut != gotQuest {
 		t.Errorf("quest row changed after rejected update: %+v vs %+v", unchangedAfterPut, gotQuest)
 	}
+	// CLM-12: a negative or non-whole streak_bonus is a 422 naming
+	// streak_bonus, on create and on update, and saves nothing.
+	for _, bad := range []any{-1, 1.5, "five"} {
+		qerr = apiError{}
+		if got := s.do("POST", hp+"/quests", parent.AccessToken, map[string]any{
+			"name": "Streaky", "streak_bonus": bad,
+		}, &qerr); got != http.StatusUnprocessableEntity || qerr.Error.Fields["streak_bonus"] == "" {
+			t.Errorf("create with streak_bonus %v: status %d, %+v", bad, got, qerr)
+		}
+		qerr = apiError{}
+		if got := s.do("PUT", qp, parent.AccessToken, map[string]any{
+			"name": "Walk the dog twice", "points": 20, "repeat_days": 1, "streak_bonus": bad,
+		}, &qerr); got != http.StatusUnprocessableEntity || qerr.Error.Fields["streak_bonus"] == "" {
+			t.Errorf("update with streak_bonus %v: status %d, %+v", bad, got, qerr)
+		}
+	}
+	readStreakBonus := func() int {
+		t.Helper()
+		var n int
+		if err := s.pool.QueryRow(context.Background(), `SELECT streak_bonus FROM household_quests WHERE id = $1`, quest.ID).Scan(&n); err != nil {
+			t.Fatalf("read streak_bonus: %v", err)
+		}
+		return n
+	}
+	s.expect(http.StatusOK, "GET", hp+"/quests", parent.AccessToken, nil, &quests)
+	if len(quests.Items) != 1 {
+		t.Errorf("rejected streak_bonus creates saved rows: %d quests", len(quests.Items))
+	}
+	s.expect(http.StatusOK, "GET", qp, parent.AccessToken, nil, &unchangedAfterPut)
+	if unchangedAfterPut != gotQuest {
+		t.Errorf("quest row changed after rejected streak_bonus update: %+v vs %+v", unchangedAfterPut, gotQuest)
+	}
+	if n := readStreakBonus(); n != 0 {
+		t.Errorf("streak_bonus after rejected updates: %d, want 0", n)
+	}
+	// Changing streak_bonus needs the admin PIN like other quest changes.
+	s.expect(http.StatusOK, "PUT", hp+"/admin-pin", parent.AccessToken, map[string]string{"pin": "1357"}, nil)
+	qerr = apiError{}
+	s.expect(http.StatusForbidden, "PUT", qp, parent.AccessToken, map[string]any{
+		"name": "Walk the dog twice", "points": 20, "repeat_days": 1, "streak_bonus": 5,
+	}, &qerr)
+	if qerr.Error.Code != "admin_pin_required" || readStreakBonus() != 0 {
+		t.Errorf("streak_bonus update without admin pin: code %q, streak_bonus %d", qerr.Error.Code, readStreakBonus())
+	}
+	// A valid streak_bonus is saved with the PIN.
+	s.expectWithHeaders(http.StatusOK, "PUT", qp, parent.AccessToken, map[string]string{"X-Admin-PIN": "1357"}, map[string]any{
+		"name": "Walk the dog twice", "points": 20, "repeat_days": 1, "streak_bonus": 5,
+	}, nil)
+	if n := readStreakBonus(); n != 5 {
+		t.Errorf("streak_bonus after valid update: %d, want 5", n)
+	}
+	// Back to the state the rest of this test expects: no streak bonus, no PIN.
+	s.expectWithHeaders(http.StatusOK, "PUT", qp, parent.AccessToken, map[string]string{"X-Admin-PIN": "1357"}, map[string]any{
+		"name": "Walk the dog twice", "points": 20, "repeat_days": 1,
+	}, nil)
+	s.expectWithHeaders(http.StatusNoContent, "DELETE", hp+"/admin-pin", parent.AccessToken, map[string]string{"X-Admin-PIN": "1357"}, nil, nil)
+	if n := readStreakBonus(); n != 0 {
+		t.Errorf("omitted streak_bonus on PUT: %d, want 0", n)
+	}
 
 	// CLM-4: POST/PUT/DELETE on /api/v1/quest-library return 404 or 405.
 	for _, m := range []string{"POST", "PUT", "DELETE"} {
@@ -538,8 +597,16 @@ func TestAPI_EndToEnd(t *testing.T) {
 			Points int       `json:"points"`
 		} `json:"member"`
 		ComboBonuses []json.RawMessage `json:"combo_bonuses"`
+		StreakBonus  *int              `json:"streak_bonus"`
+		StreakCount  *int              `json:"streak_count"`
 	}
 	s.expectWithHeaders(http.StatusOK, "POST", cbase+"/approve", parent.AccessToken, adminHdr, map[string]any{}, &approvedBody)
+	// CLM-13 / CLM-16: the first mark-done was sent back, which undid its
+	// streak step, so this approval is the 1st in a row: count 1, no bonus.
+	if approvedBody.StreakBonus == nil || *approvedBody.StreakBonus != 0 ||
+		approvedBody.StreakCount == nil || *approvedBody.StreakCount != 1 {
+		t.Errorf("approve streak fields: streak_bonus=%v streak_count=%v, want 0 and 1", approvedBody.StreakBonus, approvedBody.StreakCount)
+	}
 	if approvedBody.Completion.ID != pendingList.Items[0].CompletionID || approvedBody.Completion.QuestID != acceptQuest.ID ||
 		approvedBody.Completion.Status != "approved" || approvedBody.Completion.ApprovedAt == nil ||
 		approvedBody.Completion.DoneAt == nil || !approvedBody.Completion.DoneAt.Equal(*pendingList.Items[0].DoneAt) ||
@@ -576,12 +643,18 @@ func TestAPI_EndToEnd(t *testing.T) {
 	// Points history (CLM-6):
 	// A second quest approval for member so two awards are present.
 	var quest2 acceptedBody
-	s.expect(http.StatusCreated, "POST", hp+"/quests", parent.AccessToken, map[string]any{"name": "Dishes", "points": 5}, &quest2)
+	s.expectWithHeaders(http.StatusCreated, "POST", hp+"/quests", parent.AccessToken, adminHdr, map[string]any{"name": "Dishes", "points": 5}, &quest2)
 	q2base := hp + "/quests/" + quest2.ID.String()
 	s.expect(http.StatusOK, "POST", q2base+"/accept", parent.AccessToken, map[string]any{"member_id": member.ID, "pin": "4321"}, nil)
 	s.expect(http.StatusOK, "POST", q2base+"/done", parent.AccessToken, map[string]any{"member_id": member.ID, "pin": "4321"}, nil)
-	s.expectWithHeaders(http.StatusOK, "POST", q2base+"/approve", parent.AccessToken, adminHdr, map[string]any{}, nil)
-	s.expect(http.StatusNoContent, "DELETE", q2base, parent.AccessToken, nil, nil)
+	pendingList.Items = nil
+	s.expectWithHeaders(http.StatusOK, "GET", hp+"/quests/pending", parent.AccessToken, adminHdr, nil, &pendingList)
+	if len(pendingList.Items) != 1 {
+		t.Fatalf("pending after quest2 mark-done: %+v", pendingList.Items)
+	}
+	c2base := hp + "/quest-completions/" + pendingList.Items[0].CompletionID.String()
+	s.expectWithHeaders(http.StatusOK, "POST", c2base+"/approve", parent.AccessToken, adminHdr, map[string]any{}, nil)
+	s.expectWithHeaders(http.StatusNoContent, "DELETE", q2base, parent.AccessToken, adminHdr, nil, nil)
 
 	histPath := hp + "/family-members/" + member.ID.String() + "/points-history"
 

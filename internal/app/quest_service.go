@@ -29,12 +29,14 @@ type NumberField struct {
 }
 
 // QuestInput is the editable part of a household quest. An absent Points
-// means 0 and an absent RepeatDays means 1 (daily).
+// means 0, an absent RepeatDays 1 (daily) and an absent StreakBonus 0 (no
+// streak bonus).
 type QuestInput struct {
-	Name       string
-	Points     NumberField
-	RepeatDays NumberField
-	Notes      string
+	Name        string
+	Points      NumberField
+	RepeatDays  NumberField
+	Notes       string
+	StreakBonus NumberField
 }
 
 // QuestPage narrows List to one page.
@@ -201,6 +203,7 @@ func (s *QuestService) Update(ctx context.Context, userID, householdID, questID 
 		Points:      v.points,
 		RepeatDays:  v.repeatDays,
 		Notes:       v.notes,
+		StreakBonus: v.streakBonus,
 	})
 	return s.viewOf(ctx, quest, err)
 }
@@ -221,8 +224,8 @@ func (s *QuestService) Delete(ctx context.Context, userID, householdID, questID 
 }
 
 // CopyFromLibrary adds a copy of a library quest to the household. The copy
-// carries the library's name, points, days and notes and remembers its
-// library_id; editing it later never changes the library.
+// carries the library's name, points, days, notes and streak bonus and
+// remembers its library_id; editing it later never changes the library.
 func (s *QuestService) CopyFromLibrary(ctx context.Context, userID, householdID, libraryID uuid.UUID, adminPin string) (QuestView, error) {
 	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
 		return QuestView{}, err
@@ -233,6 +236,7 @@ func (s *QuestService) CopyFromLibrary(ctx context.Context, userID, householdID,
 	}
 	return s.insert(ctx, householdID, &item.ID, validQuest{
 		name: item.Name, points: item.Points, repeatDays: item.RepeatDays, notes: item.Notes,
+		streakBonus: item.StreakBonus,
 	})
 }
 
@@ -375,9 +379,14 @@ func (s *QuestService) ListPending(ctx context.Context, userID, householdID uuid
 
 // Kinds of points award, as stored in points_awards.kind.
 const (
-	awardKindQuest = "quest"
-	awardKindCombo = "combo"
+	awardKindQuest  = "quest"
+	awardKindCombo  = "combo"
+	awardKindStreak = "streak"
 )
+
+// streakBonusFrom is the streak count from which an approval pays the
+// quest's streak bonus: the 3rd completion in a row and every one after.
+const streakBonusFrom = 3
 
 // creditPoints is the single path that adds points to a family member: it
 // adds points to the member's total and writes the points_awards history row
@@ -414,15 +423,29 @@ type ComboBonus struct {
 	BonusPoints int32
 }
 
+// StreakBonus is what an approval did with the member's streak: Count is
+// the streak as fixed at the completion's mark-done (0 for a completion
+// marked done before streaks existed) and Points the streak bonus paid, 0
+// when none.
+type StreakBonus struct {
+	Points int32
+	Count  int32
+}
+
 // Approve approves one pending completion and credits the chore's points to
 // the member who marked it done, in one transaction: either all of it
-// happens or none does. Every credit (the chore's points and each combo
-// bonus) also writes the member's points history entry, earned at the
-// approval time. Admin only, behind the admin PIN once one is set. A
-// completion that is not pending (approved, rejected, cancelled, or not in
-// this household) is ErrNotFound, so a repeated or concurrent approval
-// credits the points once. The quest itself is not touched: its cooldown
-// started when the member marked it done.
+// happens or none does. Every credit (the chore's points, the streak bonus
+// and each combo bonus) also writes the member's points history entry,
+// earned at the completion's mark-done time. Admin only, behind the admin
+// PIN once one is set. A completion that is not pending (approved, rejected,
+// cancelled, or not in this household) is ErrNotFound, so a repeated or
+// concurrent approval credits the points and bonuses once. The quest itself
+// is not touched: its cooldown started when the member marked it done.
+//
+// From the member's 3rd completion of the quest in a row (the streak count
+// fixed at mark-done, however late the approval), a quest with a streak
+// bonus above 0 also pays that bonus; the returned StreakBonus says what was
+// paid and the count.
 //
 // The approval also pays every combo it finishes: a combo of two or more
 // chores each of which the member marked done on the same household-local
@@ -430,13 +453,13 @@ type ComboBonus struct {
 // approved completions not yet counted toward that combo. The returned
 // member's points include the bonuses; the returned slice is empty, never
 // nil, when none paid.
-func (s *QuestService) Approve(ctx context.Context, userID, householdID, completionID uuid.UUID, adminPin string) (Completion, db.FamilyMember, []ComboBonus, error) {
+func (s *QuestService) Approve(ctx context.Context, userID, householdID, completionID uuid.UUID, adminPin string) (Completion, db.FamilyMember, []ComboBonus, StreakBonus, error) {
 	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
-		return Completion{}, db.FamilyMember{}, nil, err
+		return Completion{}, db.FamilyMember{}, nil, StreakBonus{}, err
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return Completion{}, db.FamilyMember{}, nil, fmt.Errorf("begin tx: %w", err)
+		return Completion{}, db.FamilyMember{}, nil, StreakBonus{}, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
@@ -446,33 +469,37 @@ func (s *QuestService) Approve(ctx context.Context, userID, householdID, complet
 	// Locking the completion first would deadlock against a concurrent removal.
 	memberRef, err := notFoundIfNoRows(qtx.GetPendingCompletionMember(ctx, db.GetPendingCompletionMemberParams{HouseholdID: householdID, ID: completionID}))
 	if err != nil {
-		return Completion{}, db.FamilyMember{}, nil, err
+		return Completion{}, db.FamilyMember{}, nil, StreakBonus{}, err
 	}
 	if memberRef == nil {
 		// The query reads only completions that still have a member.
-		return Completion{}, db.FamilyMember{}, nil, fmt.Errorf("approve completion %s: no member", completionID)
+		return Completion{}, db.FamilyMember{}, nil, StreakBonus{}, fmt.Errorf("approve completion %s: no member", completionID)
 	}
 	memberID := *memberRef
 	if _, err := notFoundIfNoRows(qtx.LockFamilyMember(ctx, db.LockFamilyMemberParams{HouseholdID: householdID, ID: memberID})); err != nil {
 		// The member was removed meanwhile; their completion is cancelled.
-		return Completion{}, db.FamilyMember{}, nil, err
+		return Completion{}, db.FamilyMember{}, nil, StreakBonus{}, err
 	}
 	// Re-read under the locks: a concurrent approval, reject or removal that
 	// committed first leaves no pending row, so this one is ErrNotFound.
 	row, err := notFoundIfNoRows(qtx.ApproveCompletion(ctx, db.ApproveCompletionParams{HouseholdID: householdID, ID: completionID, MemberID: memberID}))
 	if err != nil {
-		return Completion{}, db.FamilyMember{}, nil, err
+		return Completion{}, db.FamilyMember{}, nil, StreakBonus{}, err
 	}
-	member, err := creditPoints(ctx, qtx, householdID, memberID, awardKindQuest, row.QuestName, row.Points, row.ApprovedAt)
+	member, err := creditPoints(ctx, qtx, householdID, memberID, awardKindQuest, row.QuestName, row.Points, row.DoneAt)
 	if err != nil {
-		return Completion{}, db.FamilyMember{}, nil, err
+		return Completion{}, db.FamilyMember{}, nil, StreakBonus{}, err
 	}
-	member, bonuses, err := payCombos(ctx, qtx, householdID, row.QuestID, member, row.DoneAt, row.ApprovedAt)
+	member, streak, err := payStreak(ctx, qtx, householdID, member, row)
 	if err != nil {
-		return Completion{}, db.FamilyMember{}, nil, err
+		return Completion{}, db.FamilyMember{}, nil, StreakBonus{}, err
+	}
+	member, bonuses, err := payCombos(ctx, qtx, householdID, row.QuestID, member, row.DoneAt)
+	if err != nil {
+		return Completion{}, db.FamilyMember{}, nil, StreakBonus{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return Completion{}, db.FamilyMember{}, nil, fmt.Errorf("commit: %w", err)
+		return Completion{}, db.FamilyMember{}, nil, StreakBonus{}, fmt.Errorf("commit: %w", err)
 	}
 	approvedAt := row.ApprovedAt.Time.UTC()
 	return Completion{
@@ -482,7 +509,33 @@ func (s *QuestService) Approve(ctx context.Context, userID, householdID, complet
 		DoneAt:     row.DoneAt.Time.UTC(),
 		ApprovedAt: &approvedAt,
 		Status:     "approved",
-	}, member, bonuses, nil
+	}, member, bonuses, streak, nil
+}
+
+// payStreak runs inside Approve's transaction (qtx), after the chore's
+// points were credited. row.StreakCount is the member's streak for the quest
+// as fixed when this completion was marked done (never recomputed now);
+// from the 3rd in a row on, a quest with a streak bonus above 0 pays it:
+// the credit and its points history entry (kind streak, reason
+// "streak: <quest name> <count>", earned at the mark-done time). The
+// returned StreakBonus has Points 0 when nothing was paid. Any error is
+// returned for the caller to roll back.
+func payStreak(ctx context.Context, qtx *db.Queries, householdID uuid.UUID, member db.FamilyMember, row db.ApproveCompletionRow) (db.FamilyMember, StreakBonus, error) {
+	if !row.StreakCount.Valid {
+		// Marked done before streaks existed: no streak to pay.
+		return member, StreakBonus{}, nil
+	}
+	streak := StreakBonus{Count: row.StreakCount.Int32}
+	if streak.Count < streakBonusFrom || row.StreakBonus <= 0 {
+		return member, streak, nil
+	}
+	reason := fmt.Sprintf("streak: %s %d", row.QuestName, streak.Count)
+	member, err := creditPoints(ctx, qtx, householdID, member.ID, awardKindStreak, reason, row.StreakBonus, row.DoneAt)
+	if err != nil {
+		return db.FamilyMember{}, StreakBonus{}, fmt.Errorf("credit streak bonus: %w", err)
+	}
+	streak.Points = row.StreakBonus
+	return member, streak, nil
 }
 
 // payCombos runs inside Approve's transaction (qtx), after the completion
@@ -492,9 +545,9 @@ func (s *QuestService) Approve(ctx context.Context, userID, householdID, complet
 // later one sees the earlier one's approval), then pays each combo the member
 // has finished: an award row with name and points snapshots, one claimed
 // completion per chore, and the bonus credit with its points history entry
-// (kind combo, the combo's name, earned at approvedAt). Any error is returned
+// (kind combo, the combo's name, earned at doneAt). Any error is returned
 // for the caller to roll back.
-func payCombos(ctx context.Context, qtx *db.Queries, householdID, questID uuid.UUID, member db.FamilyMember, doneAt, approvedAt pgtype.Timestamptz) (db.FamilyMember, []ComboBonus, error) {
+func payCombos(ctx context.Context, qtx *db.Queries, householdID, questID uuid.UUID, member db.FamilyMember, doneAt pgtype.Timestamptz) (db.FamilyMember, []ComboBonus, error) {
 	if _, err := qtx.LockCombosForQuest(ctx, db.LockCombosForQuestParams{HouseholdID: householdID, QuestID: questID}); err != nil {
 		return db.FamilyMember{}, nil, fmt.Errorf("lock combos: %w", err)
 	}
@@ -527,7 +580,7 @@ func payCombos(ctx context.Context, qtx *db.Queries, householdID, questID uuid.U
 			// Under the combo lock the set just checked must still be there.
 			return db.FamilyMember{}, nil, fmt.Errorf("claim combo %s: claimed %d completions, want %d", c.ID, claimed, c.ChoreCount)
 		}
-		member, err = creditPoints(ctx, qtx, householdID, member.ID, awardKindCombo, c.Name, c.BonusPoints, approvedAt)
+		member, err = creditPoints(ctx, qtx, householdID, member.ID, awardKindCombo, c.Name, c.BonusPoints, doneAt)
 		if err != nil {
 			return db.FamilyMember{}, nil, fmt.Errorf("credit combo bonus: %w", err)
 		}
@@ -539,16 +592,35 @@ func payCombos(ctx context.Context, qtx *db.Queries, householdID, questID uuid.U
 // Reject rejects one pending completion: no points are added. If that
 // completion started the quest's running cooldown and the cooldown has not
 // ended, the cooldown is cancelled and the chore is available again right
-// away. Other completions and the quest's holder are untouched. Admin only,
-// behind the admin PIN once one is set. A completion that is not pending is
-// ErrNotFound.
+// away. Other completions and the quest's holder are untouched. The streak
+// step the completion made at mark-done is undone in the same transaction:
+// the member's count and expiry go back to what they were, or the streak is
+// removed when that mark-done started it. Admin only, behind the admin PIN
+// once one is set. A completion that is not pending is ErrNotFound.
 func (s *QuestService) Reject(ctx context.Context, userID, householdID, completionID uuid.UUID, adminPin string) (Completion, error) {
 	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
 		return Completion{}, err
 	}
-	row, err := notFoundIfNoRows(s.q.RejectCompletion(ctx, db.RejectCompletionParams{HouseholdID: householdID, ID: completionID}))
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Completion{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	qtx := s.q.WithTx(tx)
+
+	row, err := notFoundIfNoRows(qtx.RejectCompletion(ctx, db.RejectCompletionParams{HouseholdID: householdID, ID: completionID}))
 	if err != nil {
 		return Completion{}, err
+	}
+	if row.MemberID != nil {
+		if err := qtx.RestoreMemberQuestStreak(ctx, db.RestoreMemberQuestStreakParams{
+			HouseholdID: householdID, MemberID: *row.MemberID, QuestID: row.QuestID, DoneAt: row.DoneAt,
+		}); err != nil {
+			return Completion{}, fmt.Errorf("restore streak: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Completion{}, fmt.Errorf("commit: %w", err)
 	}
 	return Completion{
 		ID:       row.ID,
@@ -594,6 +666,7 @@ func (s *QuestService) insert(ctx context.Context, householdID uuid.UUID, librar
 		Points:      v.points,
 		RepeatDays:  v.repeatDays,
 		Notes:       v.notes,
+		StreakBonus: v.streakBonus,
 	})
 	if err != nil {
 		return QuestView{}, fmt.Errorf("create quest: %w", err)
@@ -603,22 +676,25 @@ func (s *QuestService) insert(ctx context.Context, householdID uuid.UUID, librar
 
 // validQuest is a QuestInput that passed validateQuest.
 type validQuest struct {
-	name       string
-	points     int32
-	repeatDays int32
-	notes      string
+	name        string
+	points      int32
+	repeatDays  int32
+	notes       string
+	streakBonus int32
 }
 
 // validateQuest checks every field and reports each bad one: name 1-200
 // characters, points a whole number >= 0, repeat_days a whole number >= 1,
-// notes at most 2000 characters.
+// notes at most 2000 characters, streak_bonus a whole number >= 0 (absent
+// is 0, no streak bonus).
 func validateQuest(in QuestInput) (validQuest, error) {
 	var v validator
 	out := validQuest{
-		name:       v.text("name", in.Name, 1, 200, false),
-		points:     v.intField("points", in.Points, 0, 0),
-		repeatDays: v.intField("repeat_days", in.RepeatDays, 1, 1),
-		notes:      v.text("notes", in.Notes, 0, 2000, true),
+		name:        v.text("name", in.Name, 1, 200, false),
+		points:      v.intField("points", in.Points, 0, 0),
+		repeatDays:  v.intField("repeat_days", in.RepeatDays, 1, 1),
+		notes:       v.text("notes", in.Notes, 0, 2000, true),
+		streakBonus: v.intField("streak_bonus", in.StreakBonus, 0, 0),
 	}
 	return out, v.err()
 }

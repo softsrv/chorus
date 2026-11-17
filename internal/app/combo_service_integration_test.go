@@ -370,7 +370,7 @@ func (w *comboWorld) markDone(questID, memberID uuid.UUID, at time.Time) {
 // approve approves the completion the chore's latest markDone recorded.
 func (w *comboWorld) approve(questID uuid.UUID) (db.FamilyMember, []app.ComboBonus) {
 	w.t.Helper()
-	_, m, bonuses, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, w.last[questID], "")
+	_, m, bonuses, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, w.last[questID], "")
 	if err != nil {
 		w.t.Fatalf("approve: %v", err)
 	}
@@ -581,7 +581,7 @@ func TestIntegration_ComboBonusPayment(t *testing.T) {
 				t.Fatalf("set %d: %d awards, want %d", i, w.awards(), s.awards)
 			}
 		}
-		if _, _, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, w.last[b], ""); !errors.Is(err, app.ErrNotFound) {
+		if _, _, _, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, w.last[b], ""); !errors.Is(err, app.ErrNotFound) {
 			t.Fatalf("repeat approval: %v, want ErrNotFound", err)
 		}
 		if w.awards() != 2 || w.points(ann) != 3*(10+15)+2*20 {
@@ -611,7 +611,7 @@ func TestIntegration_ComboBonusPayment(t *testing.T) {
 				go func(i int, id uuid.UUID) {
 					defer wg.Done()
 					<-start
-					_, _, bonuses, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, id, "")
+					_, _, bonuses, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, id, "")
 					errs[i], paid[i] = err, len(bonuses)
 				}(i, id)
 			}
@@ -687,7 +687,7 @@ END $$`, fn, w.h.ID)); err != nil {
 			t.Fatalf("create trigger: %v", err)
 		}
 
-		if _, _, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, w.last[b], ""); err == nil {
+		if _, _, _, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, w.last[b], ""); err == nil {
 			t.Fatal("approve with failing award insert succeeded")
 		}
 		if n := w.count(`SELECT count(*) FROM quest_completions WHERE household_id = $1 AND id = $2 AND status = 'pending' AND approved_at IS NULL`, w.h.ID, w.last[b]); n != 1 {
@@ -786,7 +786,7 @@ END $$`, fn, w.h.ID)); err != nil {
 		}
 		// Approving household two's completion through household one is not found.
 		two.markDone(a2, ann2, utc(11, 14, 0))
-		if _, _, _, err := one.quests.Approve(one.ctx, one.admin, one.h.ID, two.last[a2], ""); !errors.Is(err, app.ErrNotFound) {
+		if _, _, _, _, err := one.quests.Approve(one.ctx, one.admin, one.h.ID, two.last[a2], ""); !errors.Is(err, app.ErrNotFound) {
 			t.Fatalf("cross-household approve: %v, want ErrNotFound", err)
 		}
 	})

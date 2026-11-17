@@ -175,3 +175,41 @@ func TestPointsAwardJSON(t *testing.T) {
 		}
 	}
 }
+
+// TestQuestStreakBonusJSON pins that a household quest and a library quest
+// both carry their streak bonus to the client as streak_bonus.
+func TestQuestStreakBonusJSON(t *testing.T) {
+	t.Parallel()
+
+	streakBonus := func(v any) any {
+		t.Helper()
+		data, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("json.Marshal failed: %v", err)
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(data, &raw); err != nil {
+			t.Fatalf("json.Unmarshal failed: %v", err)
+		}
+		got, ok := raw["streak_bonus"]
+		if !ok {
+			t.Fatalf("streak_bonus missing from %s", data)
+		}
+		return got
+	}
+
+	quest := toQuest(app.QuestView{HouseholdQuest: db.HouseholdQuest{
+		ID: uuid.New(), HouseholdID: uuid.New(), Name: "Feed the cat", Points: 3, RepeatDays: 1, StreakBonus: 7,
+	}})
+	if got := streakBonus(quest); got != float64(7) {
+		t.Errorf("quest streak_bonus = %v, want 7", got)
+	}
+	none := toQuest(app.QuestView{HouseholdQuest: db.HouseholdQuest{ID: uuid.New(), Name: "Dishes"}})
+	if got := streakBonus(none); got != float64(0) {
+		t.Errorf("quest without bonus streak_bonus = %v, want 0", got)
+	}
+	lib := toLibraryQuest(db.QuestLibrary{ID: uuid.New(), Name: "Clean the garage", Points: 25, RepeatDays: 30, StreakBonus: 10})
+	if got := streakBonus(lib); got != float64(10) {
+		t.Errorf("library streak_bonus = %v, want 10", got)
+	}
+}

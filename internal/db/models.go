@@ -176,6 +176,7 @@ type HouseholdQuest struct {
 	AvailableAt pgtype.Timestamptz `json:"available_at"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	StreakBonus int32              `json:"streak_bonus"`
 }
 
 type HouseholdReward struct {
@@ -186,6 +187,20 @@ type HouseholdReward struct {
 	Cost        int32              `json:"cost"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+type MemberQuestStreak struct {
+	HouseholdID    uuid.UUID          `json:"household_id"`
+	MemberID       uuid.UUID          `json:"member_id"`
+	QuestID        uuid.UUID          `json:"quest_id"`
+	Count          int32              `json:"count"`
+	LastDoneAt     pgtype.Timestamptz `json:"last_done_at"`
+	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
+	PrevCount      pgtype.Int4        `json:"prev_count"`
+	PrevLastDoneAt pgtype.Timestamptz `json:"prev_last_done_at"`
+	PrevExpiresAt  pgtype.Timestamptz `json:"prev_expires_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
 }
 
 type OauthState struct {
@@ -227,15 +242,17 @@ type QuestCompletion struct {
 	DoneAt      pgtype.Timestamptz `json:"done_at"`
 	ApprovedAt  pgtype.Timestamptz `json:"approved_at"`
 	Status      string             `json:"status"`
+	StreakCount pgtype.Int4        `json:"streak_count"`
 }
 
 type QuestLibrary struct {
-	ID         uuid.UUID          `json:"id"`
-	Name       string             `json:"name"`
-	Points     int32              `json:"points"`
-	RepeatDays int32              `json:"repeat_days"`
-	Notes      string             `json:"notes"`
-	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	ID          uuid.UUID          `json:"id"`
+	Name        string             `json:"name"`
+	Points      int32              `json:"points"`
+	RepeatDays  int32              `json:"repeat_days"`
+	Notes       string             `json:"notes"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	StreakBonus int32              `json:"streak_bonus"`
 }
 
 type RefreshToken struct {

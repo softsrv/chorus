@@ -787,14 +787,16 @@ async function takeCard(h, quests, nameOf, rerender) {
     ));
 }
 
-// comboBonusNotice is the plain-text notice after an approval that paid combo
-// bonuses (the approve response's combo_bonuses), naming the chore and every
-// combo with its bonus; null when none were paid (or for a send-back).
-function comboBonusNotice(q, res) {
+// approvalNotice is the plain-text notice after an approval that paid
+// bonuses: every combo in the approve response's combo_bonuses with its bonus,
+// and the streak bonus ('Streak bonus +N (streak n)') when streak_bonus > 0.
+// It names the chore; null when no bonus was paid (or for a send-back).
+function approvalNotice(q, res) {
   const bonuses = (res && res.combo_bonuses) || [];
-  if (bonuses.length === 0) return null;
-  const paid = bonuses.map((b) => `combo bonus '${b.name}' +${b.bonus_points}`).join(', ');
-  return `Approved '${q.name}' for ${q.member_name}: +${q.points} points, ${paid}`;
+  const paid = bonuses.map((b) => `combo bonus '${b.name}' +${b.bonus_points}`);
+  if (res && res.streak_bonus > 0) paid.push(`Streak bonus +${res.streak_bonus} (streak ${res.streak_count})`);
+  if (paid.length === 0) return null;
+  return `Approved '${q.name}' for ${q.member_name}: +${q.points} points, ${paid.join(', ')}`;
 }
 
 // approvalsCard is the administrator's list of quests marked done. Loading,
@@ -840,7 +842,7 @@ async function approvalsCard(h, members, rerender) {
       if (msg) { rerender(msg); return; }
       throw err;
     }
-    rerender(comboBonusNotice(q, res));
+    rerender(approvalNotice(q, res));
   }, $err);
 
   const rows = pending.map((q) => el('li', { class: 'flex flex-wrap items-center gap-2 py-2 border-b border-base-300' },
@@ -873,6 +875,7 @@ function manageQuestsCard(h, quests, library, page, rerender) {
     name: v.name,
     points: toNum(v.points),
     repeat_days: toNum(v.repeat_days),
+    streak_bonus: toNum(v.streak_bonus),
     notes: v.notes,
   });
 
@@ -880,15 +883,19 @@ function manageQuestsCard(h, quests, library, page, rerender) {
     { name: 'name', label: 'Name', required: true, value: q.name },
     { name: 'points', label: 'Points', type: 'number', value: q.points ?? '' },
     { name: 'repeat_days', label: 'Repeats after (days, back at midnight)', type: 'number', value: q.repeat_days ?? '' },
+    { name: 'streak_bonus', label: 'Streak bonus', type: 'number', value: q.streak_bonus ?? '' },
     { name: 'notes', label: 'Notes', type: 'textarea', value: q.notes ?? '' },
   ];
+
+  // questSummary is a quest's or library quest's points, days and streak bonus.
+  const questSummary = (q) => `${q.points} points · ${q.repeat_days} day(s) · streak bonus ${q.streak_bonus ?? 0}`;
 
   const rows = quests.map((q) => {
 
     const $row = el('li', { class: 'flex flex-wrap items-center gap-2 py-2 border-b border-base-300' },
       el('div', { class: 'flex-1 min-w-0' },
         el('div', { class: 'font-medium', text: q.name }),
-        el('div', { class: 'text-xs opacity-60', text: `${q.points} points · ${q.repeat_days} day(s)` }),
+        el('div', { class: 'text-xs opacity-60', text: questSummary(q) }),
         q.notes ? el('div', { class: 'text-xs opacity-70 mt-1', text: q.notes }) : null),
       unlocked && el('button', {
         class: 'btn btn-ghost btn-xs', text: 'Edit',
@@ -921,7 +928,7 @@ function manageQuestsCard(h, quests, library, page, rerender) {
   const libraryRows = (library.items || []).map((item) => el('li', { class: 'flex items-center justify-between py-1.5 border-b border-base-300 text-sm' },
     el('div', { class: 'flex-1 min-w-0' },
       el('span', { class: 'font-medium', text: item.name }),
-      el('span', { class: 'text-xs opacity-60 ml-2', text: `${item.points} points · ${item.repeat_days} day(s)` }),
+      el('span', { class: 'text-xs opacity-60 ml-2', text: questSummary(item) }),
       item.notes ? el('div', { class: 'text-xs opacity-70', text: item.notes }) : null),
     unlocked && el('button', {
       class: 'btn btn-ghost btn-xs', text: 'Add',

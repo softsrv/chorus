@@ -163,20 +163,34 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get alice member before outsider attempts: %v", err)
 	}
+	var aliceStreakCountBefore, aliceStreakRowsBefore int
+	if err := pool.QueryRow(ctx, `SELECT count(*), COALESCE(MAX(count), 0) FROM member_quest_streaks WHERE household_id = $1 AND member_id = $2 AND quest_id = $3`, h.ID, aliceMember.ID, alicePending.ID).Scan(&aliceStreakRowsBefore, &aliceStreakCountBefore); err != nil {
+		t.Fatalf("get alice streak before outsider attempts: %v", err)
+	}
+	// Alice's own mark-done above started her streak, so the after-check below
+	// compares against a real row and fails if an outsider moves it.
+	if aliceStreakRowsBefore != 1 || aliceStreakCountBefore < 1 {
+		t.Fatalf("alice streak before outsider attempts = %d rows, count %d; want 1 row with count >= 1", aliceStreakRowsBefore, aliceStreakCountBefore)
+	}
+	var malloryStreakRowsBefore int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM member_quest_streaks WHERE household_id = $1`, mh.ID).Scan(&malloryStreakRowsBefore); err != nil || malloryStreakRowsBefore != 0 {
+		t.Fatalf("mallory streak rows before outsider attempts = %d, want 0: %v", malloryStreakRowsBefore, err)
+	}
 	_, checks["abandon quest"] = quests.Abandon(ctx, mallory, h.ID, alicePending.ID, asAlice)
 	_, checks["mark quest done"] = quests.MarkDone(ctx, mallory, h.ID, alicePending.ID, asAlice)
+	_, checks["mark quest done as own member"] = quests.MarkDone(ctx, mallory, h.ID, alicePending.ID, app.MemberAction{MemberID: malloryMember.ID})
 	_, checks["list pending quests"] = quests.ListPending(ctx, mallory, h.ID, "")
-	_, _, _, checks["approve quest"] = quests.Approve(ctx, mallory, h.ID, aliceCompletionID, "")
+	_, _, _, _, checks["approve quest"] = quests.Approve(ctx, mallory, h.ID, aliceCompletionID, "")
 	_, checks["reject quest"] = quests.Reject(ctx, mallory, h.ID, aliceCompletionID, "")
 	_, checks["abandon quest via own household"] = quests.Abandon(ctx, mallory, mh.ID, alicePending.ID, asAlice)
 	_, checks["abandon quest via own household as own member"] = quests.Abandon(ctx, mallory, mh.ID, alicePending.ID, app.MemberAction{MemberID: malloryMember.ID})
 	_, checks["mark quest done via own household"] = quests.MarkDone(ctx, mallory, mh.ID, alicePending.ID, asAlice)
 	_, checks["mark quest done via own household as own member"] = quests.MarkDone(ctx, mallory, mh.ID, alicePending.ID, app.MemberAction{MemberID: malloryMember.ID})
-	_, _, _, checks["approve quest via own household"] = quests.Approve(ctx, mallory, mh.ID, aliceCompletionID, "")
+	_, _, _, _, checks["approve quest via own household"] = quests.Approve(ctx, mallory, mh.ID, aliceCompletionID, "")
 	_, checks["reject quest via own household"] = quests.Reject(ctx, mallory, mh.ID, aliceCompletionID, "")
-	_, _, _, checks["approve foreign completion via own household"] = quests.Approve(ctx, mallory, mh.ID, foreignCompletionID, "")
+	_, _, _, _, checks["approve foreign completion via own household"] = quests.Approve(ctx, mallory, mh.ID, foreignCompletionID, "")
 	_, checks["reject foreign completion via own household"] = quests.Reject(ctx, mallory, mh.ID, foreignCompletionID, "")
-	_, _, _, checks["approve foreign completion via alice household"] = quests.Approve(ctx, mallory, h.ID, foreignCompletionID, "")
+	_, _, _, _, checks["approve foreign completion via alice household"] = quests.Approve(ctx, mallory, h.ID, foreignCompletionID, "")
 	_, checks["reject foreign completion via alice household"] = quests.Reject(ctx, mallory, h.ID, foreignCompletionID, "")
 
 	// CLM-9: Mallory's cross-household Approve/Reject/MarkDone attempts on Alice's pending quest
@@ -227,6 +241,32 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	}
 	if rows, err := quests.ListPending(ctx, mallory, mh.ID, ""); err != nil || len(rows) != 0 {
 		t.Errorf("mallory's own pending list shows other households' quests: %+v, %v", rows, err)
+	}
+	// CLM-14: no outsider MarkDone, Approve or Reject moved Alice's streak,
+	// and no streak row landed in (or crossed into) Mallory's household.
+	var aliceStreakRowsAfter, aliceStreakCountAfter int
+	if err := pool.QueryRow(ctx, `SELECT count(*), COALESCE(MAX(count), 0) FROM member_quest_streaks WHERE household_id = $1 AND member_id = $2 AND quest_id = $3`, h.ID, aliceMember.ID, alicePending.ID).Scan(&aliceStreakRowsAfter, &aliceStreakCountAfter); err != nil {
+		t.Fatalf("get alice streak after outsider attempts: %v", err)
+	}
+	if aliceStreakRowsAfter != aliceStreakRowsBefore {
+		t.Errorf("alice streak rows after outsider attempts = %d, want %d (unchanged)", aliceStreakRowsAfter, aliceStreakRowsBefore)
+	}
+	if aliceStreakCountAfter != aliceStreakCountBefore {
+		t.Errorf("alice streak count after outsider attempts = %d, want %d (unchanged)", aliceStreakCountAfter, aliceStreakCountBefore)
+	}
+	var malloryStreakRowsAfter int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM member_quest_streaks WHERE household_id = $1`, mh.ID).Scan(&malloryStreakRowsAfter); err != nil {
+		t.Fatalf("get mallory streak rows after outsider attempts: %v", err)
+	}
+	if malloryStreakRowsAfter != 0 {
+		t.Errorf("mallory household streak rows after outsider attempts = %d, want 0", malloryStreakRowsAfter)
+	}
+	var crossedStreakRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM member_quest_streaks WHERE household_id <> $1 AND (member_id = $2 OR quest_id = $3)`, h.ID, aliceMember.ID, alicePending.ID).Scan(&crossedStreakRows); err != nil {
+		t.Fatalf("get cross-household streak rows: %v", err)
+	}
+	if crossedStreakRows != 0 {
+		t.Errorf("streak rows for alice's member or quest outside her household = %d, want 0", crossedStreakRows)
 	}
 	// Family member and admin-pin isolation checks
 	_, checks["list family members"] = familySvc.List(ctx, mallory, h.ID)
@@ -590,7 +630,7 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	var bobBonusesTotal int
 	for _, p := range bobPendingList {
 		if p.QuestID == bobDishes.ID || p.QuestID == bobWipe.ID {
-			_, _, bonuses, err := quests.Approve(ctx, bob, bh.ID, p.ID, "")
+			_, _, bonuses, _, err := quests.Approve(ctx, bob, bh.ID, p.ID, "")
 			if err != nil {
 				t.Fatalf("Approve bob completion %s: %v", p.ID, err)
 			}
@@ -626,7 +666,7 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		t.Fatal("alice dishes completion not found in pending list")
 	}
 
-	_, _, aliceBonuses, err := quests.Approve(ctx, alice, h.ID, aliceDishesCompID, "")
+	_, _, aliceBonuses, _, err := quests.Approve(ctx, alice, h.ID, aliceDishesCompID, "")
 	if err != nil {
 		t.Fatalf("Approve alice dishes completion: %v", err)
 	}
@@ -704,6 +744,22 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	}
 	_ = aliceDelTx.Rollback(ctx)
 
+	// Capture Bob's PointsHistory right before Alice deletes household A.
+	bobHistBefore, err := familySvc.PointsHistory(ctx, bob, bh.ID, bobMember.ID, "4321", "", 50, 0)
+	if err != nil {
+		t.Fatalf("bob PointsHistory before alice delete: %v", err)
+	}
+	var foundBobAward bool
+	for _, a := range bobHistBefore {
+		if a.ID == bobAwardID {
+			foundBobAward = true
+			break
+		}
+	}
+	if !foundBobAward {
+		t.Fatalf("bob points history before alice delete missing award %v: %+v", bobAwardID, bobHistBefore)
+	}
+
 	// Alice deletes household A via HouseholdService.Delete
 	if err := households.Delete(ctx, alice, h.ID); err != nil {
 		t.Fatalf("alice Delete household A: %v", err)
@@ -749,8 +805,16 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		t.Errorf("bob reward changed: %+v, %v", gotBobReward, err)
 	}
 	gotBobHist, err := familySvc.PointsHistory(ctx, bob, bh.ID, bobMember.ID, "4321", "", 50, 0)
-	if err != nil || len(gotBobHist) != 1 || gotBobHist[0].ID != bobAwardID {
-		t.Errorf("bob points history changed or missing after alice delete: %+v, %v", gotBobHist, err)
+	if err != nil {
+		t.Errorf("bob points history changed or missing after alice delete: %v", err)
+	} else if len(gotBobHist) != len(bobHistBefore) {
+		t.Errorf("bob points history length changed after alice delete: got %d, want %d", len(gotBobHist), len(bobHistBefore))
+	} else {
+		for i := range bobHistBefore {
+			if gotBobHist[i].ID != bobHistBefore[i].ID {
+				t.Errorf("bob points history award %d id changed: got %v, want %v", i, gotBobHist[i].ID, bobHistBefore[i].ID)
+			}
+		}
 	}
 
 	// Assert Bob's household_provisioned_at is unchanged.

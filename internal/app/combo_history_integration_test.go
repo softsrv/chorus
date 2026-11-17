@@ -212,7 +212,7 @@ END $$`, fn, w.h.ID)); err != nil {
 		t.Fatalf("create trigger: %v", err)
 	}
 
-	if _, _, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, w.last[b], ""); err == nil {
+	if _, _, _, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, w.last[b], ""); err == nil {
 		t.Fatal("approve with failing combo history insert succeeded")
 	}
 	if n := w.count(`SELECT count(*) FROM quest_completions WHERE household_id = $1 AND id = $2 AND status = 'pending'`, w.h.ID, w.last[b]); n != 1 {
@@ -246,7 +246,7 @@ func TestIntegration_NoComboApprovalUnchanged(t *testing.T) {
 	doneAt := utc(10, 14, 0)
 	w.markDone(chore, ann, doneAt)
 	first := w.last[chore]
-	approved, m, bonuses, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, first, "")
+	approved, m, bonuses, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, first, "")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestIntegration_NoComboApprovalUnchanged(t *testing.T) {
 		t.Fatalf("history %+v, want only the quest entry", hist)
 	}
 
-	if _, _, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, first, ""); !errors.Is(err, app.ErrNotFound) {
+	if _, _, _, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, first, ""); !errors.Is(err, app.ErrNotFound) {
 		t.Fatalf("repeat approval: %v, want ErrNotFound", err)
 	}
 	if w.points(ann) != 10 || len(w.history(ann)) != 1 {
@@ -283,7 +283,7 @@ func TestIntegration_NoComboApprovalUnchanged(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			_, _, _, errs[i] = w.quests.Approve(w.ctx, w.admin, w.h.ID, second, "")
+			_, _, _, _, errs[i] = w.quests.Approve(w.ctx, w.admin, w.h.ID, second, "")
 		}(i)
 	}
 	close(start)

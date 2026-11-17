@@ -566,7 +566,7 @@ func TestIntegration_RemoveMemberHoldingQuests(t *testing.T) {
 	if warmupCompletion == uuid.Nil {
 		t.Fatalf("Ben's warmup completion not pending: %+v", waiting)
 	}
-	if _, _, _, err := quests.Approve(ctx, admin, h.ID, warmupCompletion, ""); err != nil {
+	if _, _, _, _, err := quests.Approve(ctx, admin, h.ID, warmupCompletion, ""); err != nil {
 		t.Fatalf("approve warmup: %v", err)
 	}
 	if _, err := quests.Accept(ctx, admin, h.ID, others.ID, benAct); err != nil {
@@ -747,7 +747,7 @@ func TestIntegration_ApproveRacesRemoveMember(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, _, _, approveErr = quests.Approve(ctx, admin, h.ID, waiting[0].ID, "")
+			_, _, _, _, approveErr = quests.Approve(ctx, admin, h.ID, waiting[0].ID, "")
 		}()
 		go func() {
 			defer wg.Done()

@@ -688,13 +688,13 @@ test('CLM-3: home view with no households shows the New household form as the pr
 
 // combos CLM-5/CLM-6: the approve response's combo_bonuses becomes a plain-text
 // notice naming the chore and every combo paid; none paid, no notice.
-function approvalWithBonuses(bonuses) {
+function approvalWithBonuses(bonuses, streak = {}) {
   srv.adminPinSet = true;
   let items = [{ completion_id: 'c1', quest_id: 'q1', name: 'Wipe counters', points: 10, member_id: 'm-a', member_name: 'Sam', done_at: '2025-01-03T00:00:00Z' }];
   srv.pending = () => [200, { items }];
   srv.extra[`POST ${HP}/quest-completions/c1/approve`] = () => {
     items = [];
-    return [200, { completion: { id: 'c1', quest_id: 'q1', member_id: 'm-a', done_at: '2025-01-03T00:00:00Z', approved_at: '2025-01-04T00:00:00Z', status: 'approved' }, member: srv.members[0], combo_bonuses: bonuses }];
+    return [200, { completion: { id: 'c1', quest_id: 'q1', member_id: 'm-a', done_at: '2025-01-03T00:00:00Z', approved_at: '2025-01-04T00:00:00Z', status: 'approved' }, member: srv.members[0], combo_bonuses: bonuses, streak_bonus: 0, streak_count: 1, ...streak }];
   };
 }
 
@@ -737,6 +737,81 @@ test('combos CLM-6: a combo name with markup stays literal text in the bonus not
   assert.ok(span.childNodes[0] instanceof Text);
   assert.ok(span.childNodes[0].data.includes(`combo bonus '${evil}' +5`));
   assert.equal(walk(env.$app).filter((n) => n.tagName === 'IMG').length, 0);
+});
+
+// ── streaks CLM-13: the approve response's streak bonus is told to the admin ──
+
+test('streaks CLM-13: an approval that paid a streak bonus shows Streak bonus +N (streak n) as text', async () => {
+  approvalWithBonuses([], { streak_bonus: 5, streak_count: 4 });
+  await loadApp();
+  await unlockAdmin('9999');
+  await click(buttons(env.$app, 'Approve')[0]);
+  const [notice] = alerts();
+  assert.ok(notice, 'a notice is shown');
+  const span = walk(notice).find((n) => n.tagName === 'SPAN');
+  assert.equal(span.childNodes.length, 1);
+  assert.ok(span.childNodes[0] instanceof Text, 'notice is a text node');
+  assert.equal(span.childNodes[0].data, "Approved 'Wipe counters' for Sam: +10 points, Streak bonus +5 (streak 4)");
+  assert.match(text(), /Nothing waiting for approval\./);
+});
+
+test('streaks CLM-13: streak and combo bonuses paid together are both named in one notice', async () => {
+  approvalWithBonuses([{ combo_id: 'c1', name: 'Kitchen Crew', bonus_points: 20 }], { streak_bonus: 10, streak_count: 3 });
+  await loadApp();
+  await unlockAdmin('9999');
+  await click(buttons(env.$app, 'Approve')[0]);
+  const notice = alerts().map((n) => n.textContent).join('|');
+  assert.match(notice, /\+10 points, combo bonus 'Kitchen Crew' \+20, Streak bonus \+10 \(streak 3\)/);
+});
+
+test('streaks CLM-13: streak_bonus 0 shows no notice, even at a streak count of 3 or more', async () => {
+  approvalWithBonuses([], { streak_bonus: 0, streak_count: 5 });
+  await loadApp();
+  await unlockAdmin('9999');
+  await click(buttons(env.$app, 'Approve')[0]);
+  assert.doesNotMatch(text(), /Streak bonus \+/);
+  assert.equal(alerts().length, 0);
+});
+
+// ── streaks CLM-11: the quest form's streak bonus, and the rows that show it ──
+
+test('streaks CLM-11: the quest form sends streak_bonus as a number; quest, edit and library rows show the bonus', async () => {
+  srv.quests = [quest({ streak_bonus: 7 })];
+  srv.extra['GET /quest-library'] = () => [200, { items: [
+    { id: 'ql1', name: 'Make your bed', points: 5, repeat_days: 1, notes: '', streak_bonus: 5 },
+    { id: 'ql2', name: 'Clean the garage', points: 25, repeat_days: 30, notes: '', streak_bonus: 10 },
+  ] }];
+  srv.extra[`POST ${HP}/quests`] = (r) => [201, quest({ id: 'q2', ...r.body })];
+  srv.extra[`PUT ${HP}/quests/q1`] = (r) => [200, quest(r.body)];
+  await loadApp();
+
+  const manage = walk(env.$app).find((n) => n.tagName === 'H3' && n.textContent === 'Manage quests').parentNode;
+  assert.match(manage.textContent, /5 points · 1 day\(s\) · streak bonus 7/);
+  const lib = section(env.$app, 'Quest Library');
+  assert.match(lib, /Make your bed5 points · 1 day\(s\) · streak bonus 5/);
+  assert.match(lib, /Clean the garage25 points · 30 day\(s\) · streak bonus 10/);
+
+  const $add = buttons(env.$app, 'Add quest')[0].parentNode;
+  const input = ($f, name) => walk($f).find((n) => (n.tagName === 'INPUT' || n.tagName === 'TEXTAREA') && n.name === name);
+  const label = input($add, 'streak_bonus').parentNode.childNodes[0].textContent;
+  assert.equal(label, 'Streak bonus');
+  assert.equal(input($add, 'streak_bonus').type, 'number');
+  input($add, 'name').value = 'Water plants';
+  input($add, 'points').value = '3';
+  input($add, 'repeat_days').value = '1';
+  input($add, 'streak_bonus').value = '5';
+  await submit($add);
+  const post = calls.filter((c) => c.method === 'POST' && c.path === `${HP}/quests`).at(-1);
+  assert.equal(post.body.streak_bonus, 5, "'5' is sent as the number 5");
+
+  await click(buttons(walk(env.$app).find((n) => n.tagName === 'H3' && n.textContent === 'Manage quests').parentNode, 'Edit')[0]);
+  const $edit = buttons(env.$app, 'Save')[0].parentNode;
+  assert.equal(String(input($edit, 'streak_bonus').value), '7', 'edit form starts from the quest\'s bonus');
+  input($edit, 'streak_bonus').value = '-1';
+  await submit($edit);
+  const put = calls.filter((c) => c.method === 'PUT' && c.path === `${HP}/quests/q1`).at(-1);
+  assert.equal(put.body.streak_bonus, -1, 'the server, not the client, judges the value');
+  noInlineStyle();
 });
 
 // ── fix CLM-1: the combos read is the combos card's alone ───────────────────
