@@ -331,6 +331,14 @@ func (h *FamilyMemberHandler) PointsHistory(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, err)
 		return
 	}
+	if limit < 1 {
+		limit = 1
+	} else if limit > 100 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	memberPin := r.Header.Get("X-Member-PIN")
 	adminPin := r.Header.Get("X-Admin-PIN")
 	awards, err := h.svc.PointsHistory(r.Context(), currentUser(r), hid, mid, memberPin, adminPin, int32(limit), int32(offset))
