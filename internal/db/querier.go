@@ -12,22 +12,24 @@ import (
 )
 
 type Querier interface {
-	// Puts a quest back in the pool. Only its current holder can abandon it, and
-	// not while it waits for approval.
+	// Puts a quest back in the pool. Only its current holder can abandon it.
 	AbandonQuest(ctx context.Context, arg AbandonQuestParams) (HouseholdQuest, error)
 	AddHouseholdMember(ctx context.Context, arg AddHouseholdMemberParams) error
 	AddMemberPoints(ctx context.Context, arg AddMemberPointsParams) (FamilyMember, error)
-	// Completes a pending quest. The pending row is locked first, and the
-	// done_at check is re-read under the lock, so of two concurrent approvals
-	// exactly one gets a row; the households row is read, not locked. The quest
-	// comes back at local midnight in the household's timezone, repeat_days days
-	// after the local day it was marked done (done_at), however late the approval.
-	// credited_member_id is the holder to credit, read before claimed_by is cleared;
-	// credited_done_at is when they marked it done, read before done_at is cleared
-	// (it decides the household day the completion counts toward for combos).
-	ApproveQuest(ctx context.Context, arg ApproveQuestParams) (ApproveQuestRow, error)
+	// Approves one pending completion. The completion is locked first and its
+	// status re-read under the lock, so of two concurrent approvals exactly one
+	// gets a row. The quest is not touched: its cooldown already started at
+	// mark-done. points is the chore's current points, to credit to member_id.
+	// member_id must match the member the caller already locked.
+	ApproveCompletion(ctx context.Context, arg ApproveCompletionParams) (ApproveCompletionRow, error)
+	// Cancels every completion of the member still waiting for approval. No
+	// points move. As on reject, a quest whose running cooldown one of those
+	// completions started (the quest's completed_at is its done_at, available_at
+	// still ahead) is available again right away: the chore was never approved,
+	// so it does not sit resting. Cooldowns started by anyone else stay.
+	CancelMemberPendingCompletions(ctx context.Context, arg CancelMemberPendingCompletionsParams) error
 	// Counts one completion per chore of the combo toward the award: for each
-	// chore, the member's earliest completion on award_day (household-local) not
+	// chore, the member's earliest approved completion on award_day (household-local) not
 	// yet counted toward this combo. No ON CONFLICT: a completion counted twice
 	// toward one combo is a unique violation that rolls the approval back.
 	ClaimComboCompletions(ctx context.Context, arg ClaimComboCompletionsParams) (int64, error)
@@ -87,9 +89,15 @@ type Querier interface {
 	GetHouseholdForMember(ctx context.Context, arg GetHouseholdForMemberParams) (GetHouseholdForMemberRow, error)
 	GetHouseholdMember(ctx context.Context, arg GetHouseholdMemberParams) (HouseholdMember, error)
 	GetHouseholdQuest(ctx context.Context, arg GetHouseholdQuestParams) (HouseholdQuest, error)
+	// One quest with awaiting_approval, as ListHouseholdQuests reads it.
+	GetHouseholdQuestView(ctx context.Context, arg GetHouseholdQuestViewParams) (GetHouseholdQuestViewRow, error)
 	GetHouseholdReward(ctx context.Context, arg GetHouseholdRewardParams) (HouseholdReward, error)
 	GetOldestRecentVerificationCode(ctx context.Context, userID uuid.UUID) (pgtype.Timestamptz, error)
 	GetPasswordResetTokenByHash(ctx context.Context, tokenHash string) (PasswordResetToken, error)
+	// The member of a pending completion, read without a lock so Approve can
+	// lock that member's row before it locks the completion (the order
+	// FamilyService.Remove uses).
+	GetPendingCompletionMember(ctx context.Context, arg GetPendingCompletionMemberParams) (*uuid.UUID, error)
 	GetQuestLibraryItem(ctx context.Context, id uuid.UUID) (QuestLibrary, error)
 	GetRefreshTokenByHash(ctx context.Context, tokenHash string) (RefreshToken, error)
 	GetRefreshTokenByID(ctx context.Context, id uuid.UUID) (RefreshToken, error)
@@ -110,18 +118,18 @@ type Querier interface {
 	InsertEmailVerificationCode(ctx context.Context, arg InsertEmailVerificationCodeParams) (EmailVerificationCode, error)
 	InsertOAuthState(ctx context.Context, arg InsertOAuthStateParams) (OauthState, error)
 	InsertPasswordResetToken(ctx context.Context, arg InsertPasswordResetTokenParams) (PasswordResetToken, error)
-	// Records one approved completion: who did the chore and when they marked it
-	// done. Combos are judged from these rows.
-	InsertQuestCompletion(ctx context.Context, arg InsertQuestCompletionParams) (QuestCompletion, error)
 	InsertRefreshToken(ctx context.Context, arg InsertRefreshTokenParams) (RefreshToken, error)
 	InsertSignInHandoff(ctx context.Context, arg InsertSignInHandoffParams) (GoogleSignInHandoff, error)
 	ListActiveRefreshTokensByUserID(ctx context.Context, userID uuid.UUID) ([]RefreshToken, error)
 	ListComboQuests(ctx context.Context, arg ListComboQuestsParams) ([]uuid.UUID, error)
 	// The combos containing the quest that the member has just finished: the
-	// combo still has two or more chores, and every one of them has a completion
-	// by the member, not yet counted toward this combo, whose done_at falls on the
-	// same household-local day (households.timezone) as done_at. award_day is
-	// that day; chore_count is how many completions paying it will claim.
+	// combo still has two or more chores, the member has not yet been paid it for
+	// this household-local day (one award per combo, member and day), and every
+	// one of its chores has an approved completion by the member, not yet counted
+	// toward this combo, whose done_at falls on the same household-local day
+	// (households.timezone) as done_at. award_day is that day; chore_count is how
+	// many completions paying it will claim. The caller holds the combo locks
+	// (LockCombosForQuest), so the award check cannot race another payer.
 	ListCombosCompletedByMemberOnDay(ctx context.Context, arg ListCombosCompletedByMemberOnDayParams) ([]ListCombosCompletedByMemberOnDayRow, error)
 	// Events overlapping [range_start, range_end).
 	ListEventsInRange(ctx context.Context, arg ListEventsInRangeParams) ([]Event, error)
@@ -135,12 +143,13 @@ type Querier interface {
 	// by the service layer first; the household_id predicate guarantees a combo
 	// or chore ID from another household can never be read or modified through this one.
 	ListHouseholdCombos(ctx context.Context, householdID uuid.UUID) ([]Combo, error)
-	ListHouseholdQuests(ctx context.Context, arg ListHouseholdQuestsParams) ([]HouseholdQuest, error)
+	// awaiting_approval: the quest has a completion waiting for the administrator.
+	ListHouseholdQuests(ctx context.Context, arg ListHouseholdQuestsParams) ([]ListHouseholdQuestsRow, error)
 	ListHouseholdRewards(ctx context.Context, householdID uuid.UUID) ([]HouseholdReward, error)
 	ListHouseholdsForUser(ctx context.Context, userID uuid.UUID) ([]ListHouseholdsForUserRow, error)
-	// Quests waiting for approval, oldest first, with the name of the member who
-	// holds each one.
-	ListPendingQuests(ctx context.Context, householdID uuid.UUID) ([]ListPendingQuestsRow, error)
+	// Completions waiting for approval, one row each, oldest mark-done first,
+	// with the chore's name and points and the name of the member who did it.
+	ListPendingCompletions(ctx context.Context, householdID uuid.UUID) ([]ListPendingCompletionsRow, error)
 	// Household quest queries are scoped by household_id. Membership is checked
 	// by the service layer first; the household_id predicate guarantees a quest ID
 	// from another household can never be read or modified through this one.
@@ -166,21 +175,30 @@ type Querier interface {
 	MarkGoogleCalendarConnectionBroken(ctx context.Context, userID uuid.UUID) (int64, error)
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
 	MarkPasswordResetTokenUsed(ctx context.Context, id uuid.UUID) (int64, error)
-	// The holder marks the quest done; it then waits for the administrator.
-	// No points move here.
-	MarkQuestDone(ctx context.Context, arg MarkQuestDoneParams) (HouseholdQuest, error)
+	// The holder marks the quest done. In one statement the quest is released
+	// and starts its cooldown from now (quest_next_available_at: local midnight
+	// in the household's timezone, repeat_days days after today), and a pending
+	// completion recording the member and the mark-done time is inserted for the
+	// administrator. NOW() is one instant per transaction, so completed_at equals
+	// the completion's done_at. A quest the member does not hold matches no row
+	// and inserts nothing. No points move here.
+	MarkQuestDone(ctx context.Context, arg MarkQuestDoneParams) (MarkQuestDoneRow, error)
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
 	MarkVerificationCodeUsed(ctx context.Context, id uuid.UUID) (int64, error)
+	// Whether the quest has a completion waiting for the administrator.
+	QuestHasPendingCompletion(ctx context.Context, arg QuestHasPendingCompletionParams) (bool, error)
 	// Single use: conditional on used_at IS NULL and unexpired, so two concurrent
 	// redemptions can't both succeed.
 	RedeemSignInHandoff(ctx context.Context, codeHash string) (uuid.UUID, error)
-	// Sends a pending quest back to its holder: it stays theirs, unfinished.
-	RejectQuest(ctx context.Context, arg RejectQuestParams) (HouseholdQuest, error)
+	// Rejects one pending completion: no points. If it started the quest's
+	// running cooldown (the quest's completed_at is its done_at) and that
+	// cooldown has not ended, the cooldown is cancelled so the chore is available
+	// again right away. Other completions and the quest's holder are untouched.
+	RejectCompletion(ctx context.Context, arg RejectCompletionParams) (RejectCompletionRow, error)
 	// Re-arms first-sign-in provisioning for a user who has no household left.
 	ReleaseHouseholdProvisioning(ctx context.Context, id uuid.UUID) error
-	// Returns every quest the member holds to the pool, a quest awaiting approval
-	// included. done_at is cleared with the holder, so the done_at-needs-a-holder
-	// CHECK holds. No points move.
+	// Returns every quest the member holds to the pool. done_at is cleared with
+	// the holder, so the done_at-needs-a-holder CHECK holds. No points move.
 	ReleaseMemberQuests(ctx context.Context, arg ReleaseMemberQuestsParams) error
 	RenameFamilyMember(ctx context.Context, arg RenameFamilyMemberParams) (FamilyMember, error)
 	ResetLoginAttempts(ctx context.Context, id uuid.UUID) error

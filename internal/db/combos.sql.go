@@ -22,6 +22,7 @@ CROSS JOIN LATERAL (
     WHERE qc.household_id = cq.household_id
       AND qc.quest_id = cq.quest_id
       AND qc.member_id = $2
+      AND qc.status = 'approved'
       AND (qc.done_at AT TIME ZONE h.timezone)::date = $3::date
       AND NOT EXISTS (
           SELECT 1 FROM combo_award_completions cac
@@ -35,14 +36,14 @@ WHERE cq.household_id = $4 AND cq.combo_id = $5
 
 type ClaimComboCompletionsParams struct {
 	ComboAwardID uuid.UUID   `json:"combo_award_id"`
-	MemberID     uuid.UUID   `json:"member_id"`
+	MemberID     *uuid.UUID  `json:"member_id"`
 	AwardDay     pgtype.Date `json:"award_day"`
 	HouseholdID  uuid.UUID   `json:"household_id"`
 	ComboID      uuid.UUID   `json:"combo_id"`
 }
 
 // Counts one completion per chore of the combo toward the award: for each
-// chore, the member's earliest completion on award_day (household-local) not
+// chore, the member's earliest approved completion on award_day (household-local) not
 // yet counted toward this combo. No ON CONFLICT: a completion counted twice
 // toward one combo is a unique violation that rolls the approval back.
 func (q *Queries) ClaimComboCompletions(ctx context.Context, arg ClaimComboCompletionsParams) (int64, error) {
@@ -223,42 +224,6 @@ func (q *Queries) InsertComboQuest(ctx context.Context, arg InsertComboQuestPara
 	return err
 }
 
-const insertQuestCompletion = `-- name: InsertQuestCompletion :one
-INSERT INTO quest_completions (id, household_id, quest_id, member_id, done_at)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING id, household_id, quest_id, member_id, done_at, approved_at
-`
-
-type InsertQuestCompletionParams struct {
-	ID          uuid.UUID          `json:"id"`
-	HouseholdID uuid.UUID          `json:"household_id"`
-	QuestID     uuid.UUID          `json:"quest_id"`
-	MemberID    uuid.UUID          `json:"member_id"`
-	DoneAt      pgtype.Timestamptz `json:"done_at"`
-}
-
-// Records one approved completion: who did the chore and when they marked it
-// done. Combos are judged from these rows.
-func (q *Queries) InsertQuestCompletion(ctx context.Context, arg InsertQuestCompletionParams) (QuestCompletion, error) {
-	row := q.db.QueryRow(ctx, insertQuestCompletion,
-		arg.ID,
-		arg.HouseholdID,
-		arg.QuestID,
-		arg.MemberID,
-		arg.DoneAt,
-	)
-	var i QuestCompletion
-	err := row.Scan(
-		&i.ID,
-		&i.HouseholdID,
-		&i.QuestID,
-		&i.MemberID,
-		&i.DoneAt,
-		&i.ApprovedAt,
-	)
-	return i, err
-}
-
 const listComboQuests = `-- name: ListComboQuests :many
 SELECT quest_id FROM combo_quests
 WHERE household_id = $1 AND combo_id = $2
@@ -311,6 +276,11 @@ WHERE c.household_id = $1
   AND (SELECT count(*) FROM combo_quests n
        WHERE n.household_id = c.household_id AND n.combo_id = c.id) >= 2
   AND NOT EXISTS (
+      SELECT 1 FROM combo_awards ca
+      WHERE ca.household_id = c.household_id AND ca.combo_id = c.id
+        AND ca.member_id = $3 AND ca.award_day = d.local_day
+  )
+  AND NOT EXISTS (
       SELECT 1 FROM combo_quests cq
       WHERE cq.household_id = c.household_id AND cq.combo_id = c.id
         AND NOT EXISTS (
@@ -318,6 +288,7 @@ WHERE c.household_id = $1
             WHERE qc.household_id = c.household_id
               AND qc.quest_id = cq.quest_id
               AND qc.member_id = $3
+              AND qc.status = 'approved'
               AND (qc.done_at AT TIME ZONE d.timezone)::date = d.local_day
               AND NOT EXISTS (
                   SELECT 1 FROM combo_award_completions cac
@@ -344,10 +315,13 @@ type ListCombosCompletedByMemberOnDayRow struct {
 }
 
 // The combos containing the quest that the member has just finished: the
-// combo still has two or more chores, and every one of them has a completion
-// by the member, not yet counted toward this combo, whose done_at falls on the
-// same household-local day (households.timezone) as done_at. award_day is
-// that day; chore_count is how many completions paying it will claim.
+// combo still has two or more chores, the member has not yet been paid it for
+// this household-local day (one award per combo, member and day), and every
+// one of its chores has an approved completion by the member, not yet counted
+// toward this combo, whose done_at falls on the same household-local day
+// (households.timezone) as done_at. award_day is that day; chore_count is how
+// many completions paying it will claim. The caller holds the combo locks
+// (LockCombosForQuest), so the award check cannot race another payer.
 func (q *Queries) ListCombosCompletedByMemberOnDay(ctx context.Context, arg ListCombosCompletedByMemberOnDayParams) ([]ListCombosCompletedByMemberOnDayRow, error) {
 	rows, err := q.db.Query(ctx, listCombosCompletedByMemberOnDay,
 		arg.HouseholdID,

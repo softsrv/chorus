@@ -186,9 +186,10 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("POST /api/v1/households/{householdID}/quests/{questID}/accept", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Accept))))
 	api.Handle("POST /api/v1/households/{householdID}/quests/{questID}/abandon", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Abandon))))
 	api.Handle("POST /api/v1/households/{householdID}/quests/{questID}/done", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.MarkDone))))
-	// Approval is admin-only and, once an admin PIN is set, needs X-Admin-PIN.
-	api.Handle("POST /api/v1/households/{householdID}/quests/{questID}/approve", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Approve))))
-	api.Handle("POST /api/v1/households/{householdID}/quests/{questID}/reject", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Reject))))
+	// Approval is per completion (one per mark-done), admin-only and, once an
+	// admin PIN is set, needs X-Admin-PIN.
+	api.Handle("POST /api/v1/households/{householdID}/quest-completions/{completionID}/approve", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Approve))))
+	api.Handle("POST /api/v1/households/{householdID}/quest-completions/{completionID}/reject", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Reject))))
 
 	// ── Rewards ───────────────────────────────────────────────────────────────
 	// Same rules as quest writes: admin-only, X-Admin-PIN once one is set, on
