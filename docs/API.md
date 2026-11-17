@@ -6,7 +6,7 @@ The contract the iOS/Android apps and the web test client build against. Base pa
 
 - **JSON only.** Request bodies require `Content-Type: application/json`. Unknown fields, trailing data, and bodies over 64 KiB are rejected.
 - **IDs** are UUIDv7 strings. **Timestamps** are RFC 3339 in UTC (`2026-11-05T18:00:00Z`).
-- **PUT is full replacement.** An omitted optional field is cleared. Send the whole object.
+- **PUT is full replacement.** An omitted optional field is cleared (one exception: a quest PUT that omits `streak_bonus` keeps it). Send the whole object.
 - **Lists** return `{"items": [...]}`. Paginated lists also return `next_offset` (`null` on the last page).
 - **Not found vs. forbidden.** Resources in a household you don't belong to return `404`, the same as nonexistent ones. Each household has one login, its admin; a `403` means a PIN check failed (see below).
 - **Errors** always use this shape. Branch on `code`. `message` is for humans and may change.
@@ -112,7 +112,7 @@ Library quest: `id, name, points, repeat_days, notes, streak_bonus`. The library
 | `POST /households/{id}/quests` | `name, points?, repeat_days?, notes?, streak_bonus?` | admin; `X-Admin-PIN` header if set. `points` defaults to 0, `repeat_days` to 1, `streak_bonus` to 0. `201` quest |
 | `POST /households/{id}/quests/from-library` | `library_id` | admin; `X-Admin-PIN` header if set. Copies the library quest's name, points, days, notes and streak bonus; editing the copy never changes the library. `201` quest, `404` for an unknown `library_id` |
 | `GET /households/{id}/quests/{questId}` | none | Any member |
-| `PUT /households/{id}/quests/{questId}` | same as POST | admin; `X-Admin-PIN` header if set. Full replacement |
+| `PUT /households/{id}/quests/{questId}` | same as POST | admin; `X-Admin-PIN` header if set. Full replacement, except that an omitted (or `null`) `streak_bonus` keeps the quest's current streak bonus; the other omitted fields are cleared to their defaults. An invalid `streak_bonus` is still `422` |
 | `DELETE /households/{id}/quests/{questId}` | none | admin; `X-Admin-PIN` header if set. `204` |
 | `POST /households/{id}/quests/{questId}/accept` | `member_id, pin?` | The acting family member takes an available quest. `200` quest; `409 quest_taken` when another member holds it or it is waiting for its midnight |
 | `POST /households/{id}/quests/{questId}/abandon` | `member_id, pin?` | The holder abandons the quest, which returns it to the pool for everyone. `200` quest; `404` when the member does not hold it |

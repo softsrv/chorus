@@ -401,13 +401,21 @@ func TestAPI_EndToEnd(t *testing.T) {
 	if n := readStreakBonus(); n != 5 {
 		t.Errorf("streak_bonus after valid update: %d, want 5", n)
 	}
-	// Back to the state the rest of this test expects: no streak bonus, no PIN.
+	// A PUT that omits streak_bonus keeps the stored one (an older client or a
+	// blank edit field never wipes it).
 	s.expectWithHeaders(http.StatusOK, "PUT", qp, parent.AccessToken, map[string]string{"X-Admin-PIN": "1357"}, map[string]any{
 		"name": "Walk the dog twice", "points": 20, "repeat_days": 1,
 	}, nil)
+	if n := readStreakBonus(); n != 5 {
+		t.Errorf("omitted streak_bonus on PUT: %d, want 5 kept", n)
+	}
+	// Back to the state the rest of this test expects: no streak bonus, no PIN.
+	s.expectWithHeaders(http.StatusOK, "PUT", qp, parent.AccessToken, map[string]string{"X-Admin-PIN": "1357"}, map[string]any{
+		"name": "Walk the dog twice", "points": 20, "repeat_days": 1, "streak_bonus": 0,
+	}, nil)
 	s.expectWithHeaders(http.StatusNoContent, "DELETE", hp+"/admin-pin", parent.AccessToken, map[string]string{"X-Admin-PIN": "1357"}, nil, nil)
 	if n := readStreakBonus(); n != 0 {
-		t.Errorf("omitted streak_bonus on PUT: %d, want 0", n)
+		t.Errorf("explicit streak_bonus 0 on PUT: %d, want 0", n)
 	}
 
 	// CLM-4: POST/PUT/DELETE on /api/v1/quest-library return 404 or 405.

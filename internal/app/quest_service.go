@@ -30,7 +30,8 @@ type NumberField struct {
 
 // QuestInput is the editable part of a household quest. An absent Points
 // means 0, an absent RepeatDays 1 (daily) and an absent StreakBonus 0 (no
-// streak bonus).
+// streak bonus) on Create; on Update an absent StreakBonus keeps the stored
+// one.
 type QuestInput struct {
 	Name        string
 	Points      NumberField
@@ -187,7 +188,10 @@ func (s *QuestService) Create(ctx context.Context, userID, householdID uuid.UUID
 	return s.insert(ctx, householdID, nil, v)
 }
 
-// Update replaces a quest's editable fields.
+// Update replaces a quest's editable fields. An omitted StreakBonus keeps
+// the quest's stored streak bonus instead of resetting it to 0, so an older
+// client or a form that leaves the field blank never wipes it; every other
+// omitted field is cleared to its default as on Create.
 func (s *QuestService) Update(ctx context.Context, userID, householdID, questID uuid.UUID, in QuestInput, adminPin string) (QuestView, error) {
 	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
 		return QuestView{}, err
@@ -195,6 +199,13 @@ func (s *QuestService) Update(ctx context.Context, userID, householdID, questID 
 	v, err := validateQuest(in)
 	if err != nil {
 		return QuestView{}, err
+	}
+	if !in.StreakBonus.Set {
+		existing, err := notFoundIfNoRows(s.q.GetHouseholdQuest(ctx, db.GetHouseholdQuestParams{HouseholdID: householdID, ID: questID}))
+		if err != nil {
+			return QuestView{}, err
+		}
+		v.streakBonus = existing.StreakBonus
 	}
 	quest, err := s.q.UpdateHouseholdQuest(ctx, db.UpdateHouseholdQuestParams{
 		HouseholdID: householdID,
