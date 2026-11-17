@@ -376,9 +376,13 @@ func TestIntegration_QuestStreak(t *testing.T) {
 	if strings.Contains(streakedCTE, "available_at") || strings.Contains(streakedCTE, "household_quests") {
 		t.Errorf("the streak upsert writes outside member_quest_streaks:\n%s", streakedCTE)
 	}
-	restoreText := string(sqlText)[strings.Index(string(sqlText), "-- name: RestoreMemberQuestStreak"):]
-	if strings.Contains(restoreText, "available_at") {
-		t.Error("RestoreMemberQuestStreak touches available_at")
+	recomputeAt := strings.Index(string(sqlText), "-- name: RecomputeMemberQuestStreak")
+	if recomputeAt < 0 {
+		t.Fatal("RecomputeMemberQuestStreak not found in quests.sql")
+	}
+	recomputeText, _, _ := strings.Cut(string(sqlText)[recomputeAt+1:], "-- name: ")
+	if strings.Contains(recomputeText, "available_at") || strings.Contains(recomputeText, "UPDATE household_quests") {
+		t.Error("RecomputeMemberQuestStreak touches the quest or its cooldown")
 	}
 
 	// CLM-9 / CLM-7: deltas p, p, p+b, p+b over four approvals in a row.
@@ -624,10 +628,36 @@ func TestIntegration_QuestStreakLateApproval(t *testing.T) {
 	}
 }
 
-// TestIntegration_QuestStreakReject: CLM-16, sending a completion back
-// undoes its streak step in the same transaction.
+// TestIntegration_QuestStreakReject: CLM-6, sending a completion back
+// recomputes the member's streak for the quest in the same transaction:
+// (a) rejecting the latest completion puts count and expiry back to their
+// values before it; (c) rejecting a member's only completion removes the
+// streak; (b) rejecting the first of three pending completions on
+// consecutive days, with later mark-dones after it, leaves the streak at 2
+// and renumbers the remaining pending completions 1 and 2, so approving the
+// last pays no bonus; (d) rejecting a pending completion after an earlier
+// one paid its bonus leaves that bonus and its history entry; (e) a reject
+// through another household is ErrNotFound and changes nothing.
 func TestIntegration_QuestStreakReject(t *testing.T) {
 	w := newStreakWorld(t, "streakreject")
+	streakCount := func(id uuid.UUID) int32 {
+		t.Helper()
+		var n int32
+		if err := w.pool.QueryRow(w.ctx, `SELECT streak_count FROM quest_completions WHERE id = $1`, id).Scan(&n); err != nil {
+			t.Fatalf("read streak_count: %v", err)
+		}
+		return n
+	}
+	status := func(id uuid.UUID) string {
+		t.Helper()
+		var s string
+		if err := w.pool.QueryRow(w.ctx, `SELECT status FROM quest_completions WHERE id = $1`, id).Scan(&s); err != nil {
+			t.Fatalf("read status: %v", err)
+		}
+		return s
+	}
+
+	// (a)
 	trash := w.quest("Trash", 2, 1, 5)
 	w.approve("trash 1", w.markDone(trash), 2, app.StreakBonus{Count: 1})
 	w.approve("trash 2", w.markDone(trash), 2, app.StreakBonus{Count: 2})
@@ -646,7 +676,7 @@ func TestIntegration_QuestStreakReject(t *testing.T) {
 	// The next mark-done continues the restored streak: 3, and pays.
 	w.approve("trash 3 again", w.markDone(trash), 7, app.StreakBonus{Points: 5, Count: 3})
 
-	// Rejecting the completion that started a streak removes the streak.
+	// (c) Rejecting the completion that started a streak removes the streak.
 	fresh := w.quest("Fresh", 2, 1, 5)
 	first := w.markDone(fresh)
 	if _, ok := w.streak(fresh); !ok {
@@ -657,6 +687,94 @@ func TestIntegration_QuestStreakReject(t *testing.T) {
 	}
 	if s, ok := w.streak(fresh); ok {
 		t.Errorf("streak after rejecting its first completion: %+v, want none", s)
+	}
+
+	// (b) Three pending completions marked done on consecutive days D, D+1,
+	// D+2; rejecting D's (a step later mark-dones already built on) leaves
+	// D+1 at 1 and D+2 at 2, the streak at 2 as of D+2.
+	cat := w.quest("Feed the cat", 3, 1, 5)
+	now := time.Now().In(w.loc)
+	var pend []uuid.UUID
+	var marked []time.Time
+	for i := range 3 {
+		id := w.markDone(cat)
+		doneAt := time.Date(now.Year(), now.Month(), now.Day()-3+i, 10, 0, 0, 0, w.loc)
+		if _, err := w.pool.Exec(w.ctx, `UPDATE quest_completions SET done_at = $2 WHERE id = $1`, id, doneAt); err != nil {
+			t.Fatalf("back-date completion: %v", err)
+		}
+		pend, marked = append(pend, id), append(marked, doneAt)
+	}
+	if n := streakCount(pend[2]); n != 3 {
+		t.Fatalf("3rd pending completion's streak_count %d, want 3", n)
+	}
+	if _, err := w.quests.Reject(w.ctx, w.admin, w.hID, pend[0], ""); err != nil {
+		t.Fatalf("reject D: %v", err)
+	}
+	cs, ok := w.streak(cat)
+	if !ok || cs.Count != 2 || !cs.LastDoneAt.Time.Equal(marked[2]) || !cs.ExpiresAt.Time.Equal(wantExpiry(marked[2], w.loc, 1)) {
+		t.Errorf("after rejecting D: %+v (found %v), want count 2, last done %v, expires %v", cs, ok, marked[2], wantExpiry(marked[2], w.loc, 1))
+	}
+	if a, b := streakCount(pend[1]), streakCount(pend[2]); a != 1 || b != 2 {
+		t.Errorf("remaining completions' streak_count %d and %d, want 1 and 2", a, b)
+	}
+	w.approve("D+1", pend[1], 3, app.StreakBonus{Count: 1})
+	w.approve("D+2", pend[2], 3, app.StreakBonus{Count: 2})
+	if got := len(w.awardsWithReason("streak", "streak: Feed the cat 3")); got != 0 {
+		t.Errorf("streak entries after the renumbered approvals: %d, want 0", got)
+	}
+
+	// (d) An approved completion that paid its bonus keeps it, its history
+	// entry and its streak_count when a later pending one is rejected.
+	mop := w.quest("Mop", 4, 1, 5)
+	var paid []uuid.UUID
+	for i := int32(1); i <= 3; i++ {
+		id := w.markDone(mop)
+		paid = append(paid, id)
+		want := app.StreakBonus{Count: i}
+		delta := int32(4)
+		if i == 3 {
+			want, delta = app.StreakBonus{Points: 5, Count: 3}, 9
+		}
+		w.approve(fmt.Sprintf("mop %d", i), id, delta, want)
+	}
+	c4, c5 := w.markDone(mop), w.markDone(mop)
+	pointsBefore := w.points()
+	if _, err := w.quests.Reject(w.ctx, w.admin, w.hID, c4, ""); err != nil {
+		t.Fatalf("reject mop 4: %v", err)
+	}
+	if p := w.points(); p != pointsBefore {
+		t.Errorf("points after reject: %d, want %d", p, pointsBefore)
+	}
+	if rows := w.awardsWithReason("streak", "streak: Mop 3"); len(rows) != 1 || rows[0].Points != 5 {
+		t.Errorf("paid bonus entry after reject: %+v, want one 5-point 'streak: Mop 3'", rows)
+	}
+	if n := streakCount(paid[2]); n != 3 || status(paid[2]) != "approved" {
+		t.Errorf("approved completion after reject: streak_count %d status %q, want 3 approved", n, status(paid[2]))
+	}
+	if n := streakCount(c5); n != 4 {
+		t.Errorf("later pending completion's streak_count %d, want 4", n)
+	}
+	if n := w.count(mop); n != 4 {
+		t.Errorf("streak after rejecting mop 4: count %d, want 4", n)
+	}
+	w.approve("mop 5", c5, 9, app.StreakBonus{Points: 5, Count: 4})
+
+	// (e) Another household's admin rejecting this household's completion
+	// through their own household id gets ErrNotFound; nothing changes.
+	other := newStreakWorld(t, "streakrejectother")
+	victim := w.markDone(mop)
+	foreignBefore, _ := w.streak(mop)
+	if _, err := w.quests.Reject(w.ctx, other.admin, other.hID, victim, ""); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("reject through another household: %v, want ErrNotFound", err)
+	}
+	if _, err := w.quests.Reject(w.ctx, other.admin, w.hID, victim, ""); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("reject by a non-member: %v, want ErrNotFound", err)
+	}
+	if s := status(victim); s != "pending" {
+		t.Errorf("completion after foreign rejects: %q, want pending", s)
+	}
+	if after, ok := w.streak(mop); !ok || after.Count != foreignBefore.Count || !after.ExpiresAt.Time.Equal(foreignBefore.ExpiresAt.Time) {
+		t.Errorf("streak after foreign rejects: %+v (found %v), want %+v", after, ok, foreignBefore)
 	}
 }
 

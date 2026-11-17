@@ -119,8 +119,9 @@ WHERE household_id = sqlc.arg(household_id) AND id = sqlc.arg(id)
 -- The same statement moves the member's streak for the quest (streaked):
 -- count+1 when marked done by its expires_at, else 1, with a new expires_at
 -- of local midnight starting the day after 2 x repeat_days days from today.
--- The step it replaces is kept in prev_* so a reject can undo it. The
--- completion stores the resulting count (streak_count), so its approval,
+-- (prev_* still records the step it replaces; a reject no longer reads it
+-- but recomputes the streak: RecomputeMemberQuestStreak.) The completion
+-- stores the resulting count (streak_count), so its approval,
 -- however late, pays the streak as of this mark-done. The streak write
 -- touches only member_quest_streaks: never available_at or the cooldown.
 WITH done AS (
@@ -238,26 +239,72 @@ WITH rejected AS (
 SELECT r.id, r.quest_id, r.member_id, r.done_at, r.status
 FROM rejected r;
 
--- name: RestoreMemberQuestStreak :exec
--- Undoes the streak step a rejected completion made at its mark-done. Only
--- when that completion is the member's latest mark-done of the quest
--- (last_done_at = its done_at): the row goes back to prev_* when there was
--- an earlier streak, and is deleted when that mark-done started it (count 1,
--- nothing before). One step of history is kept: a completion whose step a
--- later mark-done already superseded, or whose earlier step was already
--- undone, leaves the streak alone. Writes only member_quest_streaks.
-WITH restored AS (
-    UPDATE member_quest_streaks s
-    SET count = s.prev_count, last_done_at = s.prev_last_done_at, expires_at = s.prev_expires_at,
+-- name: RecomputeMemberQuestStreak :exec
+-- Rebuilds the member's streak for the quest from the completions that still
+-- count: theirs, pending or approved, marked done since streaks existed
+-- (streak_count set), in done_at order. It replaces undoing one stored step,
+-- so a reject undoes its completion's step even when a later mark-done came
+-- after it. The mark-done rule is replayed: a completion continues the
+-- streak (count+1) when marked done by the previous one's expires_at, else
+-- starts it again at 1; each expires_at is quest_streak_expires_at(done_at,
+-- household timezone, repeat_days). member_quest_streaks gets the last
+-- completion's count, done_at and expiry, or the row is deleted when no
+-- completion counts. Pending completions get their replayed streak_count;
+-- approved ones keep theirs, so bonuses already paid stay paid. Writes only
+-- member_quest_streaks and quest_completions.streak_count: never the quest
+-- or its cooldown. The caller holds the member row's lock.
+WITH chain AS (
+    SELECT c.id, c.status, c.done_at,
+           quest_streak_expires_at(c.done_at, h.timezone, q.repeat_days) AS expires_at
+    FROM quest_completions c
+    JOIN household_quests q ON q.household_id = c.household_id AND q.id = c.quest_id
+    JOIN households h ON h.id = c.household_id
+    WHERE c.household_id = sqlc.arg(household_id)::uuid AND c.member_id = sqlc.arg(member_id)::uuid
+      AND c.quest_id = sqlc.arg(quest_id)::uuid
+      AND c.status IN ('pending', 'approved') AND c.streak_count IS NOT NULL
+), stepped AS (
+    SELECT ch.id, ch.status, ch.done_at, ch.expires_at,
+           CASE WHEN ch.done_at <= LAG(ch.expires_at) OVER (ORDER BY ch.done_at, ch.id) THEN 0 ELSE 1 END AS starts
+    FROM chain ch
+), runs AS (
+    SELECT st.id, st.status, st.done_at, st.expires_at,
+           SUM(st.starts) OVER (ORDER BY st.done_at, st.id) AS run
+    FROM stepped st
+), counted AS (
+    SELECT r.id, r.status, r.done_at, r.expires_at,
+           (ROW_NUMBER() OVER (PARTITION BY r.run ORDER BY r.done_at, r.id))::int AS count
+    FROM runs r
+), latest AS (
+    SELECT k.done_at, k.expires_at, k.count
+    FROM counted k
+    ORDER BY k.done_at DESC, k.id DESC
+    LIMIT 1
+), renumbered AS (
+    UPDATE quest_completions c
+    SET streak_count = k.count
+    FROM counted k
+    WHERE c.household_id = sqlc.arg(household_id)::uuid AND c.id = k.id
+      AND k.status = 'pending' AND c.streak_count IS DISTINCT FROM k.count
+    RETURNING c.id
+), kept AS (
+    INSERT INTO member_quest_streaks (
+        household_id, member_id, quest_id,
+        count, last_done_at, expires_at,
+        created_at, updated_at
+    )
+    SELECT sqlc.arg(household_id)::uuid, sqlc.arg(member_id)::uuid, sqlc.arg(quest_id)::uuid,
+           l.count, l.done_at, l.expires_at, NOW(), NOW()
+    FROM latest l
+    ON CONFLICT (member_id, quest_id) DO UPDATE
+    SET count = EXCLUDED.count,
+        last_done_at = EXCLUDED.last_done_at,
+        expires_at = EXCLUDED.expires_at,
         prev_count = NULL, prev_last_done_at = NULL, prev_expires_at = NULL,
         updated_at = NOW()
-    WHERE s.household_id = sqlc.arg(household_id) AND s.member_id = sqlc.arg(member_id)
-      AND s.quest_id = sqlc.arg(quest_id) AND s.last_done_at = sqlc.arg(done_at)
-      AND s.prev_count IS NOT NULL
-    RETURNING s.quest_id
+    WHERE member_quest_streaks.household_id = EXCLUDED.household_id
+    RETURNING quest_id
 )
 DELETE FROM member_quest_streaks s
-WHERE s.household_id = sqlc.arg(household_id) AND s.member_id = sqlc.arg(member_id)
-  AND s.quest_id = sqlc.arg(quest_id) AND s.last_done_at = sqlc.arg(done_at)
-  AND s.prev_count IS NULL AND s.count = 1
-  AND NOT EXISTS (SELECT 1 FROM restored);
+WHERE s.household_id = sqlc.arg(household_id)::uuid AND s.member_id = sqlc.arg(member_id)::uuid
+  AND s.quest_id = sqlc.arg(quest_id)::uuid
+  AND NOT EXISTS (SELECT 1 FROM latest);

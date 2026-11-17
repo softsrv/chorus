@@ -197,8 +197,9 @@ type Querier interface {
 	// The same statement moves the member's streak for the quest (streaked):
 	// count+1 when marked done by its expires_at, else 1, with a new expires_at
 	// of local midnight starting the day after 2 x repeat_days days from today.
-	// The step it replaces is kept in prev_* so a reject can undo it. The
-	// completion stores the resulting count (streak_count), so its approval,
+	// (prev_* still records the step it replaces; a reject no longer reads it
+	// but recomputes the streak: RecomputeMemberQuestStreak.) The completion
+	// stores the resulting count (streak_count), so its approval,
 	// however late, pays the streak as of this mark-done. The streak write
 	// touches only member_quest_streaks: never available_at or the cooldown.
 	MarkQuestDone(ctx context.Context, arg MarkQuestDoneParams) (MarkQuestDoneRow, error)
@@ -206,6 +207,20 @@ type Querier interface {
 	MarkVerificationCodeUsed(ctx context.Context, id uuid.UUID) (int64, error)
 	// Whether the quest has a completion waiting for the administrator.
 	QuestHasPendingCompletion(ctx context.Context, arg QuestHasPendingCompletionParams) (bool, error)
+	// Rebuilds the member's streak for the quest from the completions that still
+	// count: theirs, pending or approved, marked done since streaks existed
+	// (streak_count set), in done_at order. It replaces undoing one stored step,
+	// so a reject undoes its completion's step even when a later mark-done came
+	// after it. The mark-done rule is replayed: a completion continues the
+	// streak (count+1) when marked done by the previous one's expires_at, else
+	// starts it again at 1; each expires_at is quest_streak_expires_at(done_at,
+	// household timezone, repeat_days). member_quest_streaks gets the last
+	// completion's count, done_at and expiry, or the row is deleted when no
+	// completion counts. Pending completions get their replayed streak_count;
+	// approved ones keep theirs, so bonuses already paid stay paid. Writes only
+	// member_quest_streaks and quest_completions.streak_count: never the quest
+	// or its cooldown. The caller holds the member row's lock.
+	RecomputeMemberQuestStreak(ctx context.Context, arg RecomputeMemberQuestStreakParams) error
 	// Single use: conditional on used_at IS NULL and unexpired, so two concurrent
 	// redemptions can't both succeed.
 	RedeemSignInHandoff(ctx context.Context, codeHash string) (uuid.UUID, error)
@@ -221,14 +236,6 @@ type Querier interface {
 	ReleaseMemberQuests(ctx context.Context, arg ReleaseMemberQuestsParams) error
 	RenameFamilyMember(ctx context.Context, arg RenameFamilyMemberParams) (FamilyMember, error)
 	ResetLoginAttempts(ctx context.Context, id uuid.UUID) error
-	// Undoes the streak step a rejected completion made at its mark-done. Only
-	// when that completion is the member's latest mark-done of the quest
-	// (last_done_at = its done_at): the row goes back to prev_* when there was
-	// an earlier streak, and is deleted when that mark-done started it (count 1,
-	// nothing before). One step of history is kept: a completion whose step a
-	// later mark-done already superseded, or whose earlier step was already
-	// undone, leaves the streak alone. Writes only member_quest_streaks.
-	RestoreMemberQuestStreak(ctx context.Context, arg RestoreMemberQuestStreakParams) error
 	RevokeAllUserRefreshTokens(ctx context.Context, userID uuid.UUID) error
 	RevokeOtherUserRefreshTokens(ctx context.Context, arg RevokeOtherUserRefreshTokensParams) error
 	RevokeRefreshToken(ctx context.Context, id uuid.UUID) error

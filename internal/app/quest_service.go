@@ -594,10 +594,18 @@ func payCombos(ctx context.Context, qtx *db.Queries, householdID, questID uuid.U
 // completion started the quest's running cooldown and the cooldown has not
 // ended, the cooldown is cancelled and the chore is available again right
 // away. Other completions and the quest's holder are untouched. The streak
-// step the completion made at mark-done is undone in the same transaction:
-// the member's count and expiry go back to what they were, or the streak is
-// removed when that mark-done started it. Admin only, behind the admin PIN
-// once one is set. A completion that is not pending is ErrNotFound.
+// step the completion made at mark-done is undone in the same transaction,
+// even when a later mark-done of the quest came after it: the member's
+// streak for the quest is recomputed from their remaining pending and
+// approved completions (RecomputeMemberQuestStreak), which also renumbers
+// their other pending completions of the quest; approved ones keep their
+// streak count and paid bonuses. With no completion left the streak is
+// removed. Admin only, behind the admin PIN once one is set. A completion
+// that is not pending (or not in this household) is ErrNotFound.
+//
+// Lock order is member row, then completion, the order Approve, MarkDone and
+// FamilyService.Remove use, so a reject serializes with the member's
+// mark-done and approvals instead of deadlocking against them.
 func (s *QuestService) Reject(ctx context.Context, userID, householdID, completionID uuid.UUID, adminPin string) (Completion, error) {
 	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
 		return Completion{}, err
@@ -609,15 +617,29 @@ func (s *QuestService) Reject(ctx context.Context, userID, householdID, completi
 	defer tx.Rollback(ctx) //nolint:errcheck
 	qtx := s.q.WithTx(tx)
 
+	memberRef, err := notFoundIfNoRows(qtx.GetPendingCompletionMember(ctx, db.GetPendingCompletionMemberParams{HouseholdID: householdID, ID: completionID}))
+	if err != nil {
+		return Completion{}, err
+	}
+	if memberRef == nil {
+		// The query reads only completions that still have a member.
+		return Completion{}, fmt.Errorf("reject completion %s: no member", completionID)
+	}
+	if _, err := notFoundIfNoRows(qtx.LockFamilyMember(ctx, db.LockFamilyMemberParams{HouseholdID: householdID, ID: *memberRef})); err != nil {
+		// The member was removed meanwhile; their completion is cancelled.
+		return Completion{}, err
+	}
+	// Re-read under the lock: a concurrent approval, reject or removal that
+	// committed first leaves no pending row, so this one is ErrNotFound.
 	row, err := notFoundIfNoRows(qtx.RejectCompletion(ctx, db.RejectCompletionParams{HouseholdID: householdID, ID: completionID}))
 	if err != nil {
 		return Completion{}, err
 	}
 	if row.MemberID != nil {
-		if err := qtx.RestoreMemberQuestStreak(ctx, db.RestoreMemberQuestStreakParams{
-			HouseholdID: householdID, MemberID: *row.MemberID, QuestID: row.QuestID, DoneAt: row.DoneAt,
+		if err := qtx.RecomputeMemberQuestStreak(ctx, db.RecomputeMemberQuestStreakParams{
+			HouseholdID: householdID, MemberID: *row.MemberID, QuestID: row.QuestID,
 		}); err != nil {
-			return Completion{}, fmt.Errorf("restore streak: %w", err)
+			return Completion{}, fmt.Errorf("recompute streak: %w", err)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
