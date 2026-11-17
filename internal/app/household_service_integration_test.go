@@ -399,6 +399,43 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		rows[0].MemberID != aliceMember.ID {
 		t.Errorf("alice's pending quest was changed by the outsider: %+v, %v", rows, err)
 	}
+	// CLM-8: a shared pending completion lists only Alice's household members,
+	// and no outsider sees it through either household's pending list.
+	if _, err := quests.MarkDone(ctx, alice, h.ID, aliceShareable.ID, app.MemberAction{MemberID: aliceKid.ID}); err != nil {
+		t.Fatalf("alice's kid marks the shared quest done: %v", err)
+	}
+	sharedPending, err := quests.ListPending(ctx, alice, h.ID, "")
+	if err != nil {
+		t.Fatalf("alice's pending list with a shared completion: %v", err)
+	}
+	var sharedCompletionID uuid.UUID
+	for _, row := range sharedPending {
+		if row.QuestID != aliceShareable.ID {
+			continue
+		}
+		sharedCompletionID = row.ID
+		if len(row.Members) != 2 {
+			t.Errorf("shared pending item members = %+v; want exactly alice's two members", row.Members)
+		}
+		for _, m := range row.Members {
+			if m.MemberID != aliceMember.ID && m.MemberID != aliceKid.ID {
+				t.Errorf("shared pending item lists %s, who is not one of alice's members", m.MemberID)
+			}
+		}
+	}
+	if sharedCompletionID == uuid.Nil {
+		t.Fatalf("shared completion missing from alice's pending list: %+v", sharedPending)
+	}
+	if rows, err := quests.ListPending(ctx, mallory, mh.ID, ""); err != nil || len(rows) != 0 {
+		t.Errorf("mallory's pending list shows alice's shared completion: %+v, %v", rows, err)
+	}
+	if _, err := quests.ListPending(ctx, mallory, h.ID, ""); err == nil {
+		t.Error("mallory listed alice's household pending completions")
+	}
+	// Put the quest back so the checks below start from the same state.
+	if _, err := quests.Reject(ctx, alice, h.ID, sharedCompletionID, ""); err != nil {
+		t.Fatalf("alice rejects the shared completion: %v", err)
+	}
 	if m, err := familySvc.Get(ctx, alice, h.ID, aliceMember.ID); err != nil || m.Points != 0 {
 		t.Errorf("alice's member points changed by the outsider: %+v, %v", m, err)
 	}
