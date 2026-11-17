@@ -14,7 +14,8 @@ make test             # Unit tests (-race)
 make test-js          # Web client unit tests (node --test web/jstest/quests.test.mjs; needs Node 22+)
 make test-integration # Migrates chorus_test, runs round-trip test, then runs integration tests
 make boundaries       # Boundary check (internal/archtest)
-make check            # boundaries + vet + unit + web JS unit + integration + govulncheck (what CI runs)
+make secret-scan      # Pinned gitleaks full-history scan (--redact) against .gitleaks.toml
+make check            # boundaries + vet + unit + web JS unit + integration + govulncheck + secret-scan (what CI runs)
 make vet / fmt / lint
 
 # Database
@@ -27,6 +28,8 @@ make services-reset               # Wipe the local DB volume
 # Docker
 make prod             # Multi-stage, distroless, non-root image
 ```
+
+Test fixtures and configuration must use obviously fake values or be allowlisted in `.gitleaks.toml` on purpose.
 
 Single test: `go test -tags integration -run TestAPI_EndToEnd ./internal/http/` (needs `TEST_DATABASE_URL`; `set -a; . ./.env; set +a` loads it).
 
@@ -63,7 +66,7 @@ Allowed import directions are enforced by `make boundaries` and owned by `intern
   - Nothing imports `cmd/app`
 - **Test rules (`_test.go` files):**
   - Tests may import the package under test plus anything that package is allowed to import.
-  - `internal/http` tests may additionally import `internal/auth` (for token minting in integration tests).
+  - `internal/http` and `internal/http/handlers` tests may additionally import `internal/auth` (for token minting).
   - `internal/app` and `internal/http` tests may additionally import `internal/testnet` (to refuse outbound dials); no production file may import it.
   - Tests may never import `cmd/app`.
 - **Web client rules:**

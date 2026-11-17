@@ -98,6 +98,13 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 		pinLimit = 120
 	}
 	pinRL := middleware.NewRateLimiter(ctx, pinLimit, 10*time.Minute, userKey)
+	// The points-history read also checks a PIN. Every wrong or missing PIN
+	// on it (403) is charged to pinRL, the one budget of PIN guesses all
+	// PIN-checking routes share, so it opens no second budget to guess
+	// with. Its reads are limited by historyRL instead: the Quests tab reads
+	// it on member selection, and a correct read must never spend the
+	// budget member actions (accept, abandon, done) need.
+	historyRL := middleware.NewRateLimiter(ctx, pinLimit, 10*time.Minute, userKey)
 	googleStartRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
 	googleCallbackRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
 	googleRedeemRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
@@ -163,6 +170,7 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("PUT /api/v1/households/{householdID}/family-members/{memberID}/pin", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.SetPin))))
 	api.Handle("DELETE /api/v1/households/{householdID}/family-members/{memberID}/pin", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.ClearPin))))
 	api.Handle("POST /api/v1/households/{householdID}/family-members/{memberID}/verify", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.Verify))))
+	api.Handle("GET /api/v1/households/{householdID}/family-members/{memberID}/points-history", authMW(middleware.RequireEmailVerified(historyRL.Middleware(pinRL.FailuresOnly(http.HandlerFunc(familyMemberH.PointsHistory))))))
 	api.Handle("GET /api/v1/households/{householdID}/admin-pin", verified(familyMemberH.AdminPinStatus))
 	api.Handle("PUT /api/v1/households/{householdID}/admin-pin", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.SetAdminPin))))
 	api.Handle("DELETE /api/v1/households/{householdID}/admin-pin", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.ClearAdminPin))))
@@ -186,6 +194,7 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("POST /api/v1/households/{householdID}/quests/{questID}/accept", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Accept))))
 	api.Handle("POST /api/v1/households/{householdID}/quests/{questID}/abandon", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Abandon))))
 	api.Handle("POST /api/v1/households/{householdID}/quests/{questID}/done", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.MarkDone))))
+	api.Handle("POST /api/v1/households/{householdID}/quests/{questID}/share", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Share))))
 	// Approval is per completion (one per mark-done), admin-only and, once an
 	// admin PIN is set, needs X-Admin-PIN.
 	api.Handle("POST /api/v1/households/{householdID}/quest-completions/{completionID}/approve", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Approve))))

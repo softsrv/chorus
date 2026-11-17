@@ -5,7 +5,7 @@ BIN_DIR          := ./bin
 -include .env
 export
 
-.PHONY: dev run build test test-js test-integration test-cover boundaries fmt vet lint vulncheck check \
+.PHONY: dev run build test test-js test-integration test-cover boundaries fmt vet lint vulncheck secret-scan check \
         services-up services-down services-reset \
         daisyui-install tailwind tailwind-watch app \
         migrate-up migrate-down migrate-create migrate-status migrate-test migrate-roundtrip-test \
@@ -74,8 +74,12 @@ lint:
 vulncheck:
 	go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
+GITLEAKS_VERSION ?= 8.24.0
+secret-scan:
+	go run github.com/zricethezav/gitleaks/v8@v$(GITLEAKS_VERSION) git --redact --config .gitleaks.toml
+
 # Everything CI runs.
-check: boundaries vet test test-js test-integration vulncheck
+check: boundaries vet test test-js test-integration vulncheck secret-scan
 
 ## ── CSS ──────────────────────────────────────────────────────────────────────
 

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"time"
 
@@ -20,6 +21,7 @@ type familyServicer interface {
 	SetPin(ctx context.Context, userID, householdID, memberID uuid.UUID, pin string, adminPin string) (app.Member, error)
 	ClearPin(ctx context.Context, userID, householdID, memberID uuid.UUID, adminPin string) (app.Member, error)
 	Verify(ctx context.Context, userID, householdID, memberID uuid.UUID, pin string) (app.Member, error)
+	PointsHistory(ctx context.Context, userID, householdID, memberID uuid.UUID, memberPin, adminPin string, limit, offset int32) ([]app.PointsAward, error)
 	AdminPinSet(ctx context.Context, userID, householdID uuid.UUID) (bool, error)
 	SetAdminPin(ctx context.Context, userID, householdID uuid.UUID, newPin, currentAdminPin string) error
 	ClearAdminPin(ctx context.Context, userID, householdID uuid.UUID, currentAdminPin string) error
@@ -311,4 +313,46 @@ func (h *FamilyMemberHandler) VerifyAdminPin(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	respond.JSON(w, http.StatusOK, map[string]any{})
+}
+
+// PointsHistory returns a member's points awards newest first.
+// GET /api/v1/households/{householdID}/family-members/{memberID}/points-history
+func (h *FamilyMemberHandler) PointsHistory(w http.ResponseWriter, r *http.Request) {
+	hid, mid, ok := parseMemberIDs(w, r)
+	if !ok {
+		return
+	}
+	limit, err := queryInt(r, "limit", defaultPageSize)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	offset, err := queryInt(r, "offset", 0)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	if limit < 1 {
+		limit = 1
+	} else if limit > 100 {
+		limit = 100
+	}
+	// Offset is clamped to [0, MaxInt32] as a plain int, before the int32
+	// conversion below, so an oversized offset reads past the end (an empty
+	// page) instead of wrapping into a different page.
+	if offset < 0 {
+		offset = 0
+	} else if offset > math.MaxInt32 {
+		offset = math.MaxInt32
+	}
+	memberPin := r.Header.Get("X-Member-PIN")
+	adminPin := r.Header.Get("X-Admin-PIN")
+	awards, err := h.svc.PointsHistory(r.Context(), currentUser(r), hid, mid, memberPin, adminPin, int32(limit), int32(offset))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, listResponse[pointsAwardJSON]{
+		Items: mapSlice(awards, toPointsAward),
+	})
 }

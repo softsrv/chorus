@@ -25,13 +25,14 @@ const quest = (over) => ({
   id: 'q1', household_id: H, library_id: null, name: 'Feed the cat', points: 5, repeat_days: 1,
   notes: 'Half a scoop, then fresh water.', available: true, claimed_by: null, claimed_at: null,
   awaiting_approval: false, completed_at: null, available_at: null,
-  created_at: '2025-01-01T00:00:00Z', updated_at: '2025-01-01T00:00:00Z', ...over,
+  created_at: '2025-01-01T00:00:00Z', updated_at: '2025-01-01T00:00:00Z',
+  shareable: false, teamwork_bonus: 0, shared: false, participants: [], ...over,
 });
 
 const err = (status, code, message = code) => [status, { error: { code, message } }];
 
 function routes() {
-  return {
+  const r = {
     'POST /auth/refresh': () => [200, {
       access_token: 'at', refresh_token: 'rt',
       user: { id: 'u1', email: 'p@example.com', display_name: 'Parent', email_verified: true },
@@ -48,6 +49,15 @@ function routes() {
     [`GET ${HP}/quests/pending`]: (r) => srv.pending(r),
     ...srv.extra,
   };
+  return new Proxy(r, {
+    get(target, prop) {
+      if (prop in target) return target[prop];
+      if (typeof prop === 'string' && prop.startsWith(`GET ${HP}/family-members/`) && prop.endsWith('/points-history')) {
+        return (req) => (srv.pointsHistory ? srv.pointsHistory(req) : [200, { items: srv.history || [] }]);
+      }
+      return undefined;
+    },
+  });
 }
 
 beforeEach(() => {
@@ -63,6 +73,7 @@ beforeEach(() => {
       { id: 'm-a', household_id: H, name: 'Ann', has_pin: false, points: 0 },
       { id: 'm-b', household_id: H, name: 'Ben', has_pin: true, points: 30 },
     ],
+    history: [],
     pending: () => [200, { items: [] }],
     extra: {},
   };
@@ -430,6 +441,196 @@ test('CLM-11: Approve and Send back post an empty body to completion endpoints w
   assert.match(text(), /Ann: 5 points/);
 });
 
+test('CLM-10: takeCard fetches points-history with X-Member-PIN and renders table in order', async () => {
+  srv.history = [
+    { id: 'a3', points: 5, reason: 'streak: Feed the cat 4', earned_at: '2025-01-03T12:00:00Z' },
+    { id: 'a2', points: 3, reason: 'Feed the cat', earned_at: '2025-01-02T12:00:00Z' },
+    { id: 'a1', points: 10, reason: 'Clean sweep', earned_at: '2025-01-01T12:00:00Z' },
+  ];
+  await loadApp();
+  await becomeBen();
+
+  const histCall = calls.find((c) => c.path === `${HP}/family-members/m-b/points-history`);
+  assert.ok(histCall, 'points-history was fetched');
+  assert.equal(histCall.headers['X-Member-PIN'], '1234');
+
+  const historyNode = sectionNode(env.$app, 'Points history');
+  assert.ok(historyNode, 'Points history section exists');
+
+  const ths = walk(historyNode).filter((n) => n.tagName === 'TH').map((n) => n.textContent);
+  assert.deepEqual(ths, ['Date', 'Points', 'Reason']);
+
+  const rows = walk(historyNode).filter((n) => n.tagName === 'TBODY');
+  assert.equal(rows.length, 1);
+  const trs = walk(rows[0]).filter((n) => n.tagName === 'TR');
+  assert.equal(trs.length, 3);
+
+  const rowData = trs.map((tr) => walk(tr).filter((n) => n.tagName === 'TD').map((td) => td.textContent));
+  assert.equal(rowData[0][1], '+5');
+  assert.equal(rowData[0][2], 'streak: Feed the cat 4');
+  assert.equal(rowData[1][1], '+3');
+  assert.equal(rowData[1][2], 'Feed the cat');
+  assert.equal(rowData[2][1], '+10');
+  assert.equal(rowData[2][2], 'Clean sweep');
+});
+
+test('a failing points-history read keeps the quest lists and actions; the error shows in the history section', async () => {
+  srv.quests = [quest(), quest({ id: 'q2', name: 'Fold laundry', available: false, claimed_by: 'm-a' })];
+  srv.pointsHistory = () => err(429, 'rate_limited', 'Too many requests.');
+  await loadApp();
+  await becomeAnn();
+
+  assert.match(section(env.$app, 'Available'), /Feed the cat/);
+  assert.match(section(env.$app, 'Mine'), /Fold laundry/);
+  assert.equal(buttons(env.$app, 'Mark done').length, 1);
+  assert.equal(buttons(env.$app, 'Abandon').length, 1);
+  const historyNode = sectionNode(env.$app, 'Points history');
+  assert.ok(historyNode, 'Points history section exists');
+  assert.match(historyNode.textContent, /Could not load points history/);
+  assert.equal(walk(historyNode).filter((n) => n.tagName === 'TABLE').length, 0);
+});
+
+test('a 403 wrong_pin on points-history returns to the member picker, not a blank tab', async () => {
+  await loadApp();
+  srv.pointsHistory = () => err(403, 'wrong_pin', 'Wrong PIN.');
+  await becomeBen();
+
+  assert.match(text(), /Viewing as: Administrator/);
+  assert.match(text(), /Choose a family member to take quests\./);
+  assert.equal(sessionStorage.getItem(REFRESH_KEY), 'rt', 'session kept');
+  assert.equal(signedOut, 0);
+});
+
+test('the points history is read once per member selection, not again on the rerender after accept or mark done', async () => {
+  srv.extra[`POST ${HP}/quests/q1/accept`] = (r) => {
+    srv.quests = [quest({ available: false, claimed_by: r.body.member_id, claimed_at: '2025-01-02T00:00:00Z' })];
+    return [200, srv.quests[0]];
+  };
+  srv.extra[`POST ${HP}/quests/q1/done`] = () => {
+    srv.quests = [quest({ available: false, awaiting_approval: true })];
+    return [200, srv.quests[0]];
+  };
+  srv.history = [{ id: 'a1', points: 10, reason: 'Clean sweep', earned_at: '2025-01-01T12:00:00Z' }];
+  const historyReads = () => calls.filter((c) => c.method === 'GET' && c.path.endsWith('/points-history'));
+  await loadApp();
+  await becomeAnn();
+  assert.equal(historyReads().length, 1, 'one read on selecting the member');
+
+  await click(buttons(env.$app, 'View')[0]);
+  await click(buttons(env.$app, 'Accept')[0]);
+  assert.match(section(env.$app, 'Mine'), /Feed the cat/);
+  await click(buttons(env.$app, 'Mark done')[0]);
+  assert.equal(historyReads().length, 1, 'actions rerender without reading the history again');
+  assert.match(sectionNode(env.$app, 'Points history').textContent, /Clean sweep/, 'the history still shows');
+
+  await becomeAnn();
+  assert.equal(historyReads().length, 2, 'picking the member again reads it afresh');
+});
+
+test('switching members while the first member\'s history read is pending never shows or acts on the first member\'s view under the second', async () => {
+  srv.quests = [
+    quest({ id: 'qa', name: 'Ann chore', available: false, claimed_by: 'm-a' }),
+    quest({ id: 'qb', name: 'Ben chore', available: false, claimed_by: 'm-b' }),
+  ];
+  srv.pointsHistory = (r) => [200, { items: r.path.includes('/m-a/')
+    ? [{ id: 'a1', points: 7, reason: 'Ann award', earned_at: '2025-01-01T12:00:00Z' }]
+    : [{ id: 'b1', points: 9, reason: 'Ben award', earned_at: '2025-01-02T12:00:00Z' }] }];
+  const posted = [];
+  srv.extra[`POST ${HP}/quests/qa/done`] = (r) => { posted.push(['qa', r.body]); return [200, srv.quests[0]]; };
+  srv.extra[`POST ${HP}/quests/qb/done`] = (r) => { posted.push(['qb', r.body]); return [200, srv.quests[1]]; };
+  await loadApp();
+
+  // Hold Ann's points-history response until Ben's view has rendered.
+  const realFetch = globalThis.fetch;
+  let releaseAnn;
+  const annHeld = new Promise((r) => { releaseAnn = r; });
+  globalThis.fetch = async (url, init) => {
+    const res = realFetch(url, init);
+    if (url.includes('/family-members/m-a/points-history')) await annHeld;
+    return res;
+  };
+
+  await becomeAnn();
+  assert.doesNotMatch(text(), /Quests for/, 'Ann\'s view waits for her history');
+  await becomeBen();
+  assert.match(text(), /Quests for Ben/);
+  releaseAnn();
+  await settle();
+
+  // Ben's view stands: his title, his list, his history; nothing of Ann's.
+  assert.match(text(), /Quests for Ben/);
+  assert.doesNotMatch(text(), /Quests for Ann/);
+  assert.match(section(env.$app, 'Mine'), /Ben chore/);
+  assert.doesNotMatch(section(env.$app, 'Mine'), /Ann chore/);
+  const historyNode = sectionNode(env.$app, 'Points history');
+  assert.match(historyNode.textContent, /Ben award/);
+  assert.doesNotMatch(historyNode.textContent, /Ann award/);
+
+  // Mark done from the view on screen posts Ben's quest with Ben's identity.
+  assert.equal(buttons(env.$app, 'Mark done').length, 1);
+  await click(buttons(env.$app, 'Mark done')[0]);
+  assert.deepEqual(posted, [['qb', { member_id: 'm-b', pin: '1234' }]]);
+  // Ann's late answer never displaced Ben's history: the rerender after the
+  // action reads nothing again, and Ben's history still shows.
+  const benReads = calls.filter((c) => c.method === 'GET' && c.path === `${HP}/family-members/m-b/points-history`);
+  assert.equal(benReads.length, 1, 'one history read for Ben, none duplicated by the stale answer');
+  assert.match(sectionNode(env.$app, 'Points history').textContent, /Ben award/);
+  globalThis.fetch = realFetch;
+});
+
+test('a wrong_pin answering a superseded member\'s history read does not throw out the member picked since', async () => {
+  srv.pointsHistory = (r) => (r.path.includes('/m-a/') ? err(403, 'wrong_pin', 'Wrong PIN.') : [200, { items: [] }]);
+  await loadApp();
+  const realFetch = globalThis.fetch;
+  let releaseAnn;
+  const annHeld = new Promise((r) => { releaseAnn = r; });
+  globalThis.fetch = async (url, init) => {
+    const res = realFetch(url, init);
+    if (url.includes('/family-members/m-a/points-history')) await annHeld;
+    return res;
+  };
+  await becomeAnn();
+  await becomeBen();
+  releaseAnn();
+  await settle();
+  assert.match(text(), /Viewing as: Ben/);
+  assert.match(text(), /Quests for Ben/);
+  globalThis.fetch = realFetch;
+});
+
+test('CLM-11: empty points-history renders empty message and no table', async () => {
+  srv.history = [];
+  await loadApp();
+  await becomeAnn();
+
+  const historyNode = sectionNode(env.$app, 'Points history');
+  assert.ok(historyNode, 'Points history section exists');
+  assert.match(historyNode.textContent, /No points yet/);
+  assert.match(historyNode.textContent, /Points you earn will show up here\./);
+
+  const tables = walk(historyNode).filter((n) => n.tagName === 'TABLE');
+  assert.equal(tables.length, 0, 'no table should be rendered');
+  const rows = walk(historyNode).filter((n) => n.tagName === 'TR');
+  assert.equal(rows.length, 0, 'no rows should be rendered');
+});
+
+test('CLM-1: points history inserts API data as textContent with no markup or child elements', async () => {
+  const evilReason = '<b>x</b><img src=x onerror=alert(1)>';
+  srv.history = [
+    { id: 'a1', points: 5, reason: evilReason, earned_at: '2025-01-01T12:00:00Z' },
+  ];
+  await loadApp();
+  await becomeAnn();
+
+  const historyNode = sectionNode(env.$app, 'Points history');
+  const cells = walk(historyNode).filter((n) => n.tagName === 'TD');
+  const reasonCell = cells.find((td) => td.textContent === evilReason);
+  assert.ok(reasonCell, 'reason cell contains the exact literal string');
+  assert.equal(reasonCell.children.length, 0, 'cell has no child elements created');
+  assert.equal(reasonCell.childNodes.length, 1);
+  assert.equal(reasonCell.childNodes[0].data, evilReason);
+});
+
 test('CLM-12: a 403 admin-PIN error says so, keeps the list and the session', async () => {
   srv.adminPinSet = true;
   const items = [{ completion_id: 'c1', quest_id: 'q1', name: 'Feed the cat', points: 5, member_id: 'm-a', member_name: 'Ann', done_at: '2025-01-03T00:00:00Z' }];
@@ -457,8 +658,8 @@ test('CLM-7: approvals card renders completions in order, with name, member poin
   const d1 = '2025-01-01T10:00:00Z';
   const d2 = '2025-01-02T10:00:00Z';
   let items = [
-    { completion_id: 'c-old', quest_id: 'q1', name: 'First chore', points: 3, member_id: 'm-a', member_name: 'Ann', done_at: d1 },
-    { completion_id: 'c-new', quest_id: 'q2', name: 'Second chore', points: 7, member_id: 'm-b', member_name: 'Ben', done_at: d2 },
+    { completion_id: 'c-old', quest_id: 'q1', name: 'First chore', points: 3, member_id: 'm-a', member_name: 'Ann', done_at: d1, teamwork_bonus: 0, members: [{ member_id: 'm-a', member_name: 'Ann', points: 3 }] },
+    { completion_id: 'c-new', quest_id: 'q2', name: 'Second chore', points: 7, member_id: 'm-b', member_name: 'Ben', done_at: d2, teamwork_bonus: 0, members: [{ member_id: 'm-b', member_name: 'Ben', points: 7 }] },
   ];
   srv.pending = () => [200, { items }];
   srv.extra[`POST ${HP}/quest-completions/c-old/approve`] = () => {
@@ -638,13 +839,13 @@ test('CLM-3: home view with no households shows the New household form as the pr
 
 // combos CLM-5/CLM-6: the approve response's combo_bonuses becomes a plain-text
 // notice naming the chore and every combo paid; none paid, no notice.
-function approvalWithBonuses(bonuses) {
+function approvalWithBonuses(bonuses, streak = {}) {
   srv.adminPinSet = true;
-  let items = [{ completion_id: 'c1', quest_id: 'q1', name: 'Wipe counters', points: 10, member_id: 'm-a', member_name: 'Sam', done_at: '2025-01-03T00:00:00Z' }];
+  let items = [{ completion_id: 'c1', quest_id: 'q1', name: 'Wipe counters', points: 10, member_id: 'm-a', member_name: 'Sam', done_at: '2025-01-03T00:00:00Z', teamwork_bonus: 0, members: [{ member_id: 'm-a', member_name: 'Sam', points: 10 }] }];
   srv.pending = () => [200, { items }];
   srv.extra[`POST ${HP}/quest-completions/c1/approve`] = () => {
     items = [];
-    return [200, { completion: { id: 'c1', quest_id: 'q1', member_id: 'm-a', done_at: '2025-01-03T00:00:00Z', approved_at: '2025-01-04T00:00:00Z', status: 'approved' }, member: srv.members[0], combo_bonuses: bonuses }];
+    return [200, { completion: { id: 'c1', quest_id: 'q1', member_id: 'm-a', done_at: '2025-01-03T00:00:00Z', approved_at: '2025-01-04T00:00:00Z', status: 'approved' }, member: srv.members[0], combo_bonuses: bonuses, streak_bonus: 0, streak_count: 1, ...streak }];
   };
 }
 
@@ -689,6 +890,115 @@ test('combos CLM-6: a combo name with markup stays literal text in the bonus not
   assert.equal(walk(env.$app).filter((n) => n.tagName === 'IMG').length, 0);
 });
 
+// ── streaks CLM-13: the approve response's streak bonus is told to the admin ──
+
+test('streaks CLM-13: an approval that paid a streak bonus shows Streak bonus +N (streak n) as text', async () => {
+  approvalWithBonuses([], { streak_bonus: 5, streak_count: 4 });
+  await loadApp();
+  await unlockAdmin('9999');
+  await click(buttons(env.$app, 'Approve')[0]);
+  const [notice] = alerts();
+  assert.ok(notice, 'a notice is shown');
+  const span = walk(notice).find((n) => n.tagName === 'SPAN');
+  assert.equal(span.childNodes.length, 1);
+  assert.ok(span.childNodes[0] instanceof Text, 'notice is a text node');
+  assert.equal(span.childNodes[0].data, "Approved 'Wipe counters' for Sam: +10 points, Streak bonus +5 (streak 4)");
+  assert.match(text(), /Nothing waiting for approval\./);
+});
+
+test('streaks CLM-13: streak and combo bonuses paid together are both named in one notice', async () => {
+  approvalWithBonuses([{ combo_id: 'c1', name: 'Kitchen Crew', bonus_points: 20 }], { streak_bonus: 10, streak_count: 3 });
+  await loadApp();
+  await unlockAdmin('9999');
+  await click(buttons(env.$app, 'Approve')[0]);
+  const notice = alerts().map((n) => n.textContent).join('|');
+  assert.match(notice, /\+10 points, combo bonus 'Kitchen Crew' \+20, Streak bonus \+10 \(streak 3\)/);
+});
+
+test('streaks CLM-13: streak_bonus 0 shows no notice, even at a streak count of 3 or more', async () => {
+  approvalWithBonuses([], { streak_bonus: 0, streak_count: 5 });
+  await loadApp();
+  await unlockAdmin('9999');
+  await click(buttons(env.$app, 'Approve')[0]);
+  assert.doesNotMatch(text(), /Streak bonus \+/);
+  assert.equal(alerts().length, 0);
+});
+
+// ── streaks CLM-11: the quest form's streak bonus, and the rows that show it ──
+
+test('streaks CLM-11: the quest form sends streak_bonus as a number; quest, edit and library rows show the bonus', async () => {
+  srv.quests = [quest({ streak_bonus: 7 })];
+  srv.extra['GET /quest-library'] = () => [200, { items: [
+    { id: 'ql1', name: 'Make your bed', points: 5, repeat_days: 1, notes: '', streak_bonus: 5 },
+    { id: 'ql2', name: 'Clean the garage', points: 25, repeat_days: 30, notes: '', streak_bonus: 10 },
+  ] }];
+  srv.extra[`POST ${HP}/quests`] = (r) => [201, quest({ id: 'q2', ...r.body })];
+  srv.extra[`PUT ${HP}/quests/q1`] = (r) => [200, quest(r.body)];
+  await loadApp();
+
+  const manage = walk(env.$app).find((n) => n.tagName === 'H3' && n.textContent === 'Manage quests').parentNode;
+  assert.match(manage.textContent, /5 points · 1 day\(s\) · streak bonus 7/);
+  const lib = section(env.$app, 'Quest Library');
+  assert.match(lib, /Make your bed5 points · 1 day\(s\) · streak bonus 5/);
+  assert.match(lib, /Clean the garage25 points · 30 day\(s\) · streak bonus 10/);
+
+  const $add = buttons(env.$app, 'Add quest')[0].parentNode;
+  const input = ($f, name) => walk($f).find((n) => (n.tagName === 'INPUT' || n.tagName === 'TEXTAREA') && n.name === name);
+  const label = input($add, 'streak_bonus').parentNode.childNodes[0].textContent;
+  assert.equal(label, 'Streak bonus');
+  assert.equal(input($add, 'streak_bonus').type, 'number');
+  input($add, 'name').value = 'Water plants';
+  input($add, 'points').value = '3';
+  input($add, 'repeat_days').value = '1';
+  input($add, 'streak_bonus').value = '5';
+  await submit($add);
+  const post = calls.filter((c) => c.method === 'POST' && c.path === `${HP}/quests`).at(-1);
+  assert.equal(post.body.streak_bonus, 5, "'5' is sent as the number 5");
+
+  await click(buttons(walk(env.$app).find((n) => n.tagName === 'H3' && n.textContent === 'Manage quests').parentNode, 'Edit')[0]);
+  const $edit = buttons(env.$app, 'Save')[0].parentNode;
+  assert.equal(String(input($edit, 'streak_bonus').value), '7', 'edit form starts from the quest\'s bonus');
+  input($edit, 'streak_bonus').value = '-1';
+  await submit($edit);
+  const put = calls.filter((c) => c.method === 'PUT' && c.path === `${HP}/quests/q1`).at(-1);
+  assert.equal(put.body.streak_bonus, -1, 'the server, not the client, judges the value');
+  noInlineStyle();
+});
+
+test('streaks: the add form starts the streak bonus at 0, and a blank streak bonus is left out so the server saves 0', async () => {
+  srv.extra[`POST ${HP}/quests`] = (r) => [201, quest({ id: 'q2', ...r.body, streak_bonus: r.body.streak_bonus ?? 0 })];
+  await loadApp();
+  const $add = buttons(env.$app, 'Add quest')[0].parentNode;
+  const input = ($f, name) => walk($f).find((n) => (n.tagName === 'INPUT' || n.tagName === 'TEXTAREA') && n.name === name);
+  assert.equal(String(input($add, 'streak_bonus').value), '0', 'a new quest starts at 0');
+
+  input($add, 'name').value = 'Water plants';
+  input($add, 'points').value = '3';
+  input($add, 'repeat_days').value = '1';
+  input($add, 'streak_bonus').value = '';
+  await submit($add);
+  const post = calls.filter((c) => c.method === 'POST' && c.path === `${HP}/quests`).at(-1);
+  assert.ok(post, 'the quest was posted');
+  assert.equal('streak_bonus' in post.body, false, 'a blank streak bonus is not sent as an empty string');
+  assert.equal(post.body.points, 3);
+});
+
+test('streaks: blanking the streak bonus on the edit form never sends 0; it is left out so the server keeps the stored bonus', async () => {
+  srv.quests = [quest({ streak_bonus: 7 })];
+  srv.extra[`PUT ${HP}/quests/q1`] = (r) => [200, quest({ ...r.body, streak_bonus: r.body.streak_bonus ?? 7 })];
+  await loadApp();
+  const input = ($f, name) => walk($f).find((n) => (n.tagName === 'INPUT' || n.tagName === 'TEXTAREA') && n.name === name);
+  await click(buttons(walk(env.$app).find((n) => n.tagName === 'H3' && n.textContent === 'Manage quests').parentNode, 'Edit')[0]);
+  const $edit = buttons(env.$app, 'Save')[0].parentNode;
+  assert.equal(String(input($edit, 'streak_bonus').value), '7');
+  input($edit, 'streak_bonus').value = '';
+  await submit($edit);
+  const put = calls.filter((c) => c.method === 'PUT' && c.path === `${HP}/quests/q1`).at(-1);
+  assert.ok(put, 'the quest was saved');
+  assert.equal('streak_bonus' in put.body, false, 'a blank streak bonus is omitted, never sent as 0');
+  assert.notEqual(put.body.streak_bonus, 0);
+});
+
 // ── fix CLM-1: the combos read is the combos card's alone ───────────────────
 
 const comboReads = () => calls.filter((c) => c.method === 'GET' && c.path === `${HP}/combos`);
@@ -713,4 +1023,236 @@ test('fix CLM-1: the member view sends no combos request', async () => {
   assert.ok(calls.filter((c) => c.method === 'GET' && c.path === `${HP}/quests`).length > 1, 'tab re-read for Ann');
   assert.equal(comboReads().length, before, 'combos requested in member view');
   assert.doesNotMatch(text(), /Manage combos/);
+});
+
+// ── quest sharing (CLM-2, CLM-5, CLM-6, CLM-10) ──────────────────────────────
+
+const field = (root, name) => walk(root).find((n) => (n.tagName === 'INPUT' || n.tagName === 'TEXTAREA') && n.name === name);
+
+test('sharing CLM-2: the admin form shows Teamwork bonus only while Shareable is ticked, sends both, and every list row shows Shareable and Teamwork bonus', async () => {
+  srv.quests = [
+    quest({ id: 'q1', name: 'Clean the living room', points: 100, shareable: true, teamwork_bonus: 20 }),
+    quest({ id: 'q2', name: 'Take out trash', points: 10 }),
+  ];
+  srv.extra[`POST ${HP}/quests`] = (r) => [201, quest({ id: 'q3', ...r.body })];
+  await loadApp();
+  const rowOf = (name) => walk(env.$app).find((n) => n.tagName === 'LI' && n.textContent.startsWith(name));
+  assert.match(rowOf('Clean the living room').textContent, /Shareable Yes · Teamwork bonus 20/);
+  assert.match(rowOf('Take out trash').textContent, /Shareable No · Teamwork bonus -/);
+
+  const $form = buttons(env.$app, 'Add quest')[0].parentNode;
+  assert.ok(field($form, 'shareable'), 'Shareable checkbox present');
+  assert.equal(field($form, 'teamwork_bonus'), undefined, 'bonus hidden while Shareable is unticked');
+  field($form, 'name').value = 'Clean the living room';
+  field($form, 'points').value = '100';
+  field($form, 'repeat_days').value = '7';
+  await click(field($form, 'shareable'));
+  assert.ok(field($form, 'teamwork_bonus'), 'bonus shown once Shareable is ticked');
+  field($form, 'teamwork_bonus').value = '20';
+  await submit($form);
+  const post = calls.filter((c) => c.method === 'POST' && c.path === `${HP}/quests`).at(-1);
+  assert.equal(post.body.shareable, true);
+  assert.equal(post.body.teamwork_bonus, 20);
+
+  // Unticked again: the field goes and no bonus is sent as live.
+  const $form2 = buttons(env.$app, 'Add quest')[0].parentNode;
+  field($form2, 'name').value = 'Dust';
+  await click(field($form2, 'shareable'));
+  field($form2, 'teamwork_bonus').value = '15';
+  await click(field($form2, 'shareable'));
+  assert.equal(field($form2, 'teamwork_bonus'), undefined);
+  await submit($form2);
+  const post2 = calls.filter((c) => c.method === 'POST' && c.path === `${HP}/quests`).at(-1);
+  assert.equal(post2.body.shareable, false);
+  assert.equal(post2.body.teamwork_bonus, 0);
+  noInlineStyle();
+});
+
+test('sharing CLM-2: editing a shareable quest starts with Shareable ticked and its bonus, and PUT sends both', async () => {
+  srv.quests = [quest({ id: 'q1', name: 'Clean the living room', points: 100, shareable: true, teamwork_bonus: 20 })];
+  srv.extra[`PUT ${HP}/quests/q1`] = (r) => [200, quest({ id: 'q1', ...r.body })];
+  await loadApp();
+  await click(buttons(env.$app, 'Edit')[0]);
+  const $form = buttons(env.$app, 'Save')[0].parentNode;
+  assert.equal(field($form, 'shareable').checked, true);
+  assert.equal(String(field($form, 'teamwork_bonus').value), '20');
+  field($form, 'teamwork_bonus').value = '30';
+  await submit($form);
+  const put = calls.filter((c) => c.method === 'PUT' && c.path === `${HP}/quests/q1`).at(-1);
+  assert.equal(put.body.shareable, true);
+  assert.equal(put.body.teamwork_bonus, 30);
+});
+
+const sharedQuest = () => quest({
+  id: 'q1', name: 'Clean the living room', points: 100, available: false, claimed_by: 'm-a',
+  shareable: true, teamwork_bonus: 20, shared: true, participants: ['m-a', 'm-b'],
+});
+
+async function becomeCat() {
+  srv.extra[`POST ${HP}/family-members/m-c/verify`] = () => [204, null];
+  await click(buttons(env.$app, 'Switch member')[0]);
+  await click(buttonStarting(env.$app, 'Cat'));
+}
+
+test('sharing CLM-5: a shared quest is under Mine with the Shared badge and the other members for each participant, not for anyone else', async () => {
+  srv.members.push({ id: 'm-c', household_id: H, name: 'Cat', has_pin: false, points: 0 });
+  srv.quests = [sharedQuest()];
+  const rowOf = () => walk(env.$app).find((n) => n.tagName === 'LI' && n.textContent.startsWith('Clean the living room'));
+  const badge = () => walk(rowOf()).filter((n) => n.tagName === 'SPAN' && n.className === 'badge badge-sm' && n.textContent === 'Shared');
+  await loadApp();
+
+  await becomeAnn();
+  assert.match(section(env.$app, 'Mine'), /Clean the living room/);
+  assert.equal(badge().length, 1);
+  assert.match(rowOf().textContent, /Shared with Ben/);
+  assert.doesNotMatch(rowOf().textContent, /Shared with .*Ann/);
+
+  await backToAdmin();
+  await becomeBen();
+  assert.match(section(env.$app, 'Mine'), /Clean the living room/);
+  assert.equal(badge().length, 1);
+  assert.match(rowOf().textContent, /Shared with Ann/);
+  assert.equal(buttons(rowOf(), 'Mark done').length, 1, 'any participant can mark it done');
+  assert.equal(buttons(rowOf(), 'Share').length, 0, 'only the holder shares');
+
+  await backToAdmin();
+  await becomeCat();
+  assert.doesNotMatch(section(env.$app, 'Mine'), /Clean the living room/);
+  assert.match(section(env.$app, 'Claimed'), /Clean the living room/);
+  noInlineStyle();
+});
+
+test('sharing CLM-6: Share on the holder\'s shareable quest picks a member not on it, asks that member\'s PIN, and posts both members and PINs', async () => {
+  srv.members.push({ id: 'm-c', household_id: H, name: 'Cat', has_pin: false, points: 0 });
+  srv.quests = [quest({ id: 'q1', name: 'Clean the living room', available: false, claimed_by: 'm-a', shareable: true, teamwork_bonus: 20 })];
+  srv.extra[`POST ${HP}/quests/q1/share`] = (r) => {
+    srv.quests = [quest({ ...srv.quests[0], shared: true, participants: ['m-a', r.body.target_member_id] })];
+    return [200, srv.quests[0]];
+  };
+  const shareCalls = () => calls.filter((c) => c.path === `${HP}/quests/q1/share`);
+  await loadApp();
+  await becomeAnn();
+  const rowOf = () => walk(env.$app).find((n) => n.tagName === 'LI' && n.textContent.startsWith('Clean the living room'));
+  assert.equal(buttons(rowOf(), 'Share').length, 1);
+  await click(buttons(rowOf(), 'Share')[0]);
+  const picker = walk(env.$app).find((n) => n.className === 'font-semibold' && n.textContent === 'Share Clean the living room with').parentNode;
+  const offered = walk(picker).filter((n) => n.tagName === 'BUTTON' && n.textContent !== 'Cancel').map((n) => n.textContent);
+  assert.deepEqual(offered, ['Ben', 'Cat'], 'self is not offered');
+  assert.equal(shareCalls().length, 0, 'nothing sent before a member is picked');
+
+  await click(buttons(picker, 'Ben')[0]);
+  assert.match(text(), /Ben enters their PIN to accept/);
+  const $pin = walk(env.$app).find((n) => n.tagName === 'INPUT' && n.name === 'pin');
+  $pin.value = '5678';
+  await submit($pin.parentNode.parentNode);
+  assert.equal(shareCalls().length, 1);
+  assert.deepEqual(shareCalls()[0].body, { member_id: 'm-a', pin: '', target_member_id: 'm-b', target_pin: '5678' });
+  assert.match(rowOf().textContent, /Shared with Ben/);
+
+  // Ben is on it now: only Cat is left to offer.
+  await click(buttons(rowOf(), 'Share')[0]);
+  const picker2 = walk(env.$app).find((n) => n.className === 'font-semibold' && n.textContent === 'Share Clean the living room with').parentNode;
+  assert.deepEqual(walk(picker2).filter((n) => n.tagName === 'BUTTON' && n.textContent !== 'Cancel').map((n) => n.textContent), ['Cat']);
+  await click(buttons(picker2, 'Cat')[0]);
+  assert.equal(shareCalls().length, 2, 'a member without a PIN is shared with at once');
+  assert.deepEqual(shareCalls()[1].body, { member_id: 'm-a', pin: '', target_member_id: 'm-c', target_pin: '' });
+  noInlineStyle();
+});
+
+test('sharing CLM-6 / 1.1/5: a wrong PIN for the sharer (no target_pin field) clears the active member as on accept, even after the target typed their PIN', async () => {
+  srv.quests = [quest({ id: 'q1', name: 'Clean the living room', available: false, claimed_by: 'm-a', shareable: true, teamwork_bonus: 20 })];
+  srv.extra[`POST ${HP}/quests/q1/share`] = () => err(403, 'wrong_pin', 'Wrong PIN.');
+  await loadApp();
+  await becomeAnn();
+  const rowOf = () => walk(env.$app).find((n) => n.tagName === 'LI' && n.textContent.startsWith('Clean the living room'));
+  await click(buttons(rowOf(), 'Share')[0]);
+  const picker = walk(env.$app).find((n) => n.className === 'font-semibold' && n.textContent === 'Share Clean the living room with').parentNode;
+  await click(buttons(picker, 'Ben')[0]);
+  const $pin = walk(env.$app).find((n) => n.tagName === 'INPUT' && n.name === 'pin');
+  $pin.value = '5678';
+  await submit($pin.parentNode.parentNode);
+  assert.match(text(), /Choose a family member to take quests\./);
+  assert.match(document.body.textContent, /That PIN is no longer correct\. Pick the member again\./);
+  assert.doesNotMatch(text(), /Wrong PIN\. Try again\./);
+  assert.equal(signedOut, 0);
+});
+
+test('sharing CLM-6 / 1.1/5: a wrong target PIN (fields.target_pin) stays on the target\'s PIN form and keeps the active member', async () => {
+  srv.quests = [quest({ id: 'q1', name: 'Clean the living room', available: false, claimed_by: 'm-a', shareable: true, teamwork_bonus: 20 })];
+  srv.extra[`POST ${HP}/quests/q1/share`] = () => [403, { error: { code: 'wrong_pin', message: 'Wrong PIN.', fields: { target_pin: 'is wrong' } } }];
+  await loadApp();
+  await becomeAnn();
+  const rowOf = () => walk(env.$app).find((n) => n.tagName === 'LI' && n.textContent.startsWith('Clean the living room'));
+  await click(buttons(rowOf(), 'Share')[0]);
+  const picker = walk(env.$app).find((n) => n.className === 'font-semibold' && n.textContent === 'Share Clean the living room with').parentNode;
+  await click(buttons(picker, 'Ben')[0]);
+  const $pin = walk(env.$app).find((n) => n.tagName === 'INPUT' && n.name === 'pin');
+  $pin.value = '5678';
+  await submit($pin.parentNode.parentNode);
+  assert.match(text(), /Wrong PIN\. Try again\./);
+  assert.match(text(), /Ben enters their PIN to accept/);
+  assert.doesNotMatch(text(), /Choose a family member to take quests\./);
+});
+
+test('sharing CLM-6: no Share on a quest that is not shareable, one held by someone else, or when nobody is left to share with', async () => {
+  srv.quests = [
+    quest({ id: 'q1', name: 'Take out trash', available: false, claimed_by: 'm-a' }),
+    quest({ id: 'q2', name: 'Bens shareable', available: false, claimed_by: 'm-b', shareable: true, teamwork_bonus: 5 }),
+    quest({ id: 'q3', name: 'Full house', available: false, claimed_by: 'm-a', shareable: true, teamwork_bonus: 5, shared: true, participants: ['m-a', 'm-b'] }),
+  ];
+  await loadApp();
+  await becomeAnn();
+  const rowOf = (name) => walk(env.$app).find((n) => n.tagName === 'LI' && n.textContent.startsWith(name));
+  assert.equal(buttons(rowOf('Take out trash'), 'Share').length, 0);
+  assert.equal(buttons(rowOf('Bens shareable'), 'Share').length, 0);
+  assert.equal(buttons(rowOf('Full house'), 'Share').length, 0);
+  assert.equal(buttons(env.$app, 'Share').length, 0);
+  assert.equal(calls.filter((c) => c.path.endsWith('/share')).length, 0);
+});
+
+test('sharing CLM-10: a shared completion is one approval item naming every member and what each gets, with Approve and Send back', async () => {
+  srv.adminPinSet = true;
+  let items = [{
+    completion_id: 'c1', quest_id: 'q1', name: 'Clean the living room', points: 100, teamwork_bonus: 20,
+    member_id: 'm-a', member_name: 'Alex', done_at: '2025-01-03T00:00:00Z',
+    members: [{ member_id: 'm-a', member_name: 'Alex', points: 50 }, { member_id: 'm-b', member_name: 'Sam', points: 50 }],
+  }];
+  srv.pending = () => [200, { items }];
+  srv.extra[`POST ${HP}/quest-completions/c1/approve`] = () => {
+    items = [];
+    return [200, { completion: { id: 'c1', status: 'approved' }, member: srv.members[0], combo_bonuses: [{ combo_id: 'k1', name: 'Tidy', bonus_points: 5 }] }];
+  };
+  await loadApp();
+  await unlockAdmin('9999');
+  const approvals = walk(env.$app).find((n) => n.tagName === 'H3' && n.textContent === 'Approvals').parentNode;
+  const lis = walk(approvals).filter((n) => n.tagName === 'LI');
+  assert.equal(lis.length, 1, 'one item for the shared completion');
+  const lines = walk(lis[0]).filter((n) => n.tagName === 'DIV').map((n) => n.textContent);
+  assert.ok(lines.includes('shared by Alex and Sam'), lines.join('|'));
+  assert.ok(lines.includes('Alex gets 50 + 20 bonus = 70'));
+  assert.ok(lines.includes('Sam gets 50 + 20 bonus = 70'));
+  assert.equal(buttons(lis[0], 'Approve').length, 1);
+  assert.equal(buttons(lis[0], 'Send back').length, 1);
+  noInlineStyle();
+
+  await click(buttons(lis[0], 'Approve')[0]);
+  const notice = alerts().map((n) => n.textContent).join('|');
+  assert.match(notice, /Approved 'Clean the living room' for Alex and Sam: \+50 points and \+20 teamwork bonus each, combo bonus 'Tidy' \+5/);
+});
+
+test('sharing CLM-10: three members are named with commas and and, each with their split', async () => {
+  srv.adminPinSet = true;
+  srv.pending = () => [200, { items: [{
+    completion_id: 'c1', quest_id: 'q1', name: 'Big clean', points: 100, teamwork_bonus: 20,
+    member_id: 'm-a', member_name: 'Ann', done_at: '2025-01-03T00:00:00Z',
+    members: [
+      { member_id: 'm-a', member_name: 'Ann', points: 34 },
+      { member_id: 'm-b', member_name: 'Ben', points: 34 },
+      { member_id: 'm-c', member_name: 'Cat', points: 34 },
+    ],
+  }] }];
+  await loadApp();
+  await unlockAdmin('9999');
+  assert.match(text(), /shared by Ann, Ben and Cat/);
+  assert.match(text(), /Cat gets 34 \+ 20 bonus = 54/);
 });

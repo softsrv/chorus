@@ -44,12 +44,14 @@ var prodAllow = map[string][]string{
 
 // testExtra is what a package's _test.go files (internal and external test
 // packages) may import beyond the package under test and its production
-// allowlist. internal/http's integration tests mint tokens with internal/auth;
+// allowlist. internal/http's integration tests and internal/http/handlers'
+// tests mint tokens with internal/auth;
 // internal/app and internal/http tests refuse outbound dials with
 // internal/testnet, a test-only helper no production file may import.
 var testExtra = map[string][]string{
-	"internal/http": {"internal/auth", "internal/testnet"},
-	"internal/app":  {"internal/testnet"},
+	"internal/http":          {"internal/auth", "internal/testnet"},
+	"internal/app":           {"internal/testnet"},
+	"internal/http/handlers": {"internal/auth"},
 }
 
 // edge is one chorus import: the importing file, its package directory, the
@@ -297,7 +299,7 @@ func TestImportBoundaries(t *testing.T) {
 		}{
 			{edge{"internal/http/a_integration_test.go", "internal/http", "internal/auth", true}, true},
 			{edge{"internal/users/v_test.go", "internal/users", "internal/users", true}, true},
-			{edge{"internal/http/handlers/h_test.go", "internal/http/handlers", "internal/auth", true}, false},
+			{edge{"internal/http/handlers/h_test.go", "internal/http/handlers", "internal/email", true}, false},
 			{edge{"internal/auth/a_test.go", "internal/auth", "internal/db", true}, false},
 			{edge{"internal/app/a_test.go", "internal/app", "cmd/app", true}, false},
 			{edge{"web/w_test.go", "web", "internal/db", true}, false},

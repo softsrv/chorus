@@ -4,7 +4,8 @@
 //	{"error": {"code": "validation_failed", "message": "...", "fields": {"title": "is required"}}}
 //
 // code is a stable machine-readable identifier; message is for humans and may
-// change; fields is present only for validation errors.
+// change; fields is present for validation errors, and on a share's wrong
+// target PIN names target_pin.
 package respond
 
 import (
