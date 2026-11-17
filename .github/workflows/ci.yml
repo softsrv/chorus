@@ -41,6 +41,8 @@ jobs:
         run: go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@latest -path db/migrations -database "$TEST_DATABASE_URL" up
       - run: gofmt -l . | tee /dev/stderr | (! read)
       - run: go vet ./... && go vet -tags integration ./...
+      - name: Check part boundaries
+        run: go test -run 'TestImportBoundaries|TestWebClientImportsStayInWeb' ./internal/archtest/
       - run: go test -race ./...
       - uses: actions/setup-node@v4
         with:
