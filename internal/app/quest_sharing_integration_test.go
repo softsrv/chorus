@@ -702,3 +702,153 @@ CREATE TRIGGER fail_credit_%[1]s BEFORE UPDATE ON family_members
 		t.Errorf("failed approve stored awards: %v, want none", got)
 	}
 }
+
+// TestIntegration_QuestSharingAbandon (CLM-18): abandoning a shared quest
+// takes only the acting member off it. When the holder leaves, the holder of
+// record passes to the earliest remaining participant; once one member is
+// left the quest is no longer shared, and approving it pays that member the
+// full points and no teamwork bonus. A household member not on the quest
+// gets ErrNotFound and nothing changes; the last member abandoning returns
+// the quest to the pool, where anyone can take it.
+func TestIntegration_QuestSharingAbandon(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	households := app.NewHouseholdService(q, pool)
+	familySvc := app.NewFamilyService(q, pool, 10)
+	quests := app.NewQuestService(q, pool)
+	ctx := context.Background()
+
+	admin := registerVerified(t, pool, authSvc, mailer, "questshareabandon").User.ID
+	h, err := households.Create(ctx, admin, app.HouseholdInput{Name: "Leavers"})
+	if err != nil {
+		t.Fatalf("create household: %v", err)
+	}
+	newMember := func(name string) app.MemberAction {
+		t.Helper()
+		m, err := familySvc.Create(ctx, admin, h.ID, app.FamilyMemberInput{Name: name}, "")
+		if err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+		return app.MemberAction{MemberID: m.ID}
+	}
+	ann, ben, cara, dan := newMember("Ann"), newMember("Ben"), newMember("Cara"), newMember("Dan")
+	quest, err := quests.Create(ctx, admin, h.ID, app.QuestInput{Name: "Clean the living room", Points: num(100), Shareable: true, TeamworkBonus: num(20)}, "")
+	if err != nil {
+		t.Fatalf("create quest: %v", err)
+	}
+	// acceptAndShare ends any cooldown, has Ann accept the quest and share it
+	// with each of with, in order.
+	acceptAndShare := func(with ...app.MemberAction) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `UPDATE household_quests SET available_at = NULL WHERE id = $1`, quest.ID); err != nil {
+			t.Fatalf("end cooldown: %v", err)
+		}
+		if _, err := quests.Accept(ctx, admin, h.ID, quest.ID, ann); err != nil {
+			t.Fatalf("Ann accepts: %v", err)
+		}
+		for _, m := range with {
+			if _, err := quests.Share(ctx, admin, h.ID, quest.ID, ann, m); err != nil {
+				t.Fatalf("share with %v: %v", m.MemberID, err)
+			}
+		}
+	}
+	// state is the quest's stored holder and its participants.
+	state := func() (*uuid.UUID, []uuid.UUID) {
+		t.Helper()
+		v, err := quests.Get(ctx, admin, h.ID, quest.ID)
+		if err != nil {
+			t.Fatalf("get quest: %v", err)
+		}
+		return v.ClaimedBy, v.Participants
+	}
+	is := func(got *uuid.UUID, want app.MemberAction) bool { return got != nil && *got == want.MemberID }
+
+	// 1. Ann, the holder, leaves a quest shared with Ben: Ben holds it
+	//    alone and it is no longer shared.
+	acceptAndShare(ben)
+	left, err := quests.Abandon(ctx, admin, h.ID, quest.ID, ann)
+	if err != nil {
+		t.Fatalf("Ann abandons: %v", err)
+	}
+	if !is(left.ClaimedBy, ben) || left.Shared() || len(left.Participants) != 0 {
+		t.Errorf("after Ann leaves: claimed_by=%v participants=%v, want Ben alone, not shared", left.ClaimedBy, left.Participants)
+	}
+	if holder, parts := state(); !is(holder, ben) || len(parts) != 0 || participantRows(t, pool, quest.ID) != 0 {
+		t.Errorf("stored after Ann leaves: claimed_by=%v participants=%v", holder, parts)
+	}
+	// Neither Ann (no longer on it) nor Dan (never on it) can abandon it,
+	// and nothing changes.
+	for name, act := range map[string]app.MemberAction{"Ann again": ann, "Dan": dan} {
+		if _, err := quests.Abandon(ctx, admin, h.ID, quest.ID, act); !errors.Is(err, app.ErrNotFound) {
+			t.Errorf("%s abandons: %v, want ErrNotFound", name, err)
+		}
+	}
+	if holder, parts := state(); !is(holder, ben) || len(parts) != 0 {
+		t.Errorf("refused abandons changed the quest: claimed_by=%v participants=%v", holder, parts)
+	}
+
+	// 2. Ben marks it done alone: one member, full points, no bonus.
+	if _, err := quests.MarkDone(ctx, admin, h.ID, quest.ID, ben); err != nil {
+		t.Fatalf("Ben marks done: %v", err)
+	}
+	item := pendingFor(t, quests, admin, h.ID, quest.ID)
+	if want := []app.PendingMember{{MemberID: ben.MemberID, Name: "Ben", Award: 100}}; !slices.Equal(item.Members, want) {
+		t.Errorf("pending after abandon: members %+v, want %+v", item.Members, want)
+	}
+	annBefore, benBefore := memberPoints(t, q, h.ID, ann.MemberID), memberPoints(t, q, h.ID, ben.MemberID)
+	_, _, _, credited, err := quests.Approve(ctx, admin, h.ID, item.ID, "")
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if len(credited) != 1 || credited[0].Member.ID != ben.MemberID || credited[0].PointsAwarded != 100 || credited[0].TeamworkBonus != 0 {
+		t.Errorf("approve credited %+v, want Ben alone with 100 and no bonus", credited)
+	}
+	if got := memberPoints(t, q, h.ID, ben.MemberID) - benBefore; got != 100 {
+		t.Errorf("Ben gained %d, want 100", got)
+	}
+	if got := memberPoints(t, q, h.ID, ann.MemberID); got != annBefore {
+		t.Errorf("Ann's points moved %d -> %d after she left", annBefore, got)
+	}
+
+	// 3. A participant who is not the holder leaves: Ann keeps holding it and
+	//    Cara stays on it; then Cara leaves and Ann is alone (not shared);
+	//    then Ann, the last member, leaves and the quest is back in the pool.
+	acceptAndShare(ben, cara)
+	if _, err := quests.Abandon(ctx, admin, h.ID, quest.ID, ben); err != nil {
+		t.Fatalf("Ben abandons: %v", err)
+	}
+	if holder, parts := state(); !is(holder, ann) || !slices.Equal(parts, []uuid.UUID{ann.MemberID, cara.MemberID}) {
+		t.Errorf("after Ben leaves: claimed_by=%v participants=%v, want Ann holding with Ann and Cara", holder, parts)
+	}
+	if _, err := quests.Abandon(ctx, admin, h.ID, quest.ID, cara); err != nil {
+		t.Fatalf("Cara abandons: %v", err)
+	}
+	if holder, parts := state(); !is(holder, ann) || len(parts) != 0 {
+		t.Errorf("after Cara leaves: claimed_by=%v participants=%v, want Ann alone, not shared", holder, parts)
+	}
+	back, err := quests.Abandon(ctx, admin, h.ID, quest.ID, ann)
+	if err != nil {
+		t.Fatalf("Ann, the last member, abandons: %v", err)
+	}
+	if back.ClaimedBy != nil || back.ClaimedAt.Valid || len(back.Participants) != 0 {
+		t.Errorf("last abandon: claimed_by=%v participants=%v, want back in the pool", back.ClaimedBy, back.Participants)
+	}
+	if v, err := quests.Accept(ctx, admin, h.ID, quest.ID, dan); err != nil || !is(v.ClaimedBy, dan) {
+		t.Errorf("Dan takes the pooled quest: %+v, %v", v.ClaimedBy, err)
+	}
+	if _, err := quests.Abandon(ctx, admin, h.ID, quest.ID, dan); err != nil {
+		t.Fatalf("Dan abandons: %v", err)
+	}
+
+	// 4. The holder leaves a quest shared with two others: the holder of
+	//    record passes to the earliest of them, and it stays shared.
+	acceptAndShare(ben, cara)
+	if _, err := quests.Abandon(ctx, admin, h.ID, quest.ID, ann); err != nil {
+		t.Fatalf("Ann abandons three-way quest: %v", err)
+	}
+	if holder, parts := state(); !is(holder, ben) || !slices.Equal(parts, []uuid.UUID{ben.MemberID, cara.MemberID}) {
+		t.Errorf("after the holder leaves three: claimed_by=%v participants=%v, want Ben holding with Ben and Cara", holder, parts)
+	}
+}
