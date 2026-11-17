@@ -60,6 +60,16 @@ type edge struct {
 
 func allowed(list []string, to string) bool { return slices.Contains(list, to) }
 
+// prodAllowed reports whether a non-test file of from may import to: cmd/app
+// may import any internal/* package (the bootstrap wires them all); everyone
+// else is held to prodAllow.
+func prodAllowed(from, to string) bool {
+	if from == "cmd/app" {
+		return strings.HasPrefix(to, "internal/") && to != "internal/archtest"
+	}
+	return allowed(prodAllow[from], to)
+}
+
 // checkEdges applies the production rules to non-test edges and the test rules
 // to test edges, and returns one message per violation naming file and edge.
 // It is pure: no filesystem access.
@@ -79,14 +89,14 @@ func checkEdges(edges []edge) []string {
 		case e.To == "internal/archtest":
 			bad("nothing may import internal/archtest")
 		case !e.Test:
-			if !allowed(prodAllow[e.From], e.To) {
+			if !prodAllowed(e.From, e.To) {
 				bad(fmt.Sprintf("not in the production allowlist for %s %v", e.From, prodAllow[e.From]))
 			}
 		case (e.From == "web" || strings.HasPrefix(e.From, "web/")) && strings.HasPrefix(e.To, "internal/"):
 			bad("web tests never import internal/*")
 		case e.To == e.From:
 			// a test of its own package (internal or external test package)
-		case allowed(prodAllow[e.From], e.To), allowed(testExtra[e.From], e.To):
+		case prodAllowed(e.From, e.To), allowed(testExtra[e.From], e.To):
 		default:
 			bad(fmt.Sprintf("tests of %s may import only it, %v and %v", e.From, prodAllow[e.From], testExtra[e.From]))
 		}
@@ -235,13 +245,13 @@ func TestImportBoundaries(t *testing.T) {
 
 	t.Run("detector fires: production rules", func(t *testing.T) {
 		targets := knownPackages()
-		for from, list := range prodAllow {
+		for from := range prodAllow {
 			for _, to := range targets {
 				if to == from {
 					continue
 				}
 				got := checkEdges([]edge{{File: from + "/x.go", From: from, To: to}})
-				want := allowed(list, to)
+				want := prodAllowed(from, to)
 				if want && len(got) != 0 {
 					t.Errorf("allowed production edge %s -> %s reported: %v", from, to, got)
 				}
@@ -267,7 +277,7 @@ func TestImportBoundaries(t *testing.T) {
 			for _, to := range targets {
 				want := to != "cmd/app" && to != "internal/archtest" &&
 					!(from == "web" && strings.HasPrefix(to, "internal/")) &&
-					(to == from || allowed(prodAllow[from], to) || allowed(testExtra[from], to))
+					(to == from || prodAllowed(from, to) || allowed(testExtra[from], to))
 				got := checkEdges([]edge{{File: from + "/x_test.go", From: from, To: to, Test: true}})
 				if want && len(got) != 0 {
 					t.Errorf("allowed test edge %s -> %s reported: %v", from, to, got)
