@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -89,15 +90,37 @@ type Completion struct {
 }
 
 // PendingCompletion is a completion waiting for approval, with the chore's
-// name and current points and the name of the member who did it.
+// name, current points and teamwork bonus, the member who marked it done
+// (MemberID, MemberName) and every member it covers. Members is never empty:
+// a completion that is not shared lists its one member. Each member's Award
+// is the chore's current points split among them, rounded up; TeamworkBonus
+// is paid on top only when more than one member is listed.
 type PendingCompletion struct {
-	ID         uuid.UUID
-	QuestID    uuid.UUID
-	QuestName  string
-	Points     int32
-	MemberID   uuid.UUID
-	MemberName string
-	DoneAt     time.Time
+	ID            uuid.UUID
+	QuestID       uuid.UUID
+	QuestName     string
+	Points        int32
+	TeamworkBonus int32
+	MemberID      uuid.UUID
+	MemberName    string
+	DoneAt        time.Time
+	Members       []PendingMember
+}
+
+// PendingMember is one member of a pending completion and the points their
+// split will credit (before any teamwork bonus).
+type PendingMember struct {
+	MemberID uuid.UUID
+	Name     string
+	Award    int32
+}
+
+// splitPoints is each member's share of points among n members, rounded up.
+func splitPoints(points int32, n int) int32 {
+	if n <= 1 {
+		return points
+	}
+	return int32((int64(points) + int64(n) - 1) / int64(n))
 }
 
 // releaseMemberQuests returns every quest the member holds to the household's
@@ -374,6 +397,70 @@ func (s *QuestService) Share(ctx context.Context, userID, householdID, questID u
 	return s.view(ctx, quest)
 }
 
+// lockQuestMembers locks, in ascending id order, the acting member and every
+// member on the quest (its holder and participants), so a statement that
+// records them all on a completion takes no member lock after the quest row.
+// The set is read without a lock and re-read under the locks; a share that
+// slipped in between adds a member, and the locks are taken again in order
+// on a fresh pass (a bounded number of times). The acting member removed
+// meanwhile is ErrNotFound; another member removed meanwhile is skipped.
+func lockQuestMembers(ctx context.Context, qtx *db.Queries, householdID, questID, actor uuid.UUID) error {
+	locked := map[uuid.UUID]bool{}
+	for range 3 {
+		want, err := questMemberIDs(ctx, qtx, householdID, questID, actor)
+		if err != nil {
+			return err
+		}
+		missing := false
+		for _, id := range want {
+			if !locked[id] {
+				missing = true
+			}
+		}
+		if !missing {
+			return nil
+		}
+		for _, id := range want {
+			if locked[id] {
+				continue
+			}
+			if _, err := notFoundIfNoRows(qtx.LockFamilyMember(ctx, db.LockFamilyMemberParams{HouseholdID: householdID, ID: id})); err != nil {
+				if errors.Is(err, ErrNotFound) && id != actor {
+					continue
+				}
+				// The acting member was removed between the PIN check and the lock.
+				return err
+			}
+			locked[id] = true
+		}
+	}
+	return fmt.Errorf("lock members of quest %s: set kept changing", questID)
+}
+
+// questMemberIDs is the actor, the quest's holder and its participants,
+// distinct and in ascending id order. A quest not in the household yields
+// the actor alone (the mark-done statement then matches nothing).
+func questMemberIDs(ctx context.Context, qtx *db.Queries, householdID, questID, actor uuid.UUID) ([]uuid.UUID, error) {
+	ids := []uuid.UUID{actor}
+	quest, err := qtx.GetHouseholdQuest(ctx, db.GetHouseholdQuestParams{HouseholdID: householdID, ID: questID})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return ids, nil
+	case err != nil:
+		return nil, fmt.Errorf("get quest: %w", err)
+	}
+	if quest.ClaimedBy != nil {
+		ids = append(ids, *quest.ClaimedBy)
+	}
+	participants, err := qtx.ListQuestParticipants(ctx, db.ListQuestParticipantsParams{HouseholdID: householdID, QuestID: questID})
+	if err != nil {
+		return nil, fmt.Errorf("list quest participants: %w", err)
+	}
+	ids = append(ids, participants...)
+	slices.SortFunc(ids, func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) })
+	return slices.Compact(ids), nil
+}
+
 // memberLockOrder returns the distinct member ids in ascending order, the
 // order a transaction locking several member rows takes them in.
 func memberLockOrder(a, b uuid.UUID) []uuid.UUID {
@@ -387,17 +474,20 @@ func memberLockOrder(a, b uuid.UUID) []uuid.UUID {
 	}
 }
 
-// MarkDone records that the acting member finished their quest. In one
-// transaction it locks the member row, then in one statement inserts a
-// pending completion (member, mark-done time now), releases the quest and
-// starts its cooldown from now: the quest comes back at local midnight in the
+// MarkDone records that the acting member finished their quest: its holder,
+// or any member on it when it is shared. In one transaction it locks the
+// row of every member on the quest, then in one statement inserts one
+// pending completion (marker, mark-done time now) covering every member on
+// the quest, clears the quest's participants, releases it and starts its
+// cooldown from now: the quest comes back at local midnight in the
 // household's timezone, repeat_days days after today, whether or not the
 // administrator has approved by then. No points move until approval. A quest
-// the member does not hold, or a member removed meanwhile, is ErrNotFound.
+// the member is not on, or a member removed meanwhile, is ErrNotFound.
 //
-// The member lock comes first because FamilyService.Remove takes it before it
-// releases the member's quests; taking the quest row first would deadlock
-// against a concurrent removal.
+// The member locks come first, in id order, because FamilyService.Remove
+// takes a member's lock before it releases that member's quests and
+// completions; taking the quest row first would deadlock against a
+// concurrent removal of any member on the quest.
 func (s *QuestService) MarkDone(ctx context.Context, userID, householdID, questID uuid.UUID, act MemberAction) (QuestView, error) {
 	if err := s.verifyActingMember(ctx, userID, householdID, act); err != nil {
 		return QuestView{}, err
@@ -413,8 +503,7 @@ func (s *QuestService) MarkDone(ctx context.Context, userID, householdID, questI
 	defer tx.Rollback(ctx) //nolint:errcheck
 	qtx := s.q.WithTx(tx)
 
-	if _, err := notFoundIfNoRows(qtx.LockFamilyMember(ctx, db.LockFamilyMemberParams{HouseholdID: householdID, ID: act.MemberID})); err != nil {
-		// The member was removed between the PIN check and the lock.
+	if err := lockQuestMembers(ctx, qtx, householdID, questID, act.MemberID); err != nil {
 		return QuestView{}, err
 	}
 	row, err := notFoundIfNoRows(qtx.MarkQuestDone(ctx, db.MarkQuestDoneParams{
@@ -433,8 +522,9 @@ func (s *QuestService) MarkDone(ctx context.Context, userID, householdID, questI
 }
 
 // ListPending returns the completions waiting for approval, one per
-// mark-done, oldest mark-done first, each with the chore's name and points
-// and the member's name. Admin only, behind the admin PIN once one is set.
+// mark-done (a shared quest's is one item naming every member), oldest
+// mark-done first, each with the chore's name, points and teamwork bonus and
+// every member with their split. Admin only, behind the admin PIN once one is set.
 // None waiting is an empty, non-nil slice.
 func (s *QuestService) ListPending(ctx context.Context, userID, householdID uuid.UUID, adminPin string) ([]PendingCompletion, error) {
 	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
@@ -450,9 +540,23 @@ func (s *QuestService) ListPending(ctx context.Context, userID, householdID uuid
 			// The join on family_members drops completions without a member.
 			continue
 		}
+		ids, names := r.MemberIds, r.MemberNames
+		if len(ids) == 0 || len(ids) != len(names) {
+			// Recorded before sharing: the marker is its one member.
+			ids, names = []uuid.UUID{*r.MemberID}, []string{r.MemberName}
+		}
+		award := splitPoints(r.Points, len(ids))
+		members := make([]PendingMember, len(ids))
+		for i, id := range ids {
+			members[i] = PendingMember{MemberID: id, Name: names[i], Award: award}
+		}
+		bonus := r.TeamworkBonus
+		if len(members) < 2 {
+			bonus = 0
+		}
 		out = append(out, PendingCompletion{
-			ID: r.ID, QuestID: r.QuestID, QuestName: r.QuestName, Points: r.Points,
-			MemberID: *r.MemberID, MemberName: r.MemberName, DoneAt: r.DoneAt.Time.UTC(),
+			ID: r.ID, QuestID: r.QuestID, QuestName: r.QuestName, Points: r.Points, TeamworkBonus: bonus,
+			MemberID: *r.MemberID, MemberName: r.MemberName, DoneAt: r.DoneAt.Time.UTC(), Members: members,
 		})
 	}
 	return out, nil

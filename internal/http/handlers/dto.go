@@ -204,26 +204,45 @@ func toCompletion(c app.Completion) completionJSON {
 }
 
 // pendingCompletionJSON is a completion waiting for approval, with the
-// chore's name and points and the name of the member who marked it done.
+// chore's name, points and teamwork bonus, the member who marked it done
+// (member_id, member_name) and every member it covers with their split
+// (members; one entry when it is not shared). teamwork_bonus is what each
+// member earns on top of their split, 0 when it is not shared.
 type pendingCompletionJSON struct {
-	CompletionID uuid.UUID `json:"completion_id"`
-	QuestID      uuid.UUID `json:"quest_id"`
-	Name         string    `json:"name"`
-	Points       int32     `json:"points"`
-	MemberID     uuid.UUID `json:"member_id"`
-	MemberName   string    `json:"member_name"`
-	DoneAt       time.Time `json:"done_at"`
+	CompletionID  uuid.UUID           `json:"completion_id"`
+	QuestID       uuid.UUID           `json:"quest_id"`
+	Name          string              `json:"name"`
+	Points        int32               `json:"points"`
+	TeamworkBonus int32               `json:"teamwork_bonus"`
+	MemberID      uuid.UUID           `json:"member_id"`
+	MemberName    string              `json:"member_name"`
+	DoneAt        time.Time           `json:"done_at"`
+	Members       []pendingMemberJSON `json:"members"`
+}
+
+// pendingMemberJSON is one member of a pending completion and the points
+// their split will credit.
+type pendingMemberJSON struct {
+	MemberID   uuid.UUID `json:"member_id"`
+	MemberName string    `json:"member_name"`
+	Points     int32     `json:"points"`
 }
 
 func toPendingCompletion(p app.PendingCompletion) pendingCompletionJSON {
+	members := make([]pendingMemberJSON, len(p.Members))
+	for i, m := range p.Members {
+		members[i] = pendingMemberJSON{MemberID: m.MemberID, MemberName: m.Name, Points: m.Award}
+	}
 	return pendingCompletionJSON{
-		CompletionID: p.ID,
-		QuestID:      p.QuestID,
-		Name:         p.QuestName,
-		Points:       p.Points,
-		MemberID:     p.MemberID,
-		MemberName:   p.MemberName,
-		DoneAt:       p.DoneAt,
+		CompletionID:  p.ID,
+		QuestID:       p.QuestID,
+		Name:          p.QuestName,
+		Points:        p.Points,
+		TeamworkBonus: p.TeamworkBonus,
+		MemberID:      p.MemberID,
+		MemberName:    p.MemberName,
+		DoneAt:        p.DoneAt,
+		Members:       members,
 	}
 }
 

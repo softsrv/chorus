@@ -150,7 +150,10 @@ type Querier interface {
 	ListHouseholdRewards(ctx context.Context, householdID uuid.UUID) ([]HouseholdReward, error)
 	ListHouseholdsForUser(ctx context.Context, userID uuid.UUID) ([]ListHouseholdsForUserRow, error)
 	// Completions waiting for approval, one row each, oldest mark-done first,
-	// with the chore's name and points and the name of the member who did it.
+	// with the chore's name, current points and teamwork bonus, the member who
+	// marked it done, and every member it covers (member_ids and member_names,
+	// in the same order: earliest recorded first). A completion recorded before
+	// quest sharing has no member rows; the caller reads its marker alone.
 	ListPendingCompletions(ctx context.Context, householdID uuid.UUID) ([]ListPendingCompletionsRow, error)
 	// Household quest queries are scoped by household_id. Membership is checked
 	// by the service layer first; the household_id predicate guarantees a quest ID
@@ -179,13 +182,18 @@ type Querier interface {
 	MarkGoogleCalendarConnectionBroken(ctx context.Context, userID uuid.UUID) (int64, error)
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
 	MarkPasswordResetTokenUsed(ctx context.Context, id uuid.UUID) (int64, error)
-	// The holder marks the quest done. In one statement the quest is released
-	// and starts its cooldown from now (quest_next_available_at: local midnight
-	// in the household's timezone, repeat_days days after today), and a pending
-	// completion recording the member and the mark-done time is inserted for the
-	// administrator. NOW() is one instant per transaction, so completed_at equals
-	// the completion's done_at. A quest the member does not hold matches no row
-	// and inserts nothing. No points move here.
+	// A member on the quest marks it done: its holder, or any participant when
+	// it is shared. In one statement the quest is released and starts its
+	// cooldown from now (quest_next_available_at: local midnight in the
+	// household's timezone, repeat_days days after today), one pending
+	// completion recording the marker and the mark-done time is inserted for the
+	// administrator, every member on the quest is recorded on that completion
+	// (the lone marker when it is not shared, so n is 1), and the quest's
+	// participants are cleared. Members keep their order: participants by
+	// joined_at, the lone marker at now. NOW() is one instant per transaction, so
+	// completed_at equals the completion's done_at. A quest the member is not on
+	// matches no row and writes nothing. No points move here. The caller holds
+	// the row locks of every member on the quest.
 	MarkQuestDone(ctx context.Context, arg MarkQuestDoneParams) (MarkQuestDoneRow, error)
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
 	MarkVerificationCodeUsed(ctx context.Context, id uuid.UUID) (int64, error)

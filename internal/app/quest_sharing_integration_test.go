@@ -7,6 +7,7 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -329,4 +330,140 @@ func TestIntegration_QuestSharing(t *testing.T) {
 	if want := []uuid.UUID{ann, ben, cara}; !slices.Equal(got.Participants, want) {
 		t.Errorf("after third share: participants %v, want %v", got.Participants, want)
 	}
+
+	// Mark done (CLM-9). A household member who is not on the quest cannot
+	// mark it done, and nothing changes.
+	dan := newMember(h.ID, "Dan", "")
+	if _, err := quests.MarkDone(ctx, admin, h.ID, shared.ID, app.MemberAction{MemberID: dan}); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("non-participant marks done: %v, want ErrNotFound", err)
+	}
+	if _, err := quests.MarkDone(ctx, admin, other.ID, shared.ID, app.MemberAction{MemberID: outsider}); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("outsider marks done via own household: %v, want ErrNotFound", err)
+	}
+	if n, p := completionRows(t, pool, shared.ID), participantRows(t, pool, shared.ID); n != 0 || p != 3 {
+		t.Errorf("refused mark-done: %d completions, %d participants; want 0 and 3", n, p)
+	}
+
+	// Cara, a participant who is not the holder, marks it done: it completes
+	// for all three at once as one pending completion.
+	doneView, err := quests.MarkDone(ctx, admin, h.ID, shared.ID, caraAct)
+	if err != nil || doneView.ClaimedBy != nil || !doneView.AwaitingApproval || doneView.Shared() {
+		t.Fatalf("Cara marks done: %+v, %v", doneView, err)
+	}
+	if n := completionRows(t, pool, shared.ID); n != 1 {
+		t.Errorf("shared mark-done: %d completions, want 1", n)
+	}
+	if n := participantRows(t, pool, shared.ID); n != 0 {
+		t.Errorf("shared mark-done left %d participant rows, want 0", n)
+	}
+	if view, err := quests.Get(ctx, admin, h.ID, shared.ID); err != nil || view.ClaimedBy != nil || view.Shared() || len(view.Participants) != 0 {
+		t.Errorf("after shared mark-done: %+v, %v; want released with no participants", view, err)
+	}
+	// Every member left the quest with it, so nobody can mark it done again.
+	for _, act := range []app.MemberAction{annAct, benAct, caraAct} {
+		if _, err := quests.MarkDone(ctx, admin, h.ID, shared.ID, act); !errors.Is(err, app.ErrNotFound) {
+			t.Errorf("mark done again as %v: %v, want ErrNotFound", act.MemberID, err)
+		}
+	}
+	item := pendingFor(t, quests, admin, h.ID, shared.ID)
+	wantThree := []app.PendingMember{{MemberID: ann, Name: "Ann", Award: 34}, {MemberID: ben, Name: "Ben", Award: 34}, {MemberID: cara, Name: "Cara", Award: 34}}
+	if !slices.Equal(item.Members, wantThree) || item.TeamworkBonus != 20 || item.Points != 100 ||
+		item.MemberID != cara || item.MemberName != "Cara" {
+		t.Errorf("pending shared completion: %+v, want members %v, bonus 20, marked by Cara", item, wantThree)
+	}
+
+	// Sending it back (CLM-13) pays nobody and reopens the cooldown.
+	pointsBefore := map[uuid.UUID]int32{}
+	for _, id := range []uuid.UUID{ann, ben, cara} {
+		pointsBefore[id] = memberPoints(t, q, h.ID, id)
+	}
+	rejected, err := quests.Reject(ctx, admin, h.ID, item.ID, "")
+	if err != nil || rejected.Status != "rejected" || rejected.ID != item.ID {
+		t.Fatalf("reject shared completion: %+v, %v", rejected, err)
+	}
+	for _, id := range []uuid.UUID{ann, ben, cara} {
+		if p := memberPoints(t, q, h.ID, id); p != pointsBefore[id] {
+			t.Errorf("member %v points after reject: %d, want %d", id, p, pointsBefore[id])
+		}
+	}
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM quest_completions WHERE id = $1`, item.ID).Scan(&status); err != nil || status != "rejected" {
+		t.Errorf("stored status after reject: %q, %v; want rejected", status, err)
+	}
+	if view, err := quests.Get(ctx, admin, h.ID, shared.ID); err != nil || !app.QuestAvailable(view.HouseholdQuest, time.Now()) || view.AwaitingApproval {
+		t.Errorf("after reject the shared quest should be available now: %+v, %v", view, err)
+	}
+
+	// Two members: Ann takes it again and shares with Ben; Ben marks done.
+	if _, err := quests.Accept(ctx, admin, h.ID, shared.ID, annAct); err != nil {
+		t.Fatalf("Ann accepts again: %v", err)
+	}
+	if _, err := quests.Share(ctx, admin, h.ID, shared.ID, annAct, benAct); err != nil {
+		t.Fatalf("share with Ben again: %v", err)
+	}
+	if _, err := quests.MarkDone(ctx, admin, h.ID, shared.ID, benAct); err != nil {
+		t.Fatalf("Ben marks done: %v", err)
+	}
+	item = pendingFor(t, quests, admin, h.ID, shared.ID)
+	wantTwo := []app.PendingMember{{MemberID: ann, Name: "Ann", Award: 50}, {MemberID: ben, Name: "Ben", Award: 50}}
+	if !slices.Equal(item.Members, wantTwo) || item.TeamworkBonus != 20 || item.MemberID != ben {
+		t.Errorf("pending two-member completion: %+v, want members %v, bonus 20, marked by Ben", item, wantTwo)
+	}
+	if n := participantRows(t, pool, shared.ID); n != 0 {
+		t.Errorf("two-member mark-done left %d participant rows", n)
+	}
+
+	// A quest that is never shared is one member with the full points and no
+	// teamwork bonus.
+	if _, err := quests.MarkDone(ctx, admin, h.ID, plain.ID, annAct); err != nil {
+		t.Fatalf("Ann marks plain done: %v", err)
+	}
+	item = pendingFor(t, quests, admin, h.ID, plain.ID)
+	if want := []app.PendingMember{{MemberID: ann, Name: "Ann", Award: 10}}; !slices.Equal(item.Members, want) ||
+		item.TeamworkBonus != 0 || item.MemberID != ann || item.Points != 10 {
+		t.Errorf("pending plain completion: %+v, want only Ann with 10 and no bonus", item)
+	}
+	if rows, err := quests.ListPending(ctx, admin, other.ID, ""); err != nil || len(rows) != 0 {
+		t.Errorf("other household's pending list: %+v, %v; want empty", rows, err)
+	}
+}
+
+// completionRows counts the completions of a quest, whatever their status.
+func completionRows(t *testing.T, pool *pgxpool.Pool, questID uuid.UUID) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM quest_completions WHERE quest_id = $1`, questID).Scan(&n); err != nil {
+		t.Fatalf("count completions: %v", err)
+	}
+	return n
+}
+
+// pendingFor is the one pending item of a quest in the admin's list.
+func pendingFor(t *testing.T, quests *app.QuestService, admin, householdID, questID uuid.UUID) app.PendingCompletion {
+	t.Helper()
+	rows, err := quests.ListPending(context.Background(), admin, householdID, "")
+	if err != nil {
+		t.Fatalf("list pending: %v", err)
+	}
+	var found []app.PendingCompletion
+	for _, r := range rows {
+		if r.QuestID == questID {
+			found = append(found, r)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("pending items for quest %v: %+v, want exactly 1", questID, found)
+	}
+	return found[0]
+}
+
+// memberPoints is a member's stored point balance.
+func memberPoints(t *testing.T, q *db.Queries, householdID, memberID uuid.UUID) int32 {
+	t.Helper()
+	m, err := q.GetFamilyMember(context.Background(), db.GetFamilyMemberParams{HouseholdID: householdID, ID: memberID})
+	if err != nil {
+		t.Fatalf("get member: %v", err)
+	}
+	return m.Points
 }

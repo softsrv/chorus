@@ -167,13 +167,18 @@ WHERE household_id = sqlc.arg(household_id) AND id = sqlc.arg(id)
   AND status = 'pending' AND member_id IS NOT NULL;
 
 -- name: MarkQuestDone :one
--- The holder marks the quest done. In one statement the quest is released
--- and starts its cooldown from now (quest_next_available_at: local midnight
--- in the household's timezone, repeat_days days after today), and a pending
--- completion recording the member and the mark-done time is inserted for the
--- administrator. NOW() is one instant per transaction, so completed_at equals
--- the completion's done_at. A quest the member does not hold matches no row
--- and inserts nothing. No points move here.
+-- A member on the quest marks it done: its holder, or any participant when
+-- it is shared. In one statement the quest is released and starts its
+-- cooldown from now (quest_next_available_at: local midnight in the
+-- household's timezone, repeat_days days after today), one pending
+-- completion recording the marker and the mark-done time is inserted for the
+-- administrator, every member on the quest is recorded on that completion
+-- (the lone marker when it is not shared, so n is 1), and the quest's
+-- participants are cleared. Members keep their order: participants by
+-- joined_at, the lone marker at now. NOW() is one instant per transaction, so
+-- completed_at equals the completion's done_at. A quest the member is not on
+-- matches no row and writes nothing. No points move here. The caller holds
+-- the row locks of every member on the quest.
 WITH done AS (
     UPDATE household_quests q
     SET claimed_by = NULL, claimed_at = NULL,
@@ -183,13 +188,41 @@ WITH done AS (
     FROM households h
     WHERE h.id = q.household_id
       AND q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id)
-      AND q.claimed_by = sqlc.arg(member_id)::uuid
+      AND q.claimed_by IS NOT NULL
+      AND (q.claimed_by = sqlc.arg(member_id)::uuid OR EXISTS (
+          SELECT 1 FROM household_quest_participants p
+          WHERE p.household_id = q.household_id AND p.quest_id = q.id
+            AND p.member_id = sqlc.arg(member_id)::uuid
+      ))
     RETURNING q.*
 ), recorded AS (
     INSERT INTO quest_completions (id, household_id, quest_id, member_id, done_at, status)
     SELECT sqlc.arg(completion_id)::uuid, d.household_id, d.id, sqlc.arg(member_id)::uuid, NOW(), 'pending'
     FROM done d
-    RETURNING id
+    RETURNING id, household_id
+), on_quest AS (
+    SELECT p.member_id, p.joined_at
+    FROM done d
+    JOIN household_quest_participants p ON p.household_id = d.household_id AND p.quest_id = d.id
+    UNION ALL
+    SELECT sqlc.arg(member_id)::uuid, NOW()
+    FROM done d
+    WHERE NOT EXISTS (
+        SELECT 1 FROM household_quest_participants p
+        WHERE p.household_id = d.household_id AND p.quest_id = d.id
+          AND p.member_id = sqlc.arg(member_id)::uuid
+    )
+), recorded_members AS (
+    INSERT INTO quest_completion_members (household_id, completion_id, member_id, added_at)
+    SELECT r.household_id, r.id, o.member_id, o.joined_at
+    FROM recorded r
+    CROSS JOIN on_quest o
+    RETURNING member_id
+), cleared AS (
+    DELETE FROM household_quest_participants p
+    USING done d
+    WHERE p.household_id = d.household_id AND p.quest_id = d.id
+    RETURNING p.member_id
 )
 SELECT d.id, d.household_id, d.library_id, d.name, d.points, d.repeat_days, d.notes,
        d.claimed_by, d.claimed_at, d.done_at, d.completed_at, d.available_at,
@@ -198,9 +231,24 @@ FROM done d;
 
 -- name: ListPendingCompletions :many
 -- Completions waiting for approval, one row each, oldest mark-done first,
--- with the chore's name and points and the name of the member who did it.
-SELECT c.id, c.quest_id, q.name AS quest_name, q.points, c.member_id,
-       m.name AS member_name, c.done_at
+-- with the chore's name, current points and teamwork bonus, the member who
+-- marked it done, and every member it covers (member_ids and member_names,
+-- in the same order: earliest recorded first). A completion recorded before
+-- quest sharing has no member rows; the caller reads its marker alone.
+SELECT c.id, c.quest_id, q.name AS quest_name, q.points, q.teamwork_bonus, c.member_id,
+       m.name AS member_name, c.done_at,
+       ARRAY(
+           SELECT cm.member_id FROM quest_completion_members cm
+           JOIN family_members fm ON fm.household_id = cm.household_id AND fm.id = cm.member_id
+           WHERE cm.household_id = c.household_id AND cm.completion_id = c.id
+           ORDER BY cm.added_at, cm.member_id
+       )::uuid[] AS member_ids,
+       ARRAY(
+           SELECT fm.name FROM quest_completion_members cm
+           JOIN family_members fm ON fm.household_id = cm.household_id AND fm.id = cm.member_id
+           WHERE cm.household_id = c.household_id AND cm.completion_id = c.id
+           ORDER BY cm.added_at, cm.member_id
+       )::text[] AS member_names
 FROM quest_completions c
 JOIN household_quests q ON q.household_id = c.household_id AND q.id = c.quest_id
 JOIN family_members m ON m.household_id = c.household_id AND m.id = c.member_id
