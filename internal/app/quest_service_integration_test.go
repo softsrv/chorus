@@ -1059,6 +1059,58 @@ func TestIntegration_QuestApproval(t *testing.T) {
 		t.Error("pending list not empty after all approved")
 	}
 
+	// CLM-16: a shareable quest with a teamwork bonus that was never shared
+	// has one recorded member, who gets the full points and no teamwork bonus,
+	// exactly like a quest that is not shareable.
+	soloShareable, err := quests.Create(ctx, alice, h.ID, app.QuestInput{
+		Name: "Wash the car", Points: num(100), Shareable: true, TeamworkBonus: num(20),
+	}, "")
+	if err != nil {
+		t.Fatalf("create shareable quest: %v", err)
+	}
+	if !soloShareable.Shareable || soloShareable.TeamworkBonus != 20 {
+		t.Fatalf("shareable quest stored as %+v", soloShareable.HouseholdQuest)
+	}
+	if _, err := quests.Accept(ctx, alice, h.ID, soloShareable.ID, asBen); err != nil {
+		t.Fatalf("accept shareable quest: %v", err)
+	}
+	if _, err := quests.MarkDone(ctx, alice, h.ID, soloShareable.ID, asBen); err != nil {
+		t.Fatalf("mark shareable quest done: %v", err)
+	}
+	soloRows := pending("")
+	if len(soloRows) != 1 || soloRows[0].QuestID != soloShareable.ID || soloRows[0].MemberID != ben.ID ||
+		soloRows[0].MemberName != "Ben" || soloRows[0].Points != 100 {
+		t.Fatalf("pending unshared shareable completion: %+v", soloRows)
+	}
+	benBeforeSolo := points(ben.ID)
+	annBeforeSolo := points(ann.ID)
+	soloComp, soloMember, soloBonuses, err := quests.Approve(ctx, alice, h.ID, soloRows[0].ID, "")
+	if err != nil {
+		t.Fatalf("approve unshared shareable completion: %v", err)
+	}
+	if soloComp.Status != "approved" || soloComp.MemberID == nil || *soloComp.MemberID != ben.ID {
+		t.Errorf("approved unshared shareable completion: %+v", soloComp)
+	}
+	if len(soloBonuses) != 0 {
+		t.Errorf("combo bonuses for unshared shareable completion: %+v, want none", soloBonuses)
+	}
+	// Full 100 points, not 100 + 20 and not a split.
+	if soloMember.ID != ben.ID || soloMember.Points != benBeforeSolo+100 {
+		t.Errorf("credited member: %+v, want Ben with %d points", soloMember, benBeforeSolo+100)
+	}
+	if p := points(ben.ID); p != benBeforeSolo+100 {
+		t.Errorf("Ben's points after unshared shareable approval: %d, want %d", p, benBeforeSolo+100)
+	}
+	if p := points(ann.ID); p != annBeforeSolo {
+		t.Errorf("Ann's points moved on Ben's approval: %d, want %d", p, annBeforeSolo)
+	}
+	if _, _, _, err := quests.Approve(ctx, alice, h.ID, soloRows[0].ID, ""); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("repeat approve unshared shareable: %v, want ErrNotFound", err)
+	}
+	if p := points(ben.ID); p != benBeforeSolo+100 {
+		t.Errorf("Ben's points after repeat approve: %d, want %d", p, benBeforeSolo+100)
+	}
+
 	// CLM-5: Reject latest vs earlier:
 	// Two completions: reject earlier -> available_at unchanged.
 	// Reject latest (quest.completed_at = done_at) -> available_at <= now, QuestAvailable true.
