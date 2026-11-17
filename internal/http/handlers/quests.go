@@ -28,7 +28,7 @@ type questServicer interface {
 	Abandon(ctx context.Context, userID, householdID, questID uuid.UUID, act app.MemberAction) (app.QuestView, error)
 	MarkDone(ctx context.Context, userID, householdID, questID uuid.UUID, act app.MemberAction) (app.QuestView, error)
 	ListPending(ctx context.Context, userID, householdID uuid.UUID, adminPin string) ([]app.PendingCompletion, error)
-	Approve(ctx context.Context, userID, householdID, completionID uuid.UUID, adminPin string) (app.Completion, db.FamilyMember, []app.ComboBonus, error)
+	Approve(ctx context.Context, userID, householdID, completionID uuid.UUID, adminPin string) (app.Completion, db.FamilyMember, []app.ComboBonus, app.StreakBonus, error)
 	Reject(ctx context.Context, userID, householdID, completionID uuid.UUID, adminPin string) (app.Completion, error)
 }
 
@@ -45,21 +45,23 @@ func NewQuestHandler(svc questServicer) *QuestHandler {
 }
 
 // questRequest is the body for create and update. Update is a full
-// replacement (PUT). points and repeat_days stay raw so a wrong-typed value
-// is reported as its own field error alongside the others.
+// replacement (PUT). points, repeat_days and streak_bonus stay raw so a
+// wrong-typed value is reported as its own field error alongside the others.
 type questRequest struct {
-	Name       string          `json:"name"`
-	Points     json.RawMessage `json:"points"`
-	RepeatDays json.RawMessage `json:"repeat_days"`
-	Notes      string          `json:"notes"`
+	Name        string          `json:"name"`
+	Points      json.RawMessage `json:"points"`
+	RepeatDays  json.RawMessage `json:"repeat_days"`
+	Notes       string          `json:"notes"`
+	StreakBonus json.RawMessage `json:"streak_bonus"`
 }
 
 func (req questRequest) toInput() app.QuestInput {
 	return app.QuestInput{
-		Name:       req.Name,
-		Points:     numberField(req.Points),
-		RepeatDays: numberField(req.RepeatDays),
-		Notes:      req.Notes,
+		Name:        req.Name,
+		Points:      numberField(req.Points),
+		RepeatDays:  numberField(req.RepeatDays),
+		Notes:       req.Notes,
+		StreakBonus: numberField(req.StreakBonus),
 	}
 }
 
@@ -322,12 +324,16 @@ func decodeEmptyBody(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // approveResponse is the approved completion, the member it credited with
-// their new point total (bonuses included), and every combo bonus the
-// approval paid; combo_bonuses is [] when none.
+// their new point total (bonuses included), every combo bonus the approval
+// paid (combo_bonuses is [] when none), the streak bonus it paid
+// (streak_bonus, 0 when none) and the member's streak count for the quest as
+// fixed at mark-done (streak_count, 0 for a completion from before streaks).
 type approveResponse struct {
 	Completion   completionJSON   `json:"completion"`
 	Member       familyMemberJSON `json:"member"`
 	ComboBonuses []comboAwardJSON `json:"combo_bonuses"`
+	StreakBonus  int32            `json:"streak_bonus"`
+	StreakCount  int32            `json:"streak_count"`
 }
 
 // completionResponse wraps a rejected completion.
@@ -335,15 +341,15 @@ type completionResponse struct {
 	Completion completionJSON `json:"completion"`
 }
 
-// Approve approves a pending completion and credits its chore's points, and
-// any combo bonuses it finishes, to the member who marked it done.
-// The admin PIN travels in X-Admin-PIN; the body is empty or {}.
+// Approve approves a pending completion and credits its chore's points, the
+// streak bonus and any combo bonuses it earns to the member who marked it
+// done. The admin PIN travels in X-Admin-PIN; the body is empty or {}.
 func (h *QuestHandler) Approve(w http.ResponseWriter, r *http.Request) {
 	hid, cid, ok := parseCompletionIDs(w, r)
 	if !ok || !decodeEmptyBody(w, r) {
 		return
 	}
-	completion, member, bonuses, err := h.svc.Approve(r.Context(), currentUser(r), hid, cid, r.Header.Get("X-Admin-PIN"))
+	completion, member, bonuses, streak, err := h.svc.Approve(r.Context(), currentUser(r), hid, cid, r.Header.Get("X-Admin-PIN"))
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -352,6 +358,8 @@ func (h *QuestHandler) Approve(w http.ResponseWriter, r *http.Request) {
 		Completion:   toCompletion(completion),
 		Member:       toFamilyMember(member),
 		ComboBonuses: mapSlice(bonuses, toComboAward),
+		StreakBonus:  streak.Points,
+		StreakCount:  streak.Count,
 	})
 }
 

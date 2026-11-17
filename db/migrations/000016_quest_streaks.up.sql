@@ -45,6 +45,12 @@ ALTER TABLE household_quests
 ALTER TABLE quest_library
     ADD COLUMN streak_bonus INT NOT NULL DEFAULT 0 CHECK (streak_bonus >= 0);
 
+-- 4. Each completion remembers the member's streak count as of its
+--    mark-done, so approving it later (or out of order) pays the bonus the
+--    streak had then. NULL for completions marked done before streaks.
+ALTER TABLE quest_completions
+    ADD COLUMN streak_count INT CHECK (streak_count >= 1);
+
 -- Update seeded library rows: 5 where repeat_days = 1 else 10
 UPDATE quest_library
 SET streak_bonus = CASE WHEN repeat_days = 1 THEN 5 ELSE 10 END;

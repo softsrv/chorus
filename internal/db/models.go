@@ -242,6 +242,7 @@ type QuestCompletion struct {
 	DoneAt      pgtype.Timestamptz `json:"done_at"`
 	ApprovedAt  pgtype.Timestamptz `json:"approved_at"`
 	Status      string             `json:"status"`
+	StreakCount pgtype.Int4        `json:"streak_count"`
 }
 
 type QuestLibrary struct {

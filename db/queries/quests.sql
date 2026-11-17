@@ -115,6 +115,14 @@ WHERE household_id = sqlc.arg(household_id) AND id = sqlc.arg(id)
 -- administrator. NOW() is one instant per transaction, so completed_at equals
 -- the completion's done_at. A quest the member does not hold matches no row
 -- and inserts nothing. No points move here.
+--
+-- The same statement moves the member's streak for the quest (streaked):
+-- count+1 when marked done by its expires_at, else 1, with a new expires_at
+-- of local midnight starting the day after 2 x repeat_days days from today.
+-- The step it replaces is kept in prev_* so a reject can undo it. The
+-- completion stores the resulting count (streak_count), so its approval,
+-- however late, pays the streak as of this mark-done. The streak write
+-- touches only member_quest_streaks: never available_at or the cooldown.
 WITH done AS (
     UPDATE household_quests q
     SET claimed_by = NULL, claimed_at = NULL,
@@ -126,11 +134,6 @@ WITH done AS (
       AND q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id)
       AND q.claimed_by = sqlc.arg(member_id)::uuid
     RETURNING q.*, h.timezone
-), recorded AS (
-    INSERT INTO quest_completions (id, household_id, quest_id, member_id, done_at, status)
-    SELECT sqlc.arg(completion_id)::uuid, d.household_id, d.id, sqlc.arg(member_id)::uuid, NOW(), 'pending'
-    FROM done d
-    RETURNING id
 ), streaked AS (
     INSERT INTO member_quest_streaks (
         household_id, member_id, quest_id,
@@ -158,7 +161,13 @@ WITH done AS (
         last_done_at = NOW(),
         expires_at = EXCLUDED.expires_at,
         updated_at = NOW()
-    RETURNING quest_id
+    RETURNING quest_id, count
+), recorded AS (
+    INSERT INTO quest_completions (id, household_id, quest_id, member_id, done_at, status, streak_count)
+    SELECT sqlc.arg(completion_id)::uuid, d.household_id, d.id, sqlc.arg(member_id)::uuid, NOW(), 'pending', s.count
+    FROM done d
+    JOIN streaked s ON s.quest_id = d.id
+    RETURNING id
 )
 SELECT d.id, d.household_id, d.library_id, d.name, d.points, d.repeat_days, d.notes,
        d.claimed_by, d.claimed_at, d.done_at, d.completed_at, d.available_at,
@@ -188,9 +197,12 @@ ORDER BY c.done_at ASC, c.id ASC;
 -- gets a row. The quest is not touched: its cooldown already started at
 -- mark-done. points is the chore's current points, to credit to member_id;
 -- quest_name is the chore's name, the reason in the points history.
+-- streak_bonus is the chore's current streak bonus and streak_count the
+-- member's streak as fixed at this completion's mark-done (NULL for one
+-- marked done before streaks existed); neither is recomputed from NOW().
 -- member_id must match the member the caller already locked.
 WITH pending AS (
-    SELECT pc.id, q.points, q.name
+    SELECT pc.id, q.points, q.name, q.streak_bonus
     FROM quest_completions pc
     JOIN household_quests q ON q.household_id = pc.household_id AND q.id = pc.quest_id
     WHERE pc.household_id = sqlc.arg(household_id) AND pc.id = sqlc.arg(id)
@@ -201,7 +213,8 @@ UPDATE quest_completions c
 SET status = 'approved', approved_at = NOW()
 FROM pending p
 WHERE c.id = p.id AND c.status = 'pending'
-RETURNING c.id, c.quest_id, c.member_id, c.done_at, c.approved_at, p.points, p.name AS quest_name;
+RETURNING c.id, c.quest_id, c.member_id, c.done_at, c.approved_at, p.points, p.name AS quest_name,
+          p.streak_bonus, c.streak_count;
 
 -- name: RejectCompletion :one
 -- Rejects one pending completion: no points. If it started the quest's
@@ -224,3 +237,27 @@ WITH rejected AS (
 )
 SELECT r.id, r.quest_id, r.member_id, r.done_at, r.status
 FROM rejected r;
+
+-- name: RestoreMemberQuestStreak :exec
+-- Undoes the streak step a rejected completion made at its mark-done. Only
+-- when that completion is the member's latest mark-done of the quest
+-- (last_done_at = its done_at): the row goes back to prev_* when there was
+-- an earlier streak, and is deleted when that mark-done started it (count 1,
+-- nothing before). One step of history is kept: a completion whose step a
+-- later mark-done already superseded, or whose earlier step was already
+-- undone, leaves the streak alone. Writes only member_quest_streaks.
+WITH restored AS (
+    UPDATE member_quest_streaks s
+    SET count = s.prev_count, last_done_at = s.prev_last_done_at, expires_at = s.prev_expires_at,
+        prev_count = NULL, prev_last_done_at = NULL, prev_expires_at = NULL,
+        updated_at = NOW()
+    WHERE s.household_id = sqlc.arg(household_id) AND s.member_id = sqlc.arg(member_id)
+      AND s.quest_id = sqlc.arg(quest_id) AND s.last_done_at = sqlc.arg(done_at)
+      AND s.prev_count IS NOT NULL
+    RETURNING s.quest_id
+)
+DELETE FROM member_quest_streaks s
+WHERE s.household_id = sqlc.arg(household_id) AND s.member_id = sqlc.arg(member_id)
+  AND s.quest_id = sqlc.arg(quest_id) AND s.last_done_at = sqlc.arg(done_at)
+  AND s.prev_count IS NULL AND s.count = 1
+  AND NOT EXISTS (SELECT 1 FROM restored);

@@ -3,6 +3,9 @@
 
 DROP TABLE IF EXISTS member_quest_streaks;
 
+ALTER TABLE quest_completions
+    DROP COLUMN IF EXISTS streak_count;
+
 ALTER TABLE household_quests
     DROP COLUMN IF EXISTS streak_bonus;
 
