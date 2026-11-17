@@ -47,7 +47,7 @@ func (w *comboWorld) kindCount(kind string) int {
 	return w.count(`SELECT count(*) FROM points_awards WHERE household_id = $1 AND kind = $2`, w.h.ID, kind)
 }
 
-// TestIntegration_ComboPointsHistory proves CLM-3: each combo bonus paid by
+// TestIntegration_ComboPointsHistory proves combo entry written: each combo bonus paid by
 // Approve writes exactly one points_awards row (kind combo, the combo's name,
 // its bonus points) for the holder, separate from the quest's row, in the
 // same approval; the points total rises by exactly the sum of the rows the
@@ -172,7 +172,7 @@ func TestIntegration_ComboPointsHistory(t *testing.T) {
 	})
 }
 
-// TestIntegration_ComboHistoryFailureRollsBack proves CLM-1: when only the
+// TestIntegration_ComboHistoryFailureRollsBack proves failed combo entry undoes the approval: when only the
 // combo history insert fails (the quest's own credit and history succeed
 // first), Approve returns an error and the whole approval is undone; once
 // the fault is removed a retry pays exactly once.
@@ -233,7 +233,7 @@ END $$`, fn, w.h.ID)); err != nil {
 	}
 }
 
-// TestIntegration_NoComboApprovalUnchanged proves CLM-2: in a household with
+// TestIntegration_NoComboApprovalUnchanged proves no-combo approval unchanged: in a household with
 // no combos, approval credits the quest's points once, releases the quest
 // approves the completion with its mark-done time, writes only the quest entry (no combo entry),
 // and a repeated or concurrent approval still pays once.
