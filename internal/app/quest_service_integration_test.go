@@ -1128,6 +1128,12 @@ func TestIntegration_QuestApproval(t *testing.T) {
 		t.Errorf("Ben's points after repeat approve: %d, want %d", p, benBeforeSolo+100)
 	}
 
+	// The CLM-16 case above credited Ben 100 points; the reject checks below
+	// compare against the balance the earlier approvals left (35).
+	if _, err := pool.Exec(ctx, `UPDATE family_members SET points = 35 WHERE id = $1`, ben.ID); err != nil {
+		t.Fatalf("reset Ben's balance after the unshared shareable case: %v", err)
+	}
+
 	// CLM-5: Reject latest vs earlier:
 	// Two completions: reject earlier -> available_at unchanged.
 	// Reject latest (quest.completed_at = done_at) -> available_at <= now, QuestAvailable true.
