@@ -17,7 +17,7 @@ UPDATE household_quests
 SET claimed_by = NULL, claimed_at = NULL, updated_at = NOW()
 WHERE household_id = $1 AND id = $2
   AND claimed_by = $3
-RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at
+RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at, streak_bonus
 `
 
 type AbandonQuestParams struct {
@@ -45,6 +45,7 @@ func (q *Queries) AbandonQuest(ctx context.Context, arg AbandonQuestParams) (Hou
 		&i.AvailableAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.StreakBonus,
 	)
 	return i, err
 }
@@ -138,7 +139,7 @@ SET claimed_by = $1, claimed_at = NOW(), updated_at = NOW()
 WHERE household_id = $2 AND id = $3
   AND claimed_by IS NULL
   AND (available_at IS NULL OR available_at <= NOW())
-RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at
+RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at, streak_bonus
 `
 
 type ClaimQuestParams struct {
@@ -168,14 +169,15 @@ func (q *Queries) ClaimQuest(ctx context.Context, arg ClaimQuestParams) (Househo
 		&i.AvailableAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.StreakBonus,
 	)
 	return i, err
 }
 
 const createHouseholdQuest = `-- name: CreateHouseholdQuest :one
-INSERT INTO household_quests (id, household_id, library_id, name, points, repeat_days, notes, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
-RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at
+INSERT INTO household_quests (id, household_id, library_id, name, points, repeat_days, notes, streak_bonus, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at, streak_bonus
 `
 
 type CreateHouseholdQuestParams struct {
@@ -186,6 +188,7 @@ type CreateHouseholdQuestParams struct {
 	Points      int32      `json:"points"`
 	RepeatDays  int32      `json:"repeat_days"`
 	Notes       string     `json:"notes"`
+	StreakBonus int32      `json:"streak_bonus"`
 }
 
 func (q *Queries) CreateHouseholdQuest(ctx context.Context, arg CreateHouseholdQuestParams) (HouseholdQuest, error) {
@@ -197,6 +200,7 @@ func (q *Queries) CreateHouseholdQuest(ctx context.Context, arg CreateHouseholdQ
 		arg.Points,
 		arg.RepeatDays,
 		arg.Notes,
+		arg.StreakBonus,
 	)
 	var i HouseholdQuest
 	err := row.Scan(
@@ -214,6 +218,7 @@ func (q *Queries) CreateHouseholdQuest(ctx context.Context, arg CreateHouseholdQ
 		&i.AvailableAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.StreakBonus,
 	)
 	return i, err
 }
@@ -236,7 +241,7 @@ func (q *Queries) DeleteHouseholdQuest(ctx context.Context, arg DeleteHouseholdQ
 }
 
 const getHouseholdQuest = `-- name: GetHouseholdQuest :one
-SELECT id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at FROM household_quests WHERE household_id = $1 AND id = $2
+SELECT id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at, streak_bonus FROM household_quests WHERE household_id = $1 AND id = $2
 `
 
 type GetHouseholdQuestParams struct {
@@ -262,12 +267,13 @@ func (q *Queries) GetHouseholdQuest(ctx context.Context, arg GetHouseholdQuestPa
 		&i.AvailableAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.StreakBonus,
 	)
 	return i, err
 }
 
 const getHouseholdQuestView = `-- name: GetHouseholdQuestView :one
-SELECT q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at, EXISTS (
+SELECT q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at, q.streak_bonus, EXISTS (
     SELECT 1 FROM quest_completions c
     WHERE c.household_id = q.household_id AND c.quest_id = q.id AND c.status = 'pending'
 ) AS awaiting_approval
@@ -304,7 +310,40 @@ func (q *Queries) GetHouseholdQuestView(ctx context.Context, arg GetHouseholdQue
 		&i.HouseholdQuest.AvailableAt,
 		&i.HouseholdQuest.CreatedAt,
 		&i.HouseholdQuest.UpdatedAt,
+		&i.HouseholdQuest.StreakBonus,
 		&i.AwaitingApproval,
+	)
+	return i, err
+}
+
+const getMemberQuestStreak = `-- name: GetMemberQuestStreak :one
+SELECT household_id, member_id, quest_id, count, last_done_at, expires_at, prev_count, prev_last_done_at, prev_expires_at, created_at, updated_at FROM member_quest_streaks
+WHERE household_id = $1
+  AND member_id = $2
+  AND quest_id = $3
+`
+
+type GetMemberQuestStreakParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	MemberID    uuid.UUID `json:"member_id"`
+	QuestID     uuid.UUID `json:"quest_id"`
+}
+
+func (q *Queries) GetMemberQuestStreak(ctx context.Context, arg GetMemberQuestStreakParams) (MemberQuestStreak, error) {
+	row := q.db.QueryRow(ctx, getMemberQuestStreak, arg.HouseholdID, arg.MemberID, arg.QuestID)
+	var i MemberQuestStreak
+	err := row.Scan(
+		&i.HouseholdID,
+		&i.MemberID,
+		&i.QuestID,
+		&i.Count,
+		&i.LastDoneAt,
+		&i.ExpiresAt,
+		&i.PrevCount,
+		&i.PrevLastDoneAt,
+		&i.PrevExpiresAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -331,7 +370,7 @@ func (q *Queries) GetPendingCompletionMember(ctx context.Context, arg GetPending
 }
 
 const getQuestLibraryItem = `-- name: GetQuestLibraryItem :one
-SELECT id, name, points, repeat_days, notes, created_at FROM quest_library WHERE id = $1
+SELECT id, name, points, repeat_days, notes, created_at, streak_bonus FROM quest_library WHERE id = $1
 `
 
 func (q *Queries) GetQuestLibraryItem(ctx context.Context, id uuid.UUID) (QuestLibrary, error) {
@@ -344,12 +383,13 @@ func (q *Queries) GetQuestLibraryItem(ctx context.Context, id uuid.UUID) (QuestL
 		&i.RepeatDays,
 		&i.Notes,
 		&i.CreatedAt,
+		&i.StreakBonus,
 	)
 	return i, err
 }
 
 const listHouseholdQuests = `-- name: ListHouseholdQuests :many
-SELECT q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at, EXISTS (
+SELECT q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at, q.streak_bonus, EXISTS (
     SELECT 1 FROM quest_completions c
     WHERE c.household_id = q.household_id AND c.quest_id = q.id AND c.status = 'pending'
 ) AS awaiting_approval
@@ -395,6 +435,7 @@ func (q *Queries) ListHouseholdQuests(ctx context.Context, arg ListHouseholdQues
 			&i.HouseholdQuest.AvailableAt,
 			&i.HouseholdQuest.CreatedAt,
 			&i.HouseholdQuest.UpdatedAt,
+			&i.HouseholdQuest.StreakBonus,
 			&i.AwaitingApproval,
 		); err != nil {
 			return nil, err
@@ -459,7 +500,7 @@ func (q *Queries) ListPendingCompletions(ctx context.Context, householdID uuid.U
 
 const listQuestLibrary = `-- name: ListQuestLibrary :many
 
-SELECT id, name, points, repeat_days, notes, created_at FROM quest_library ORDER BY name ASC, id ASC
+SELECT id, name, points, repeat_days, notes, created_at, streak_bonus FROM quest_library ORDER BY name ASC, id ASC
 `
 
 // Household quest queries are scoped by household_id. Membership is checked
@@ -482,6 +523,7 @@ func (q *Queries) ListQuestLibrary(ctx context.Context) ([]QuestLibrary, error) 
 			&i.RepeatDays,
 			&i.Notes,
 			&i.CreatedAt,
+			&i.StreakBonus,
 		); err != nil {
 			return nil, err
 		}
@@ -504,16 +546,44 @@ WITH done AS (
     WHERE h.id = q.household_id
       AND q.household_id = $1 AND q.id = $2
       AND q.claimed_by = $3::uuid
-    RETURNING q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at
+    RETURNING q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at, q.streak_bonus, h.timezone
 ), recorded AS (
     INSERT INTO quest_completions (id, household_id, quest_id, member_id, done_at, status)
     SELECT $4::uuid, d.household_id, d.id, $3::uuid, NOW(), 'pending'
     FROM done d
     RETURNING id
+), streaked AS (
+    INSERT INTO member_quest_streaks (
+        household_id, member_id, quest_id,
+        count, last_done_at, expires_at,
+        created_at, updated_at
+    )
+    SELECT
+        d.household_id,
+        $3::uuid,
+        d.id,
+        1,
+        NOW(),
+        quest_streak_expires_at(NOW(), d.timezone, d.repeat_days),
+        NOW(),
+        NOW()
+    FROM done d
+    ON CONFLICT (member_id, quest_id) DO UPDATE
+    SET count = CASE
+            WHEN NOW() <= member_quest_streaks.expires_at THEN member_quest_streaks.count + 1
+            ELSE 1
+        END,
+        prev_count = member_quest_streaks.count,
+        prev_last_done_at = member_quest_streaks.last_done_at,
+        prev_expires_at = member_quest_streaks.expires_at,
+        last_done_at = NOW(),
+        expires_at = EXCLUDED.expires_at,
+        updated_at = NOW()
+    RETURNING quest_id
 )
 SELECT d.id, d.household_id, d.library_id, d.name, d.points, d.repeat_days, d.notes,
        d.claimed_by, d.claimed_at, d.done_at, d.completed_at, d.available_at,
-       d.created_at, d.updated_at
+       d.created_at, d.updated_at, d.streak_bonus
 FROM done d
 `
 
@@ -539,6 +609,7 @@ type MarkQuestDoneRow struct {
 	AvailableAt pgtype.Timestamptz `json:"available_at"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	StreakBonus int32              `json:"streak_bonus"`
 }
 
 // The holder marks the quest done. In one statement the quest is released
@@ -571,6 +642,7 @@ func (q *Queries) MarkQuestDone(ctx context.Context, arg MarkQuestDoneParams) (M
 		&i.AvailableAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.StreakBonus,
 	)
 	return i, err
 }
@@ -665,9 +737,9 @@ func (q *Queries) ReleaseMemberQuests(ctx context.Context, arg ReleaseMemberQues
 
 const updateHouseholdQuest = `-- name: UpdateHouseholdQuest :one
 UPDATE household_quests
-SET name = $3, points = $4, repeat_days = $5, notes = $6, updated_at = NOW()
+SET name = $3, points = $4, repeat_days = $5, notes = $6, streak_bonus = $7, updated_at = NOW()
 WHERE household_id = $1 AND id = $2
-RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at
+RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at, streak_bonus
 `
 
 type UpdateHouseholdQuestParams struct {
@@ -677,6 +749,7 @@ type UpdateHouseholdQuestParams struct {
 	Points      int32     `json:"points"`
 	RepeatDays  int32     `json:"repeat_days"`
 	Notes       string    `json:"notes"`
+	StreakBonus int32     `json:"streak_bonus"`
 }
 
 func (q *Queries) UpdateHouseholdQuest(ctx context.Context, arg UpdateHouseholdQuestParams) (HouseholdQuest, error) {
@@ -687,6 +760,7 @@ func (q *Queries) UpdateHouseholdQuest(ctx context.Context, arg UpdateHouseholdQ
 		arg.Points,
 		arg.RepeatDays,
 		arg.Notes,
+		arg.StreakBonus,
 	)
 	var i HouseholdQuest
 	err := row.Scan(
@@ -704,6 +778,7 @@ func (q *Queries) UpdateHouseholdQuest(ctx context.Context, arg UpdateHouseholdQ
 		&i.AvailableAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.StreakBonus,
 	)
 	return i, err
 }

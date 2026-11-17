@@ -2,7 +2,16 @@
 -- Quest streaks: member_quest_streaks tracking streak counts and expirations,
 -- and streak_bonus column on household_quests and quest_library.
 
--- 1. Create member_quest_streaks
+-- 1. Function calculating when a quest streak expires: local midnight
+--    starting (local date of done_at + 2*repeat_days + 1 day) in households.timezone.
+CREATE FUNCTION quest_streak_expires_at(done_at TIMESTAMPTZ, tz TEXT, repeat_days INT)
+RETURNS TIMESTAMPTZ
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+AS $$
+    SELECT (date_trunc('day', done_at AT TIME ZONE tz) + make_interval(days => 2 * repeat_days + 1)) AT TIME ZONE tz
+$$;
+
+-- 2. Create member_quest_streaks
 CREATE TABLE member_quest_streaks (
     household_id      UUID        NOT NULL,
     member_id         UUID        NOT NULL,
@@ -29,7 +38,7 @@ CREATE TABLE member_quest_streaks (
 
 CREATE INDEX idx_member_quest_streaks_household ON member_quest_streaks (household_id);
 
--- 2. Add streak_bonus to household_quests and quest_library
+-- 3. Add streak_bonus to household_quests and quest_library
 ALTER TABLE household_quests
     ADD COLUMN streak_bonus INT NOT NULL DEFAULT 0 CHECK (streak_bonus >= 0);
 

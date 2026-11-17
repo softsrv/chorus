@@ -93,6 +93,7 @@ type Querier interface {
 	// One quest with awaiting_approval, as ListHouseholdQuests reads it.
 	GetHouseholdQuestView(ctx context.Context, arg GetHouseholdQuestViewParams) (GetHouseholdQuestViewRow, error)
 	GetHouseholdReward(ctx context.Context, arg GetHouseholdRewardParams) (HouseholdReward, error)
+	GetMemberQuestStreak(ctx context.Context, arg GetMemberQuestStreakParams) (MemberQuestStreak, error)
 	GetOldestRecentVerificationCode(ctx context.Context, userID uuid.UUID) (pgtype.Timestamptz, error)
 	GetPasswordResetTokenByHash(ctx context.Context, tokenHash string) (PasswordResetToken, error)
 	// The member of a pending completion, read without a lock so Approve can

@@ -8,3 +8,5 @@ ALTER TABLE household_quests
 
 ALTER TABLE quest_library
     DROP COLUMN IF EXISTS streak_bonus;
+
+DROP FUNCTION IF EXISTS quest_streak_expires_at(TIMESTAMPTZ, TEXT, INT);

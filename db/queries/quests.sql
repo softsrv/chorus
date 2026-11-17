@@ -41,13 +41,13 @@ SELECT EXISTS (
 ) AS awaiting_approval;
 
 -- name: CreateHouseholdQuest :one
-INSERT INTO household_quests (id, household_id, library_id, name, points, repeat_days, notes, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+INSERT INTO household_quests (id, household_id, library_id, name, points, repeat_days, notes, streak_bonus, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
 RETURNING *;
 
 -- name: UpdateHouseholdQuest :one
 UPDATE household_quests
-SET name = $3, points = $4, repeat_days = $5, notes = $6, updated_at = NOW()
+SET name = $3, points = $4, repeat_days = $5, notes = $6, streak_bonus = $7, updated_at = NOW()
 WHERE household_id = $1 AND id = $2
 RETURNING *;
 
@@ -125,17 +125,51 @@ WITH done AS (
     WHERE h.id = q.household_id
       AND q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id)
       AND q.claimed_by = sqlc.arg(member_id)::uuid
-    RETURNING q.*
+    RETURNING q.*, h.timezone
 ), recorded AS (
     INSERT INTO quest_completions (id, household_id, quest_id, member_id, done_at, status)
     SELECT sqlc.arg(completion_id)::uuid, d.household_id, d.id, sqlc.arg(member_id)::uuid, NOW(), 'pending'
     FROM done d
     RETURNING id
+), streaked AS (
+    INSERT INTO member_quest_streaks (
+        household_id, member_id, quest_id,
+        count, last_done_at, expires_at,
+        created_at, updated_at
+    )
+    SELECT
+        d.household_id,
+        sqlc.arg(member_id)::uuid,
+        d.id,
+        1,
+        NOW(),
+        quest_streak_expires_at(NOW(), d.timezone, d.repeat_days),
+        NOW(),
+        NOW()
+    FROM done d
+    ON CONFLICT (member_id, quest_id) DO UPDATE
+    SET count = CASE
+            WHEN NOW() <= member_quest_streaks.expires_at THEN member_quest_streaks.count + 1
+            ELSE 1
+        END,
+        prev_count = member_quest_streaks.count,
+        prev_last_done_at = member_quest_streaks.last_done_at,
+        prev_expires_at = member_quest_streaks.expires_at,
+        last_done_at = NOW(),
+        expires_at = EXCLUDED.expires_at,
+        updated_at = NOW()
+    RETURNING quest_id
 )
 SELECT d.id, d.household_id, d.library_id, d.name, d.points, d.repeat_days, d.notes,
        d.claimed_by, d.claimed_at, d.done_at, d.completed_at, d.available_at,
-       d.created_at, d.updated_at
+       d.created_at, d.updated_at, d.streak_bonus
 FROM done d;
+
+-- name: GetMemberQuestStreak :one
+SELECT * FROM member_quest_streaks
+WHERE household_id = sqlc.arg(household_id)
+  AND member_id = sqlc.arg(member_id)
+  AND quest_id = sqlc.arg(quest_id);
 
 -- name: ListPendingCompletions :many
 -- Completions waiting for approval, one row each, oldest mark-done first,
