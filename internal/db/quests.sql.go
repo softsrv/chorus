@@ -17,7 +17,6 @@ UPDATE household_quests
 SET claimed_by = NULL, claimed_at = NULL, updated_at = NOW()
 WHERE household_id = $1 AND id = $2
   AND claimed_by = $3
-  AND done_at IS NULL
 RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at
 `
 
@@ -27,8 +26,7 @@ type AbandonQuestParams struct {
 	MemberID    *uuid.UUID `json:"member_id"`
 }
 
-// Puts a quest back in the pool. Only its current holder can abandon it, and
-// not while it waits for approval.
+// Puts a quest back in the pool. Only its current holder can abandon it.
 func (q *Queries) AbandonQuest(ctx context.Context, arg AbandonQuestParams) (HouseholdQuest, error) {
 	row := q.db.QueryRow(ctx, abandonQuest, arg.HouseholdID, arg.ID, arg.MemberID)
 	var i HouseholdQuest
@@ -51,80 +49,87 @@ func (q *Queries) AbandonQuest(ctx context.Context, arg AbandonQuestParams) (Hou
 	return i, err
 }
 
-const approveQuest = `-- name: ApproveQuest :one
+const approveCompletion = `-- name: ApproveCompletion :one
 WITH pending AS (
-    SELECT hq.id, hq.claimed_by, hq.done_at, h.timezone
-    FROM household_quests hq
-    JOIN households h ON h.id = hq.household_id
-    WHERE hq.household_id = $1 AND hq.id = $2
-      AND hq.done_at IS NOT NULL
-    FOR UPDATE OF hq
+    SELECT pc.id, q.points, q.name
+    FROM quest_completions pc
+    JOIN household_quests q ON q.household_id = pc.household_id AND q.id = pc.quest_id
+    WHERE pc.household_id = $1 AND pc.id = $2
+      AND pc.status = 'pending' AND pc.member_id = $3::uuid
+    FOR UPDATE OF pc
 )
-UPDATE household_quests q
-SET claimed_by = NULL, claimed_at = NULL, done_at = NULL,
-    completed_at = NOW(),
-    available_at = (date_trunc('day', p.done_at AT TIME ZONE p.timezone)
-        + make_interval(days => q.repeat_days)) AT TIME ZONE p.timezone,
-    updated_at = NOW()
+UPDATE quest_completions c
+SET status = 'approved', approved_at = NOW()
 FROM pending p
-WHERE q.household_id = $1 AND q.id = p.id
-RETURNING q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at, p.claimed_by AS credited_member_id, p.done_at AS credited_done_at
+WHERE c.id = p.id AND c.status = 'pending'
+RETURNING c.id, c.quest_id, c.member_id, c.done_at, c.approved_at, p.points, p.name AS quest_name
 `
 
-type ApproveQuestParams struct {
+type ApproveCompletionParams struct {
 	HouseholdID uuid.UUID `json:"household_id"`
 	ID          uuid.UUID `json:"id"`
+	MemberID    uuid.UUID `json:"member_id"`
 }
 
-type ApproveQuestRow struct {
-	ID               uuid.UUID          `json:"id"`
-	HouseholdID      uuid.UUID          `json:"household_id"`
-	LibraryID        *uuid.UUID         `json:"library_id"`
-	Name             string             `json:"name"`
-	Points           int32              `json:"points"`
-	RepeatDays       int32              `json:"repeat_days"`
-	Notes            string             `json:"notes"`
-	ClaimedBy        *uuid.UUID         `json:"claimed_by"`
-	ClaimedAt        pgtype.Timestamptz `json:"claimed_at"`
-	DoneAt           pgtype.Timestamptz `json:"done_at"`
-	CompletedAt      pgtype.Timestamptz `json:"completed_at"`
-	AvailableAt      pgtype.Timestamptz `json:"available_at"`
-	CreatedAt        pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
-	CreditedMemberID *uuid.UUID         `json:"credited_member_id"`
-	CreditedDoneAt   pgtype.Timestamptz `json:"credited_done_at"`
+type ApproveCompletionRow struct {
+	ID         uuid.UUID          `json:"id"`
+	QuestID    uuid.UUID          `json:"quest_id"`
+	MemberID   *uuid.UUID         `json:"member_id"`
+	DoneAt     pgtype.Timestamptz `json:"done_at"`
+	ApprovedAt pgtype.Timestamptz `json:"approved_at"`
+	Points     int32              `json:"points"`
+	QuestName  string             `json:"quest_name"`
 }
 
-// Completes a pending quest. The pending row is locked first, and the
-// done_at check is re-read under the lock, so of two concurrent approvals
-// exactly one gets a row; the households row is read, not locked. The quest
-// comes back at local midnight in the household's timezone, repeat_days days
-// after the local day it was marked done (done_at), however late the approval.
-// credited_member_id is the holder to credit, read before claimed_by is cleared;
-// credited_done_at is when they marked it done, read before done_at is cleared
-// (it decides the household day the completion counts toward for combos).
-func (q *Queries) ApproveQuest(ctx context.Context, arg ApproveQuestParams) (ApproveQuestRow, error) {
-	row := q.db.QueryRow(ctx, approveQuest, arg.HouseholdID, arg.ID)
-	var i ApproveQuestRow
+// Approves one pending completion. The completion is locked first and its
+// status re-read under the lock, so of two concurrent approvals exactly one
+// gets a row. The quest is not touched: its cooldown already started at
+// mark-done. points is the chore's current points, to credit to member_id;
+// quest_name is the chore's name, the reason in the points history.
+// member_id must match the member the caller already locked.
+func (q *Queries) ApproveCompletion(ctx context.Context, arg ApproveCompletionParams) (ApproveCompletionRow, error) {
+	row := q.db.QueryRow(ctx, approveCompletion, arg.HouseholdID, arg.ID, arg.MemberID)
+	var i ApproveCompletionRow
 	err := row.Scan(
 		&i.ID,
-		&i.HouseholdID,
-		&i.LibraryID,
-		&i.Name,
-		&i.Points,
-		&i.RepeatDays,
-		&i.Notes,
-		&i.ClaimedBy,
-		&i.ClaimedAt,
+		&i.QuestID,
+		&i.MemberID,
 		&i.DoneAt,
-		&i.CompletedAt,
-		&i.AvailableAt,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.CreditedMemberID,
-		&i.CreditedDoneAt,
+		&i.ApprovedAt,
+		&i.Points,
+		&i.QuestName,
 	)
 	return i, err
+}
+
+const cancelMemberPendingCompletions = `-- name: CancelMemberPendingCompletions :exec
+WITH cancelled AS (
+    UPDATE quest_completions cc
+    SET status = 'cancelled'
+    WHERE cc.household_id = $1 AND cc.member_id = $2
+      AND cc.status = 'pending'
+    RETURNING cc.household_id, cc.quest_id, cc.done_at
+)
+UPDATE household_quests q
+SET available_at = NOW(), updated_at = NOW()
+FROM cancelled c
+WHERE q.household_id = c.household_id AND q.id = c.quest_id
+  AND q.completed_at = c.done_at AND q.available_at > NOW()
+`
+
+type CancelMemberPendingCompletionsParams struct {
+	HouseholdID uuid.UUID  `json:"household_id"`
+	MemberID    *uuid.UUID `json:"member_id"`
+}
+
+// Cancels every completion of the member still waiting for approval. No
+// points move. As on reject, a quest whose running cooldown one of those
+// completions started (the quest's completed_at is its done_at, available_at
+// still ahead) is available again right away: the chore was never approved,
+// so it does not sit resting. Cooldowns started by anyone else stay.
+func (q *Queries) CancelMemberPendingCompletions(ctx context.Context, arg CancelMemberPendingCompletionsParams) error {
+	_, err := q.db.Exec(ctx, cancelMemberPendingCompletions, arg.HouseholdID, arg.MemberID)
+	return err
 }
 
 const claimQuest = `-- name: ClaimQuest :one
@@ -261,6 +266,70 @@ func (q *Queries) GetHouseholdQuest(ctx context.Context, arg GetHouseholdQuestPa
 	return i, err
 }
 
+const getHouseholdQuestView = `-- name: GetHouseholdQuestView :one
+SELECT q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at, EXISTS (
+    SELECT 1 FROM quest_completions c
+    WHERE c.household_id = q.household_id AND c.quest_id = q.id AND c.status = 'pending'
+) AS awaiting_approval
+FROM household_quests q
+WHERE q.household_id = $1 AND q.id = $2
+`
+
+type GetHouseholdQuestViewParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	ID          uuid.UUID `json:"id"`
+}
+
+type GetHouseholdQuestViewRow struct {
+	HouseholdQuest   HouseholdQuest `json:"household_quest"`
+	AwaitingApproval bool           `json:"awaiting_approval"`
+}
+
+// One quest with awaiting_approval, as ListHouseholdQuests reads it.
+func (q *Queries) GetHouseholdQuestView(ctx context.Context, arg GetHouseholdQuestViewParams) (GetHouseholdQuestViewRow, error) {
+	row := q.db.QueryRow(ctx, getHouseholdQuestView, arg.HouseholdID, arg.ID)
+	var i GetHouseholdQuestViewRow
+	err := row.Scan(
+		&i.HouseholdQuest.ID,
+		&i.HouseholdQuest.HouseholdID,
+		&i.HouseholdQuest.LibraryID,
+		&i.HouseholdQuest.Name,
+		&i.HouseholdQuest.Points,
+		&i.HouseholdQuest.RepeatDays,
+		&i.HouseholdQuest.Notes,
+		&i.HouseholdQuest.ClaimedBy,
+		&i.HouseholdQuest.ClaimedAt,
+		&i.HouseholdQuest.DoneAt,
+		&i.HouseholdQuest.CompletedAt,
+		&i.HouseholdQuest.AvailableAt,
+		&i.HouseholdQuest.CreatedAt,
+		&i.HouseholdQuest.UpdatedAt,
+		&i.AwaitingApproval,
+	)
+	return i, err
+}
+
+const getPendingCompletionMember = `-- name: GetPendingCompletionMember :one
+SELECT member_id FROM quest_completions
+WHERE household_id = $1 AND id = $2
+  AND status = 'pending' AND member_id IS NOT NULL
+`
+
+type GetPendingCompletionMemberParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	ID          uuid.UUID `json:"id"`
+}
+
+// The member of a pending completion, read without a lock so Approve can
+// lock that member's row before it locks the completion (the order
+// FamilyService.Remove uses).
+func (q *Queries) GetPendingCompletionMember(ctx context.Context, arg GetPendingCompletionMemberParams) (*uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, getPendingCompletionMember, arg.HouseholdID, arg.ID)
+	var member_id *uuid.UUID
+	err := row.Scan(&member_id)
+	return member_id, err
+}
+
 const getQuestLibraryItem = `-- name: GetQuestLibraryItem :one
 SELECT id, name, points, repeat_days, notes, created_at FROM quest_library WHERE id = $1
 `
@@ -280,9 +349,13 @@ func (q *Queries) GetQuestLibraryItem(ctx context.Context, id uuid.UUID) (QuestL
 }
 
 const listHouseholdQuests = `-- name: ListHouseholdQuests :many
-SELECT id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at FROM household_quests
-WHERE household_id = $1
-ORDER BY created_at ASC, id ASC
+SELECT q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at, EXISTS (
+    SELECT 1 FROM quest_completions c
+    WHERE c.household_id = q.household_id AND c.quest_id = q.id AND c.status = 'pending'
+) AS awaiting_approval
+FROM household_quests q
+WHERE q.household_id = $1
+ORDER BY q.created_at ASC, q.id ASC
 LIMIT $3 OFFSET $2
 `
 
@@ -292,65 +365,21 @@ type ListHouseholdQuestsParams struct {
 	RowLimit    int32     `json:"row_limit"`
 }
 
-func (q *Queries) ListHouseholdQuests(ctx context.Context, arg ListHouseholdQuestsParams) ([]HouseholdQuest, error) {
+type ListHouseholdQuestsRow struct {
+	HouseholdQuest   HouseholdQuest `json:"household_quest"`
+	AwaitingApproval bool           `json:"awaiting_approval"`
+}
+
+// awaiting_approval: the quest has a completion waiting for the administrator.
+func (q *Queries) ListHouseholdQuests(ctx context.Context, arg ListHouseholdQuestsParams) ([]ListHouseholdQuestsRow, error) {
 	rows, err := q.db.Query(ctx, listHouseholdQuests, arg.HouseholdID, arg.RowOffset, arg.RowLimit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []HouseholdQuest{}
+	items := []ListHouseholdQuestsRow{}
 	for rows.Next() {
-		var i HouseholdQuest
-		if err := rows.Scan(
-			&i.ID,
-			&i.HouseholdID,
-			&i.LibraryID,
-			&i.Name,
-			&i.Points,
-			&i.RepeatDays,
-			&i.Notes,
-			&i.ClaimedBy,
-			&i.ClaimedAt,
-			&i.DoneAt,
-			&i.CompletedAt,
-			&i.AvailableAt,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listPendingQuests = `-- name: ListPendingQuests :many
-SELECT q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at, m.name AS member_name
-FROM household_quests q
-JOIN family_members m ON m.household_id = q.household_id AND m.id = q.claimed_by
-WHERE q.household_id = $1 AND q.done_at IS NOT NULL
-ORDER BY q.done_at ASC, q.id ASC
-`
-
-type ListPendingQuestsRow struct {
-	HouseholdQuest HouseholdQuest `json:"household_quest"`
-	MemberName     string         `json:"member_name"`
-}
-
-// Quests waiting for approval, oldest first, with the name of the member who
-// holds each one.
-func (q *Queries) ListPendingQuests(ctx context.Context, householdID uuid.UUID) ([]ListPendingQuestsRow, error) {
-	rows, err := q.db.Query(ctx, listPendingQuests, householdID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ListPendingQuestsRow{}
-	for rows.Next() {
-		var i ListPendingQuestsRow
+		var i ListHouseholdQuestsRow
 		if err := rows.Scan(
 			&i.HouseholdQuest.ID,
 			&i.HouseholdQuest.HouseholdID,
@@ -366,7 +395,57 @@ func (q *Queries) ListPendingQuests(ctx context.Context, householdID uuid.UUID) 
 			&i.HouseholdQuest.AvailableAt,
 			&i.HouseholdQuest.CreatedAt,
 			&i.HouseholdQuest.UpdatedAt,
+			&i.AwaitingApproval,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPendingCompletions = `-- name: ListPendingCompletions :many
+SELECT c.id, c.quest_id, q.name AS quest_name, q.points, c.member_id,
+       m.name AS member_name, c.done_at
+FROM quest_completions c
+JOIN household_quests q ON q.household_id = c.household_id AND q.id = c.quest_id
+JOIN family_members m ON m.household_id = c.household_id AND m.id = c.member_id
+WHERE c.household_id = $1 AND c.status = 'pending'
+ORDER BY c.done_at ASC, c.id ASC
+`
+
+type ListPendingCompletionsRow struct {
+	ID         uuid.UUID          `json:"id"`
+	QuestID    uuid.UUID          `json:"quest_id"`
+	QuestName  string             `json:"quest_name"`
+	Points     int32              `json:"points"`
+	MemberID   *uuid.UUID         `json:"member_id"`
+	MemberName string             `json:"member_name"`
+	DoneAt     pgtype.Timestamptz `json:"done_at"`
+}
+
+// Completions waiting for approval, one row each, oldest mark-done first,
+// with the chore's name and points and the name of the member who did it.
+func (q *Queries) ListPendingCompletions(ctx context.Context, householdID uuid.UUID) ([]ListPendingCompletionsRow, error) {
+	rows, err := q.db.Query(ctx, listPendingCompletions, householdID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPendingCompletionsRow{}
+	for rows.Next() {
+		var i ListPendingCompletionsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.QuestID,
+			&i.QuestName,
+			&i.Points,
+			&i.MemberID,
 			&i.MemberName,
+			&i.DoneAt,
 		); err != nil {
 			return nil, err
 		}
@@ -415,25 +494,68 @@ func (q *Queries) ListQuestLibrary(ctx context.Context) ([]QuestLibrary, error) 
 }
 
 const markQuestDone = `-- name: MarkQuestDone :one
-UPDATE household_quests
-SET done_at = NOW(), updated_at = NOW()
-WHERE household_id = $1 AND id = $2
-  AND claimed_by = $3
-  AND done_at IS NULL
-RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at
+WITH done AS (
+    UPDATE household_quests q
+    SET claimed_by = NULL, claimed_at = NULL,
+        completed_at = NOW(),
+        available_at = quest_next_available_at(NOW(), h.timezone, q.repeat_days),
+        updated_at = NOW()
+    FROM households h
+    WHERE h.id = q.household_id
+      AND q.household_id = $1 AND q.id = $2
+      AND q.claimed_by = $3::uuid
+    RETURNING q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at
+), recorded AS (
+    INSERT INTO quest_completions (id, household_id, quest_id, member_id, done_at, status)
+    SELECT $4::uuid, d.household_id, d.id, $3::uuid, NOW(), 'pending'
+    FROM done d
+    RETURNING id
+)
+SELECT d.id, d.household_id, d.library_id, d.name, d.points, d.repeat_days, d.notes,
+       d.claimed_by, d.claimed_at, d.done_at, d.completed_at, d.available_at,
+       d.created_at, d.updated_at
+FROM done d
 `
 
 type MarkQuestDoneParams struct {
-	HouseholdID uuid.UUID  `json:"household_id"`
-	ID          uuid.UUID  `json:"id"`
-	MemberID    *uuid.UUID `json:"member_id"`
+	HouseholdID  uuid.UUID `json:"household_id"`
+	ID           uuid.UUID `json:"id"`
+	MemberID     uuid.UUID `json:"member_id"`
+	CompletionID uuid.UUID `json:"completion_id"`
 }
 
-// The holder marks the quest done; it then waits for the administrator.
-// No points move here.
-func (q *Queries) MarkQuestDone(ctx context.Context, arg MarkQuestDoneParams) (HouseholdQuest, error) {
-	row := q.db.QueryRow(ctx, markQuestDone, arg.HouseholdID, arg.ID, arg.MemberID)
-	var i HouseholdQuest
+type MarkQuestDoneRow struct {
+	ID          uuid.UUID          `json:"id"`
+	HouseholdID uuid.UUID          `json:"household_id"`
+	LibraryID   *uuid.UUID         `json:"library_id"`
+	Name        string             `json:"name"`
+	Points      int32              `json:"points"`
+	RepeatDays  int32              `json:"repeat_days"`
+	Notes       string             `json:"notes"`
+	ClaimedBy   *uuid.UUID         `json:"claimed_by"`
+	ClaimedAt   pgtype.Timestamptz `json:"claimed_at"`
+	DoneAt      pgtype.Timestamptz `json:"done_at"`
+	CompletedAt pgtype.Timestamptz `json:"completed_at"`
+	AvailableAt pgtype.Timestamptz `json:"available_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+// The holder marks the quest done. In one statement the quest is released
+// and starts its cooldown from now (quest_next_available_at: local midnight
+// in the household's timezone, repeat_days days after today), and a pending
+// completion recording the member and the mark-done time is inserted for the
+// administrator. NOW() is one instant per transaction, so completed_at equals
+// the completion's done_at. A quest the member does not hold matches no row
+// and inserts nothing. No points move here.
+func (q *Queries) MarkQuestDone(ctx context.Context, arg MarkQuestDoneParams) (MarkQuestDoneRow, error) {
+	row := q.db.QueryRow(ctx, markQuestDone,
+		arg.HouseholdID,
+		arg.ID,
+		arg.MemberID,
+		arg.CompletionID,
+	)
+	var i MarkQuestDoneRow
 	err := row.Scan(
 		&i.ID,
 		&i.HouseholdID,
@@ -453,38 +575,72 @@ func (q *Queries) MarkQuestDone(ctx context.Context, arg MarkQuestDoneParams) (H
 	return i, err
 }
 
-const rejectQuest = `-- name: RejectQuest :one
-UPDATE household_quests
-SET done_at = NULL, updated_at = NOW()
-WHERE household_id = $1 AND id = $2
-  AND done_at IS NOT NULL
-RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at
+const questHasPendingCompletion = `-- name: QuestHasPendingCompletion :one
+SELECT EXISTS (
+    SELECT 1 FROM quest_completions c
+    WHERE c.household_id = $1 AND c.quest_id = $2
+      AND c.status = 'pending'
+) AS awaiting_approval
 `
 
-type RejectQuestParams struct {
+type QuestHasPendingCompletionParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	QuestID     uuid.UUID `json:"quest_id"`
+}
+
+// Whether the quest has a completion waiting for the administrator.
+func (q *Queries) QuestHasPendingCompletion(ctx context.Context, arg QuestHasPendingCompletionParams) (bool, error) {
+	row := q.db.QueryRow(ctx, questHasPendingCompletion, arg.HouseholdID, arg.QuestID)
+	var awaiting_approval bool
+	err := row.Scan(&awaiting_approval)
+	return awaiting_approval, err
+}
+
+const rejectCompletion = `-- name: RejectCompletion :one
+WITH rejected AS (
+    UPDATE quest_completions rc
+    SET status = 'rejected'
+    WHERE rc.household_id = $1 AND rc.id = $2
+      AND rc.status = 'pending'
+    RETURNING rc.id, rc.household_id, rc.quest_id, rc.member_id, rc.done_at, rc.status
+), reopened AS (
+    UPDATE household_quests q
+    SET available_at = NOW(), updated_at = NOW()
+    FROM rejected r
+    WHERE q.household_id = r.household_id AND q.id = r.quest_id
+      AND q.completed_at = r.done_at AND q.available_at > NOW()
+    RETURNING q.id
+)
+SELECT r.id, r.quest_id, r.member_id, r.done_at, r.status
+FROM rejected r
+`
+
+type RejectCompletionParams struct {
 	HouseholdID uuid.UUID `json:"household_id"`
 	ID          uuid.UUID `json:"id"`
 }
 
-// Sends a pending quest back to its holder: it stays theirs, unfinished.
-func (q *Queries) RejectQuest(ctx context.Context, arg RejectQuestParams) (HouseholdQuest, error) {
-	row := q.db.QueryRow(ctx, rejectQuest, arg.HouseholdID, arg.ID)
-	var i HouseholdQuest
+type RejectCompletionRow struct {
+	ID       uuid.UUID          `json:"id"`
+	QuestID  uuid.UUID          `json:"quest_id"`
+	MemberID *uuid.UUID         `json:"member_id"`
+	DoneAt   pgtype.Timestamptz `json:"done_at"`
+	Status   string             `json:"status"`
+}
+
+// Rejects one pending completion: no points. If it started the quest's
+// running cooldown (the quest's completed_at is its done_at) and that
+// cooldown has not ended, the cooldown is cancelled so the chore is available
+// again right away. Other completions and the quest's holder are untouched.
+func (q *Queries) RejectCompletion(ctx context.Context, arg RejectCompletionParams) (RejectCompletionRow, error) {
+	row := q.db.QueryRow(ctx, rejectCompletion, arg.HouseholdID, arg.ID)
+	var i RejectCompletionRow
 	err := row.Scan(
 		&i.ID,
-		&i.HouseholdID,
-		&i.LibraryID,
-		&i.Name,
-		&i.Points,
-		&i.RepeatDays,
-		&i.Notes,
-		&i.ClaimedBy,
-		&i.ClaimedAt,
+		&i.QuestID,
+		&i.MemberID,
 		&i.DoneAt,
-		&i.CompletedAt,
-		&i.AvailableAt,
-		&i.CreatedAt,
-		&i.UpdatedAt,
+		&i.Status,
 	)
 	return i, err
 }
@@ -500,9 +656,8 @@ type ReleaseMemberQuestsParams struct {
 	MemberID    *uuid.UUID `json:"member_id"`
 }
 
-// Returns every quest the member holds to the pool, a quest awaiting approval
-// included. done_at is cleared with the holder, so the done_at-needs-a-holder
-// CHECK holds. No points move.
+// Returns every quest the member holds to the pool. done_at is cleared with
+// the holder, so the done_at-needs-a-holder CHECK holds. No points move.
 func (q *Queries) ReleaseMemberQuests(ctx context.Context, arg ReleaseMemberQuestsParams) error {
 	_, err := q.db.Exec(ctx, releaseMemberQuests, arg.HouseholdID, arg.MemberID)
 	return err

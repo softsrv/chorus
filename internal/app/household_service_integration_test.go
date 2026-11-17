@@ -150,6 +150,15 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get pending quest before outsider attempts: %v", err)
 	}
+	aliceCompletions, err := quests.ListPending(ctx, alice, h.ID, "")
+	if err != nil || len(aliceCompletions) != 1 {
+		t.Fatalf("ListPending for Alice before outsider attempts: %v, len=%d", err, len(aliceCompletions))
+	}
+	aliceCompletionID := aliceCompletions[0].ID
+	foreignCompletionID, err := uuid.NewV7()
+	if err != nil {
+		t.Fatalf("new uuid: %v", err)
+	}
 	memberBefore, err := familySvc.Get(ctx, alice, h.ID, aliceMember.ID)
 	if err != nil {
 		t.Fatalf("Get alice member before outsider attempts: %v", err)
@@ -157,29 +166,40 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	_, checks["abandon quest"] = quests.Abandon(ctx, mallory, h.ID, alicePending.ID, asAlice)
 	_, checks["mark quest done"] = quests.MarkDone(ctx, mallory, h.ID, alicePending.ID, asAlice)
 	_, checks["list pending quests"] = quests.ListPending(ctx, mallory, h.ID, "")
-	_, _, _, checks["approve quest"] = quests.Approve(ctx, mallory, h.ID, alicePending.ID, "")
-	_, checks["reject quest"] = quests.Reject(ctx, mallory, h.ID, alicePending.ID, "")
+	_, _, _, checks["approve quest"] = quests.Approve(ctx, mallory, h.ID, aliceCompletionID, "")
+	_, checks["reject quest"] = quests.Reject(ctx, mallory, h.ID, aliceCompletionID, "")
 	_, checks["abandon quest via own household"] = quests.Abandon(ctx, mallory, mh.ID, alicePending.ID, asAlice)
 	_, checks["abandon quest via own household as own member"] = quests.Abandon(ctx, mallory, mh.ID, alicePending.ID, app.MemberAction{MemberID: malloryMember.ID})
 	_, checks["mark quest done via own household"] = quests.MarkDone(ctx, mallory, mh.ID, alicePending.ID, asAlice)
-	_, _, _, checks["approve quest via own household"] = quests.Approve(ctx, mallory, mh.ID, alicePending.ID, "")
-	_, checks["reject quest via own household"] = quests.Reject(ctx, mallory, mh.ID, alicePending.ID, "")
+	_, checks["mark quest done via own household as own member"] = quests.MarkDone(ctx, mallory, mh.ID, alicePending.ID, app.MemberAction{MemberID: malloryMember.ID})
+	_, _, _, checks["approve quest via own household"] = quests.Approve(ctx, mallory, mh.ID, aliceCompletionID, "")
+	_, checks["reject quest via own household"] = quests.Reject(ctx, mallory, mh.ID, aliceCompletionID, "")
+	_, _, _, checks["approve foreign completion via own household"] = quests.Approve(ctx, mallory, mh.ID, foreignCompletionID, "")
+	_, checks["reject foreign completion via own household"] = quests.Reject(ctx, mallory, mh.ID, foreignCompletionID, "")
+	_, _, _, checks["approve foreign completion via alice household"] = quests.Approve(ctx, mallory, h.ID, foreignCompletionID, "")
+	_, checks["reject foreign completion via alice household"] = quests.Reject(ctx, mallory, h.ID, foreignCompletionID, "")
 
-	// CLM-14: Mallory's cross-household Approve attempts on Alice's pending quest
-	// must not approve it, clear done_at, change available_at, or award points.
+	// CLM-9: Mallory's cross-household Approve/Reject/MarkDone attempts on Alice's pending quest
+	// must not approve it, alter its completion, change available_at, or award points.
 	pendingAfter, err := quests.Get(ctx, alice, h.ID, alicePending.ID)
 	if err != nil {
 		t.Fatalf("get pending quest after outsider approve attempts: %v", err)
 	}
-	if pendingAfter.ClaimedBy == nil || *pendingAfter.ClaimedBy != aliceMember.ID || !pendingAfter.DoneAt.Valid {
-		t.Errorf("alice pending quest not awaiting approval: claimed_by %v, done_at %v", pendingAfter.ClaimedBy, pendingAfter.DoneAt)
+	if pendingAfter.ClaimedBy != nil {
+		t.Errorf("alice pending quest was claimed: claimed_by %v", pendingAfter.ClaimedBy)
 	}
-	if pendingAfter.CompletedAt.Valid {
-		t.Errorf("alice pending quest completed_at was set: %+v", pendingAfter)
+	if !pendingAfter.AwaitingApproval {
+		t.Errorf("alice pending quest not awaiting approval: %+v", pendingAfter)
 	}
 	if pendingAfter.AvailableAt.Valid != pendingBefore.AvailableAt.Valid ||
 		(pendingBefore.AvailableAt.Valid && !pendingAfter.AvailableAt.Time.Equal(pendingBefore.AvailableAt.Time)) {
 		t.Errorf("alice pending quest available_at changed: before %v, after %v", pendingBefore.AvailableAt, pendingAfter.AvailableAt)
+	}
+	// completed_at is the cooldown anchor (it equals the pending completion's
+	// done_at); no outsider MarkDone, Approve or Reject may re-stamp it.
+	if !pendingBefore.CompletedAt.Valid || pendingAfter.CompletedAt.Valid != pendingBefore.CompletedAt.Valid ||
+		!pendingAfter.CompletedAt.Time.Equal(pendingBefore.CompletedAt.Time) {
+		t.Errorf("alice pending quest completed_at changed: before %v, after %v", pendingBefore.CompletedAt, pendingAfter.CompletedAt)
 	}
 	memberAfter, err := familySvc.Get(ctx, alice, h.ID, aliceMember.ID)
 	if err != nil {
@@ -187,6 +207,23 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	}
 	if memberAfter.Points != memberBefore.Points {
 		t.Errorf("alice member points changed: before %d, after %d", memberBefore.Points, memberAfter.Points)
+	}
+	aliceCompletionsAfter, err := quests.ListPending(ctx, alice, h.ID, "")
+	if err != nil || len(aliceCompletionsAfter) != 1 || aliceCompletionsAfter[0].ID != aliceCompletionID {
+		t.Errorf("alice pending completion touched by outsider: %+v, %v", aliceCompletionsAfter, err)
+	}
+	var compStatus string
+	var compApprovedAt pgtype.Timestamptz
+	var compDoneAt time.Time
+	if err := pool.QueryRow(ctx, `SELECT status, approved_at, done_at FROM quest_completions WHERE id = $1 AND household_id = $2`, aliceCompletionID, h.ID).Scan(&compStatus, &compApprovedAt, &compDoneAt); err != nil || compStatus != "pending" || compApprovedAt.Valid {
+		t.Errorf("alice completion in db = status %q approved_at %v, %v; want pending, no approved_at", compStatus, compApprovedAt, err)
+	}
+	if !compDoneAt.Equal(pendingBefore.CompletedAt.Time) {
+		t.Errorf("alice completion done_at %v no longer anchors the quest's completed_at %v", compDoneAt, pendingBefore.CompletedAt.Time)
+	}
+	var aliceCompletionRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM quest_completions WHERE household_id = $1 AND quest_id = $2`, h.ID, alicePending.ID).Scan(&aliceCompletionRows); err != nil || aliceCompletionRows != 1 {
+		t.Errorf("alice quest completion rows after outsider MarkDone = %d, %v; want 1", aliceCompletionRows, err)
 	}
 	if rows, err := quests.ListPending(ctx, mallory, mh.ID, ""); err != nil || len(rows) != 0 {
 		t.Errorf("mallory's own pending list shows other households' quests: %+v, %v", rows, err)
@@ -303,8 +340,8 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	if list, _, err := quests.List(ctx, alice, h.ID, app.QuestPage{Limit: 10}); err != nil || len(list) != 3 {
 		t.Errorf("alice's quests after outsider attempts: %d, %v; want exactly 3 (no smuggled create or copy)", len(list), err)
 	}
-	if rows, err := quests.ListPending(ctx, alice, h.ID, ""); err != nil || len(rows) != 1 || rows[0].HouseholdQuest.ID != alicePending.ID ||
-		rows[0].HouseholdQuest.ClaimedBy == nil || *rows[0].HouseholdQuest.ClaimedBy != aliceMember.ID {
+	if rows, err := quests.ListPending(ctx, alice, h.ID, ""); err != nil || len(rows) != 1 || rows[0].QuestID != alicePending.ID ||
+		rows[0].MemberID != aliceMember.ID {
 		t.Errorf("alice's pending quest was changed by the outsider: %+v, %v", rows, err)
 	}
 	if m, err := familySvc.Get(ctx, alice, h.ID, aliceMember.ID); err != nil || m.Points != 0 {
@@ -504,6 +541,129 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		t.Errorf("bob points history mismatch: got %+v, want award %v", bobHist, bobAwardID)
 	}
 
+	// CLM-4: Cross-household combo isolation. Look-alike chores done the same
+	// day in another household never trigger or pay a household's combo.
+	bobDishes, err := quests.Create(ctx, bob, bh.ID, app.QuestInput{
+		Name:       "Dishes",
+		Points:     num(10),
+		RepeatDays: num(1),
+	}, "")
+	if err != nil {
+		t.Fatalf("Create bob dishes: %v", err)
+	}
+	bobWipe, err := quests.Create(ctx, bob, bh.ID, app.QuestInput{
+		Name:       "Wipe counters",
+		Points:     num(5),
+		RepeatDays: num(1),
+	}, "")
+	if err != nil {
+		t.Fatalf("Create bob wipe counters: %v", err)
+	}
+	_, err = combos.Create(ctx, bob, bh.ID, app.ComboInput{
+		Name:        "Kitchen Crew",
+		BonusPoints: num(20),
+		QuestIDs:    []uuid.UUID{bobDishes.ID, bobWipe.ID},
+	}, "")
+	if err != nil {
+		t.Fatalf("Create bob combo: %v", err)
+	}
+
+	// Bob's member accepts and marks done both look-alike chores.
+	if _, err := quests.Accept(ctx, bob, bh.ID, bobDishes.ID, asBob); err != nil {
+		t.Fatalf("Accept bob dishes: %v", err)
+	}
+	if _, err := quests.MarkDone(ctx, bob, bh.ID, bobDishes.ID, asBob); err != nil {
+		t.Fatalf("MarkDone bob dishes: %v", err)
+	}
+	if _, err := quests.Accept(ctx, bob, bh.ID, bobWipe.ID, asBob); err != nil {
+		t.Fatalf("Accept bob wipe counters: %v", err)
+	}
+	if _, err := quests.MarkDone(ctx, bob, bh.ID, bobWipe.ID, asBob); err != nil {
+		t.Fatalf("MarkDone bob wipe counters: %v", err)
+	}
+
+	// Approve Bob's look-alike completions (leave bobPending awaiting approval).
+	bobPendingList, err := quests.ListPending(ctx, bob, bh.ID, "")
+	if err != nil {
+		t.Fatalf("ListPending bob: %v", err)
+	}
+	var bobBonusesTotal int
+	for _, p := range bobPendingList {
+		if p.QuestID == bobDishes.ID || p.QuestID == bobWipe.ID {
+			_, _, bonuses, err := quests.Approve(ctx, bob, bh.ID, p.ID, "")
+			if err != nil {
+				t.Fatalf("Approve bob completion %s: %v", p.ID, err)
+			}
+			bobBonusesTotal += len(bonuses)
+		}
+	}
+	if bobBonusesTotal != 1 {
+		t.Fatalf("bob combo bonuses = %d, want 1", bobBonusesTotal)
+	}
+
+	// Alice's member accepts and marks done only aliceQuest ("Dishes").
+	// Even though Bob marked done "Wipe counters" in household B on the same day,
+	// Bob's completion must not count toward Alice's "Kitchen Crew" combo.
+	if _, err := quests.Accept(ctx, alice, h.ID, aliceQuest.ID, asAlice); err != nil {
+		t.Fatalf("Accept aliceQuest: %v", err)
+	}
+	if _, err := quests.MarkDone(ctx, alice, h.ID, aliceQuest.ID, asAlice); err != nil {
+		t.Fatalf("MarkDone aliceQuest: %v", err)
+	}
+
+	alicePendingList, err := quests.ListPending(ctx, alice, h.ID, "")
+	if err != nil {
+		t.Fatalf("ListPending alice: %v", err)
+	}
+	var aliceDishesCompID uuid.UUID
+	for _, p := range alicePendingList {
+		if p.QuestID == aliceQuest.ID {
+			aliceDishesCompID = p.ID
+			break
+		}
+	}
+	if aliceDishesCompID == uuid.Nil {
+		t.Fatal("alice dishes completion not found in pending list")
+	}
+
+	_, _, aliceBonuses, err := quests.Approve(ctx, alice, h.ID, aliceDishesCompID, "")
+	if err != nil {
+		t.Fatalf("Approve alice dishes completion: %v", err)
+	}
+	if len(aliceBonuses) != 0 {
+		t.Fatalf("alice combo bonuses = %d, want 0", len(aliceBonuses))
+	}
+
+	// Verify combo_awards in the database: Bob has 1, Alice has 0.
+	var aliceComboAwardsCount int
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM combo_awards WHERE household_id = $1", h.ID).Scan(&aliceComboAwardsCount); err != nil {
+		t.Fatalf("count alice combo_awards: %v", err)
+	}
+	if aliceComboAwardsCount != 0 {
+		t.Errorf("alice combo_awards count = %d, want 0", aliceComboAwardsCount)
+	}
+
+	var bobComboAwardsCount int
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM combo_awards WHERE household_id = $1", bh.ID).Scan(&bobComboAwardsCount); err != nil {
+		t.Fatalf("count bob combo_awards: %v", err)
+	}
+	if bobComboAwardsCount != 1 {
+		t.Errorf("bob combo_awards count = %d, want 1", bobComboAwardsCount)
+	}
+
+	var aliceComboByComboID int
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM combo_awards WHERE combo_id = $1", aliceCombo.ID).Scan(&aliceComboByComboID); err != nil {
+		t.Fatalf("count aliceCombo by id: %v", err)
+	}
+	if aliceComboByComboID != 0 {
+		t.Errorf("aliceCombo awards count = %d, want 0", aliceComboByComboID)
+	}
+
+	// Restore Bob's member points to baseline 25 for downstream assertions.
+	if _, err := q.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: bh.ID, ID: bobMember.ID, Delta: -35}); err != nil {
+		t.Fatalf("restore bob member points: %v", err)
+	}
+
 	// Non-member (Mallory) gets ErrNotFound deleting household A, and A stays intact.
 	if err := households.Delete(ctx, mallory, h.ID); !errors.Is(err, app.ErrNotFound) {
 		t.Errorf("mallory delete household A: expected ErrNotFound, got %v", err)
@@ -581,7 +741,7 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		t.Errorf("bob claimed quest changed: %+v, %v", gotBobClaimed, err)
 	}
 	gotBobPending, err := quests.Get(ctx, bob, bh.ID, bobPending.ID)
-	if err != nil || gotBobPending.ClaimedBy == nil || *gotBobPending.ClaimedBy != bobMember.ID || !gotBobPending.DoneAt.Valid {
+	if err != nil || gotBobPending.ClaimedBy != nil || !gotBobPending.AwaitingApproval {
 		t.Errorf("bob pending quest changed: %+v, %v", gotBobPending, err)
 	}
 	gotBobReward, err := rewards.Get(ctx, bob, bh.ID, bobReward.ID)

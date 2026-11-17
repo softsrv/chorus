@@ -17,22 +17,23 @@ import (
 const defaultPageSize = 50
 
 type questServicer interface {
-	List(ctx context.Context, userID, householdID uuid.UUID, p app.QuestPage) ([]db.HouseholdQuest, bool, error)
-	Get(ctx context.Context, userID, householdID, questID uuid.UUID) (db.HouseholdQuest, error)
-	Create(ctx context.Context, userID, householdID uuid.UUID, in app.QuestInput, adminPin string) (db.HouseholdQuest, error)
-	Update(ctx context.Context, userID, householdID, questID uuid.UUID, in app.QuestInput, adminPin string) (db.HouseholdQuest, error)
+	List(ctx context.Context, userID, householdID uuid.UUID, p app.QuestPage) ([]app.QuestView, bool, error)
+	Get(ctx context.Context, userID, householdID, questID uuid.UUID) (app.QuestView, error)
+	Create(ctx context.Context, userID, householdID uuid.UUID, in app.QuestInput, adminPin string) (app.QuestView, error)
+	Update(ctx context.Context, userID, householdID, questID uuid.UUID, in app.QuestInput, adminPin string) (app.QuestView, error)
 	Delete(ctx context.Context, userID, householdID, questID uuid.UUID, adminPin string) error
-	CopyFromLibrary(ctx context.Context, userID, householdID, libraryID uuid.UUID, adminPin string) (db.HouseholdQuest, error)
+	CopyFromLibrary(ctx context.Context, userID, householdID, libraryID uuid.UUID, adminPin string) (app.QuestView, error)
 	ListLibrary(ctx context.Context) ([]db.QuestLibrary, error)
-	Accept(ctx context.Context, userID, householdID, questID uuid.UUID, act app.MemberAction) (db.HouseholdQuest, error)
-	Abandon(ctx context.Context, userID, householdID, questID uuid.UUID, act app.MemberAction) (db.HouseholdQuest, error)
-	MarkDone(ctx context.Context, userID, householdID, questID uuid.UUID, act app.MemberAction) (db.HouseholdQuest, error)
-	ListPending(ctx context.Context, userID, householdID uuid.UUID, adminPin string) ([]db.ListPendingQuestsRow, error)
-	Approve(ctx context.Context, userID, householdID, questID uuid.UUID, adminPin string) (db.HouseholdQuest, db.FamilyMember, []app.ComboBonus, error)
-	Reject(ctx context.Context, userID, householdID, questID uuid.UUID, adminPin string) (db.HouseholdQuest, error)
+	Accept(ctx context.Context, userID, householdID, questID uuid.UUID, act app.MemberAction) (app.QuestView, error)
+	Abandon(ctx context.Context, userID, householdID, questID uuid.UUID, act app.MemberAction) (app.QuestView, error)
+	MarkDone(ctx context.Context, userID, householdID, questID uuid.UUID, act app.MemberAction) (app.QuestView, error)
+	ListPending(ctx context.Context, userID, householdID uuid.UUID, adminPin string) ([]app.PendingCompletion, error)
+	Approve(ctx context.Context, userID, householdID, completionID uuid.UUID, adminPin string) (app.Completion, db.FamilyMember, []app.ComboBonus, error)
+	Reject(ctx context.Context, userID, householdID, completionID uuid.UUID, adminPin string) (app.Completion, error)
 }
 
-// QuestHandler serves /api/v1/households/{householdID}/quests and
+// QuestHandler serves /api/v1/households/{householdID}/quests,
+// /api/v1/households/{householdID}/quest-completions and
 // /api/v1/quest-library. Writes carry the admin PIN in X-Admin-PIN.
 type QuestHandler struct {
 	svc questServicer
@@ -256,7 +257,7 @@ func (h *QuestHandler) Accept(w http.ResponseWriter, r *http.Request) {
 // memberAction runs one of the acting member's quest actions (abandon, mark
 // done) and answers the quest.
 func (h *QuestHandler) memberAction(w http.ResponseWriter, r *http.Request,
-	do func(ctx context.Context, userID, householdID, questID uuid.UUID, act app.MemberAction) (db.HouseholdQuest, error)) {
+	do func(ctx context.Context, userID, householdID, questID uuid.UUID, act app.MemberAction) (app.QuestView, error)) {
 	hid, qid, ok := parseQuestIDs(w, r)
 	if !ok {
 		return
@@ -279,21 +280,16 @@ func (h *QuestHandler) Abandon(w http.ResponseWriter, r *http.Request) {
 	h.memberAction(w, r, h.svc.Abandon)
 }
 
-// MarkDone marks the acting member's quest done; it then waits for approval:
+// MarkDone marks the acting member's quest done: the quest is released and
+// rests until its cooldown ends, and a completion waits for approval:
 // {"member_id": "...", "pin": "1234"}.
 func (h *QuestHandler) MarkDone(w http.ResponseWriter, r *http.Request) {
 	h.memberAction(w, r, h.svc.MarkDone)
 }
 
-// pendingQuestJSON is a quest waiting for approval with the name of the
-// member who holds it (claimed_by).
-type pendingQuestJSON struct {
-	questJSON
-	MemberName string `json:"member_name"`
-}
-
-// Pending lists the quests waiting for approval. The admin PIN travels in
-// X-Admin-PIN. None waiting answers {"items": []}, never null.
+// Pending lists the completions waiting for approval, one per mark-done,
+// oldest first. The admin PIN travels in X-Admin-PIN. None waiting answers
+// {"items": []}, never null.
 func (h *QuestHandler) Pending(w http.ResponseWriter, r *http.Request) {
 	hid, ok := pathUUID(w, r, "householdID")
 	if !ok {
@@ -304,10 +300,15 @@ func (h *QuestHandler) Pending(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	items := mapSlice(rows, func(p db.ListPendingQuestsRow) pendingQuestJSON {
-		return pendingQuestJSON{questJSON: toQuest(p.HouseholdQuest), MemberName: p.MemberName}
-	})
-	respond.JSON(w, http.StatusOK, listResponse[pendingQuestJSON]{Items: items})
+	respond.JSON(w, http.StatusOK, listResponse[pendingCompletionJSON]{Items: mapSlice(rows, toPendingCompletion)})
+}
+
+func parseCompletionIDs(w http.ResponseWriter, r *http.Request) (hid, cid uuid.UUID, ok bool) {
+	if hid, ok = pathUUID(w, r, "householdID"); !ok {
+		return
+	}
+	cid, ok = pathUUID(w, r, "completionID")
+	return
 }
 
 // decodeEmptyBody accepts no body or exactly {}: approve and reject carry
@@ -320,48 +321,53 @@ func decodeEmptyBody(w http.ResponseWriter, r *http.Request) bool {
 	return decodeJSON(w, r, &req)
 }
 
-// approveResponse is the approved quest, the member it credited with their
-// new point total (bonuses included), and every combo bonus the approval
-// paid; combo_bonuses is [] when none.
+// approveResponse is the approved completion, the member it credited with
+// their new point total (bonuses included), and every combo bonus the
+// approval paid; combo_bonuses is [] when none.
 type approveResponse struct {
-	Quest        questJSON        `json:"quest"`
+	Completion   completionJSON   `json:"completion"`
 	Member       familyMemberJSON `json:"member"`
 	ComboBonuses []comboAwardJSON `json:"combo_bonuses"`
 }
 
-// Approve completes a pending quest and credits its points, and any combo
-// bonuses it finishes, to its holder.
+// completionResponse wraps a rejected completion.
+type completionResponse struct {
+	Completion completionJSON `json:"completion"`
+}
+
+// Approve approves a pending completion and credits its chore's points, and
+// any combo bonuses it finishes, to the member who marked it done.
 // The admin PIN travels in X-Admin-PIN; the body is empty or {}.
 func (h *QuestHandler) Approve(w http.ResponseWriter, r *http.Request) {
-	hid, qid, ok := parseQuestIDs(w, r)
+	hid, cid, ok := parseCompletionIDs(w, r)
 	if !ok || !decodeEmptyBody(w, r) {
 		return
 	}
-	quest, member, bonuses, err := h.svc.Approve(r.Context(), currentUser(r), hid, qid, r.Header.Get("X-Admin-PIN"))
+	completion, member, bonuses, err := h.svc.Approve(r.Context(), currentUser(r), hid, cid, r.Header.Get("X-Admin-PIN"))
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
 	respond.JSON(w, http.StatusOK, approveResponse{
-		Quest:        toQuest(quest),
+		Completion:   toCompletion(completion),
 		Member:       toFamilyMember(member),
 		ComboBonuses: mapSlice(bonuses, toComboAward),
 	})
 }
 
-// Reject sends a pending quest back to its holder with no points. The admin
-// PIN travels in X-Admin-PIN; the body is empty or {}.
+// Reject rejects a pending completion with no points. The admin PIN travels
+// in X-Admin-PIN; the body is empty or {}.
 func (h *QuestHandler) Reject(w http.ResponseWriter, r *http.Request) {
-	hid, qid, ok := parseQuestIDs(w, r)
+	hid, cid, ok := parseCompletionIDs(w, r)
 	if !ok || !decodeEmptyBody(w, r) {
 		return
 	}
-	quest, err := h.svc.Reject(r.Context(), currentUser(r), hid, qid, r.Header.Get("X-Admin-PIN"))
+	completion, err := h.svc.Reject(r.Context(), currentUser(r), hid, cid, r.Header.Get("X-Admin-PIN"))
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
-	respond.JSON(w, http.StatusOK, toQuest(quest))
+	respond.JSON(w, http.StatusOK, completionResponse{Completion: toCompletion(completion)})
 }
 
 // Library lists the global quest library.

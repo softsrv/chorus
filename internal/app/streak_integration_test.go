@@ -72,14 +72,18 @@ func TestIntegration_PointsHistory(t *testing.T) {
 			t.Fatalf("mark done quest %d: %v", i, err)
 		}
 
-		appr, _, _, err := quests.Approve(ctx, parent, h.ID, questRow.ID, "")
+		pendingRows, err := quests.ListPending(ctx, parent, h.ID, "")
+		if err != nil || len(pendingRows) != 1 {
+			t.Fatalf("pending for quest %d: %+v %v", i, pendingRows, err)
+		}
+		appr, _, _, err := quests.Approve(ctx, parent, h.ID, pendingRows[0].ID, "")
 		if err != nil {
 			t.Fatalf("approve quest %d: %v", i, err)
 		}
-		if !appr.CompletedAt.Valid {
-			t.Fatalf("quest %d completed_at is not valid", i)
+		if appr.ApprovedAt == nil {
+			t.Fatalf("quest %d approved_at is not set", i)
 		}
-		approvalTimes = append(approvalTimes, appr.CompletedAt.Time)
+		approvalTimes = append(approvalTimes, *appr.ApprovedAt)
 		// Small pause to guarantee distinct created_at / completed_at timestamps if required
 		time.Sleep(10 * time.Millisecond)
 	}

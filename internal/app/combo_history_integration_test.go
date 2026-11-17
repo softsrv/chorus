@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -213,16 +212,14 @@ END $$`, fn, w.h.ID)); err != nil {
 		t.Fatalf("create trigger: %v", err)
 	}
 
-	if _, _, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, b, ""); err == nil {
+	if _, _, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, w.last[b], ""); err == nil {
 		t.Fatal("approve with failing combo history insert succeeded")
 	}
-	got, err := w.quests.Get(w.ctx, w.admin, w.h.ID, b)
-	if err != nil || !got.DoneAt.Valid || got.ClaimedBy == nil || *got.ClaimedBy != ann || got.CompletedAt.Valid {
-		t.Fatalf("quest not pending after failed approval: %+v %v", got, err)
+	if n := w.count(`SELECT count(*) FROM quest_completions WHERE household_id = $1 AND id = $2 AND status = 'pending'`, w.h.ID, w.last[b]); n != 1 {
+		t.Fatalf("completion not pending after failed approval: %d pending rows", n)
 	}
-	if w.points(ann) != pointsBefore || len(w.history(ann)) != rowsBefore || w.awards() != 0 ||
-		w.count(`SELECT count(*) FROM quest_completions WHERE household_id = $1 AND quest_id = $2`, w.h.ID, b) != 0 {
-		t.Fatalf("failed approval left points %d (want %d), history rows %d (want %d), awards %d or a completion",
+	if w.points(ann) != pointsBefore || len(w.history(ann)) != rowsBefore || w.awards() != 0 {
+		t.Fatalf("failed approval left points %d (want %d), history rows %d (want %d), awards %d",
 			w.points(ann), pointsBefore, len(w.history(ann)), rowsBefore, w.awards())
 	}
 
@@ -238,7 +235,7 @@ END $$`, fn, w.h.ID)); err != nil {
 
 // TestIntegration_NoComboApprovalUnchanged proves CLM-2: in a household with
 // no combos, approval credits the quest's points once, releases the quest
-// with its repeat countdown, writes only the quest entry (no combo entry),
+// approves the completion with its mark-done time, writes only the quest entry (no combo entry),
 // and a repeated or concurrent approval still pays once.
 func TestIntegration_NoComboApprovalUnchanged(t *testing.T) {
 	base := newComboHistoryBase(t, "nocombo")
@@ -248,7 +245,8 @@ func TestIntegration_NoComboApprovalUnchanged(t *testing.T) {
 
 	doneAt := utc(10, 14, 0)
 	w.markDone(chore, ann, doneAt)
-	approved, m, bonuses, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, chore, "")
+	first := w.last[chore]
+	approved, m, bonuses, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, first, "")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
@@ -258,25 +256,16 @@ func TestIntegration_NoComboApprovalUnchanged(t *testing.T) {
 	if m.ID != ann || m.Points != 10 {
 		t.Fatalf("credited member %+v, want Ann with 10", m)
 	}
-	// Released, completed, and out of the pool until local midnight in the
-	// household's timezone, repeat_days days after the day it was marked done
-	// (done_at is back-dated, so available_at may be before completed_at).
-	loc, err := time.LoadLocation(w.h.Timezone)
-	if err != nil {
-		t.Fatalf("load household timezone %q: %v", w.h.Timezone, err)
-	}
-	y, mo, d := doneAt.In(loc).Date()
-	wantBack := time.Date(y, mo, d+int(approved.RepeatDays), 0, 0, 0, 0, loc)
-	if approved.RepeatDays != 1 || !approved.CompletedAt.Valid || approved.ClaimedBy != nil || approved.DoneAt.Valid ||
-		!approved.AvailableAt.Valid || !approved.AvailableAt.Time.Equal(wantBack) {
-		t.Fatalf("approved quest: %+v, want released with repeat_days 1 and available_at %v", approved, wantBack)
+	// The completion is approved and keeps its mark-done time.
+	if approved.ID != first || approved.Status != "approved" || approved.ApprovedAt == nil || !approved.DoneAt.Equal(doneAt) {
+		t.Fatalf("approved completion: %+v, want approved with done_at %v", approved, doneAt)
 	}
 	hist := w.history(ann)
 	if len(hist) != 1 || hist[0].Kind != "quest" || hist[0].Reason != "Feed cat" || hist[0].Points != 10 {
 		t.Fatalf("history %+v, want only the quest entry", hist)
 	}
 
-	if _, _, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, chore, ""); !errors.Is(err, app.ErrNotFound) {
+	if _, _, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, first, ""); !errors.Is(err, app.ErrNotFound) {
 		t.Fatalf("repeat approval: %v, want ErrNotFound", err)
 	}
 	if w.points(ann) != 10 || len(w.history(ann)) != 1 {
@@ -285,6 +274,7 @@ func TestIntegration_NoComboApprovalUnchanged(t *testing.T) {
 
 	// Concurrent approvals of one completion: one wins, the other is ErrNotFound.
 	w.markDone(chore, ann, utc(12, 14, 0))
+	second := w.last[chore]
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
 	start := make(chan struct{})
@@ -293,7 +283,7 @@ func TestIntegration_NoComboApprovalUnchanged(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			_, _, _, errs[i] = w.quests.Approve(w.ctx, w.admin, w.h.ID, chore, "")
+			_, _, _, errs[i] = w.quests.Approve(w.ctx, w.admin, w.h.ID, second, "")
 		}(i)
 	}
 	close(start)

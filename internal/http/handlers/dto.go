@@ -122,10 +122,11 @@ func toFamilyMember(m db.FamilyMember) familyMemberJSON {
 }
 
 // questJSON is a household quest. The lifecycle fields (claimed_by,
-// claimed_at, done_at, completed_at, available_at) are read-only and change
-// only through quest actions. available says the quest is in the pool;
-// awaiting_approval says a member marked it done and the administrator has
-// not yet approved or sent it back.
+// claimed_at, completed_at, available_at) are read-only and change only
+// through quest actions. completed_at is when it was last marked done and
+// available_at when its cooldown from that moment ends. available says the
+// quest is in the pool; awaiting_approval says at least one of its
+// completions waits for the administrator to approve or reject it.
 type questJSON struct {
 	ID               uuid.UUID  `json:"id"`
 	HouseholdID      uuid.UUID  `json:"household_id"`
@@ -137,7 +138,6 @@ type questJSON struct {
 	Available        bool       `json:"available"`
 	ClaimedBy        *uuid.UUID `json:"claimed_by"`
 	ClaimedAt        *time.Time `json:"claimed_at"`
-	DoneAt           *time.Time `json:"done_at"`
 	AwaitingApproval bool       `json:"awaiting_approval"`
 	CompletedAt      *time.Time `json:"completed_at"`
 	AvailableAt      *time.Time `json:"available_at"`
@@ -145,7 +145,10 @@ type questJSON struct {
 	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
-func toQuest(q db.HouseholdQuest) questJSON {
+// toQuest maps a quest; awaiting_approval comes only from the service's
+// pending-completion flag.
+func toQuest(v app.QuestView) questJSON {
+	q := v.HouseholdQuest
 	return questJSON{
 		ID:               q.ID,
 		HouseholdID:      q.HouseholdID,
@@ -157,12 +160,58 @@ func toQuest(q db.HouseholdQuest) questJSON {
 		Available:        app.QuestAvailable(q, time.Now()),
 		ClaimedBy:        q.ClaimedBy,
 		ClaimedAt:        timePtr(q.ClaimedAt),
-		DoneAt:           timePtr(q.DoneAt),
-		AwaitingApproval: q.DoneAt.Valid,
+		AwaitingApproval: v.AwaitingApproval,
 		CompletedAt:      timePtr(q.CompletedAt),
 		AvailableAt:      timePtr(q.AvailableAt),
 		CreatedAt:        q.CreatedAt.Time.UTC(),
 		UpdatedAt:        q.UpdatedAt.Time.UTC(),
+	}
+}
+
+// completionJSON is one time a member marked a chore done. approved_at is
+// present once approved; status is pending, approved, rejected or cancelled.
+// member_id is null once the member has been removed.
+type completionJSON struct {
+	ID         uuid.UUID  `json:"id"`
+	QuestID    uuid.UUID  `json:"quest_id"`
+	MemberID   *uuid.UUID `json:"member_id"`
+	DoneAt     time.Time  `json:"done_at"`
+	ApprovedAt *time.Time `json:"approved_at,omitempty"`
+	Status     string     `json:"status"`
+}
+
+func toCompletion(c app.Completion) completionJSON {
+	return completionJSON{
+		ID:         c.ID,
+		QuestID:    c.QuestID,
+		MemberID:   c.MemberID,
+		DoneAt:     c.DoneAt,
+		ApprovedAt: c.ApprovedAt,
+		Status:     c.Status,
+	}
+}
+
+// pendingCompletionJSON is a completion waiting for approval, with the
+// chore's name and points and the name of the member who marked it done.
+type pendingCompletionJSON struct {
+	CompletionID uuid.UUID `json:"completion_id"`
+	QuestID      uuid.UUID `json:"quest_id"`
+	Name         string    `json:"name"`
+	Points       int32     `json:"points"`
+	MemberID     uuid.UUID `json:"member_id"`
+	MemberName   string    `json:"member_name"`
+	DoneAt       time.Time `json:"done_at"`
+}
+
+func toPendingCompletion(p app.PendingCompletion) pendingCompletionJSON {
+	return pendingCompletionJSON{
+		CompletionID: p.ID,
+		QuestID:      p.QuestID,
+		Name:         p.QuestName,
+		Points:       p.Points,
+		MemberID:     p.MemberID,
+		MemberName:   p.MemberName,
+		DoneAt:       p.DoneAt,
 	}
 }
 

@@ -489,9 +489,13 @@ func TestIntegration_AdminPin(t *testing.T) {
 	}
 }
 
-// TestIntegration_RemoveMemberHoldingQuests: removing a member who holds a
-// quest, accepted or waiting for approval, succeeds and returns the quest to
-// the pool; other members' quests are untouched.
+// TestIntegration_RemoveMemberHoldingQuests: removing a member who holds an
+// accepted quest or has a completion waiting for approval succeeds: the held
+// quest returns to the pool, the waiting completion is cancelled with no
+// points, and a quest resting on the cooldown that completion started (marked
+// done just now, so the cooldown is still running) is available again at
+// once, as on reject; other members' cooldowns, quests and approved history
+// are untouched.
 func TestIntegration_RemoveMemberHoldingQuests(t *testing.T) {
 	pool := testDB(t)
 	mailer := &captureMailer{}
@@ -549,11 +553,65 @@ func TestIntegration_RemoveMemberHoldingQuests(t *testing.T) {
 	if _, err := quests.MarkDone(ctx, admin, h.ID, warmup.ID, benAct); err != nil {
 		t.Fatalf("Ben mark warmup done: %v", err)
 	}
-	if _, _, _, err := quests.Approve(ctx, admin, h.ID, warmup.ID, ""); err != nil {
+	waiting, err := quests.ListPending(ctx, admin, h.ID, "")
+	if err != nil {
+		t.Fatalf("list pending: %v", err)
+	}
+	var warmupCompletion uuid.UUID
+	for _, p := range waiting {
+		if p.QuestID == warmup.ID {
+			warmupCompletion = p.ID
+		}
+	}
+	if warmupCompletion == uuid.Nil {
+		t.Fatalf("Ben's warmup completion not pending: %+v", waiting)
+	}
+	if _, _, _, err := quests.Approve(ctx, admin, h.ID, warmupCompletion, ""); err != nil {
 		t.Fatalf("approve warmup: %v", err)
 	}
 	if _, err := quests.Accept(ctx, admin, h.ID, others.ID, benAct); err != nil {
 		t.Fatalf("Ben accept: %v", err)
+	}
+	// Ann's marked-done chore is resting on the cooldown her pending
+	// completion started; the removal must free it. Ben's approved warmup
+	// rests on his own cooldown, which the removal must not move.
+	pendingBefore, err := quests.Get(ctx, admin, h.ID, pending.ID)
+	if err != nil {
+		t.Fatalf("Get pending quest before removal: %v", err)
+	}
+	if !pendingBefore.AvailableAt.Valid || !pendingBefore.AvailableAt.Time.After(time.Now()) || !pendingBefore.AwaitingApproval ||
+		app.QuestAvailable(pendingBefore.HouseholdQuest, time.Now()) {
+		t.Fatalf("marked-done quest should be resting in a running cooldown and awaiting approval: %+v", pendingBefore)
+	}
+	warmupBefore, err := quests.Get(ctx, admin, h.ID, warmup.ID)
+	if err != nil {
+		t.Fatalf("Get warmup before removal: %v", err)
+	}
+	if !warmupBefore.AvailableAt.Valid || !warmupBefore.AvailableAt.Time.After(time.Now()) {
+		t.Fatalf("Ben's warmup should be resting in a running cooldown: %+v", warmupBefore)
+	}
+	completionStatuses := func(memberID, questID uuid.UUID) []string {
+		t.Helper()
+		rows, err := pool.Query(ctx, `SELECT status FROM quest_completions WHERE household_id = $1 AND quest_id = $2 AND member_id = $3 ORDER BY done_at`, h.ID, questID, memberID)
+		if err != nil {
+			t.Fatalf("query completions: %v", err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var s string
+			if err := rows.Scan(&s); err != nil {
+				t.Fatalf("scan completion: %v", err)
+			}
+			out = append(out, s)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("read completions: %v", err)
+		}
+		return out
+	}
+	if got := completionStatuses(ann.ID, pending.ID); len(got) != 1 || got[0] != "pending" {
+		t.Fatalf("Ann's completions before removal = %v, want [pending]", got)
 	}
 	before, err := familySvc.List(ctx, admin, h.ID)
 	if err != nil {
@@ -574,17 +632,52 @@ func TestIntegration_RemoveMemberHoldingQuests(t *testing.T) {
 	if _, err := familySvc.Get(ctx, admin, h.ID, ann.ID); !errors.Is(err, app.ErrNotFound) {
 		t.Errorf("removed member still readable: %v", err)
 	}
-	for _, id := range []uuid.UUID{pending.ID, accepted.ID} {
-		got, err := quests.Get(ctx, admin, h.ID, id)
-		if err != nil {
-			t.Fatalf("Get quest: %v", err)
-		}
-		if got.ClaimedBy != nil || got.DoneAt.Valid || got.ClaimedAt.Valid {
-			t.Errorf("quest %s not released: %+v", got.Name, got)
-		}
-		if !app.QuestAvailable(got, time.Now()) {
-			t.Errorf("released quest %s is not available: %+v", got.Name, got)
-		}
+	gotAccepted, err := quests.Get(ctx, admin, h.ID, accepted.ID)
+	if err != nil {
+		t.Fatalf("Get accepted quest: %v", err)
+	}
+	if gotAccepted.ClaimedBy != nil || gotAccepted.ClaimedAt.Valid {
+		t.Errorf("accepted quest not released: %+v", gotAccepted)
+	}
+	if !app.QuestAvailable(gotAccepted.HouseholdQuest, time.Now()) {
+		t.Errorf("released quest is not available: %+v", gotAccepted)
+	}
+	// The cooldown Ann's cancelled completion started is cancelled with it,
+	// so the chore is back in the pool now, not at its old Back date; its
+	// waiting completion is cancelled, so nothing is left to approve.
+	gotPending, err := quests.Get(ctx, admin, h.ID, pending.ID)
+	if err != nil {
+		t.Fatalf("Get pending quest: %v", err)
+	}
+	if gotPending.ClaimedBy != nil || !app.QuestAvailable(gotPending.HouseholdQuest, time.Now()) ||
+		!gotPending.AvailableAt.Valid || !gotPending.AvailableAt.Time.Before(pendingBefore.AvailableAt.Time) {
+		t.Errorf("removal left the chore resting on the cancelled completion's cooldown: before %+v after %+v", pendingBefore, gotPending)
+	}
+	if !gotPending.CompletedAt.Time.Equal(pendingBefore.CompletedAt.Time) {
+		t.Errorf("removal changed completed_at: before %v after %v", pendingBefore.CompletedAt, gotPending.CompletedAt)
+	}
+	if _, err := quests.Accept(ctx, admin, h.ID, pending.ID, app.MemberAction{MemberID: ben.ID}); err != nil {
+		t.Errorf("Ben cannot take the freed chore: %v", err)
+	} else if _, err := quests.Abandon(ctx, admin, h.ID, pending.ID, app.MemberAction{MemberID: ben.ID}); err != nil {
+		t.Fatalf("Ben abandon freed chore: %v", err)
+	}
+	warmupAfter, err := quests.Get(ctx, admin, h.ID, warmup.ID)
+	if err != nil {
+		t.Fatalf("Get warmup after removal: %v", err)
+	}
+	if !warmupAfter.AvailableAt.Time.Equal(warmupBefore.AvailableAt.Time) || !warmupAfter.CompletedAt.Time.Equal(warmupBefore.CompletedAt.Time) {
+		t.Errorf("removal moved another member's cooldown: before %+v after %+v", warmupBefore, warmupAfter)
+	}
+	if gotPending.AwaitingApproval {
+		t.Errorf("quest still awaiting approval after its member was removed: %+v", gotPending)
+	}
+	var cancelled int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM quest_completions WHERE household_id = $1 AND quest_id = $2 AND status = 'cancelled'`, h.ID, pending.ID).Scan(&cancelled); err != nil || cancelled != 1 {
+		t.Errorf("cancelled completions of the removed member's quest = %d (%v), want 1", cancelled, err)
+	}
+	// Ben's approved completion is history and survives, untouched.
+	if got := completionStatuses(ben.ID, warmup.ID); len(got) != 1 || got[0] != "approved" {
+		t.Errorf("Ben's completions = %v, want [approved]", got)
 	}
 	after, err := familySvc.List(ctx, admin, h.ID)
 	if err != nil {
@@ -607,10 +700,83 @@ func TestIntegration_RemoveMemberHoldingQuests(t *testing.T) {
 	}
 }
 
+// TestIntegration_ApproveRacesRemoveMember: an admin approving a member's
+// pending completion while another admin removes that member never fails
+// with a database error (a deadlock), whichever lands first. Either the
+// approval wins (points credited, then the member is removed) or the removal
+// wins (the completion is cancelled and the approval is ErrNotFound).
+func TestIntegration_ApproveRacesRemoveMember(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	households := app.NewHouseholdService(q, pool)
+	familySvc := app.NewFamilyService(q, pool, 10)
+	quests := app.NewQuestService(q, pool)
+	ctx := context.Background()
+
+	admin := registerVerified(t, pool, authSvc, mailer, "approveremove").User.ID
+	h, err := households.Create(ctx, admin, app.HouseholdInput{Name: "Race"})
+	if err != nil {
+		t.Fatalf("create household: %v", err)
+	}
+	for round := 0; round < 10; round++ {
+		m, err := familySvc.Create(ctx, admin, h.ID, app.FamilyMemberInput{Name: "Racer"}, "")
+		if err != nil {
+			t.Fatalf("round %d: create member: %v", round, err)
+		}
+		chore, err := quests.Create(ctx, admin, h.ID, app.QuestInput{Name: "Race chore", Points: num(3)}, "")
+		if err != nil {
+			t.Fatalf("round %d: create quest: %v", round, err)
+		}
+		act := app.MemberAction{MemberID: m.ID}
+		if _, err := quests.Accept(ctx, admin, h.ID, chore.ID, act); err != nil {
+			t.Fatalf("round %d: accept: %v", round, err)
+		}
+		if _, err := quests.MarkDone(ctx, admin, h.ID, chore.ID, act); err != nil {
+			t.Fatalf("round %d: mark done: %v", round, err)
+		}
+		waiting, err := quests.ListPending(ctx, admin, h.ID, "")
+		if err != nil || len(waiting) != 1 {
+			t.Fatalf("round %d: pending %+v %v", round, waiting, err)
+		}
+		var wg sync.WaitGroup
+		var approveErr, removeErr error
+		start := make(chan struct{})
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _, _, approveErr = quests.Approve(ctx, admin, h.ID, waiting[0].ID, "")
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			removeErr = familySvc.Remove(ctx, admin, h.ID, m.ID, "")
+		}()
+		close(start)
+		wg.Wait()
+		if removeErr != nil {
+			t.Fatalf("round %d: remove failed: %v", round, removeErr)
+		}
+		if approveErr != nil && !errors.Is(approveErr, app.ErrNotFound) {
+			t.Fatalf("round %d: approve failed with %v, want success or ErrNotFound", round, approveErr)
+		}
+		var status string
+		if err := pool.QueryRow(ctx, `SELECT status FROM quest_completions WHERE household_id = $1 AND id = $2`, h.ID, waiting[0].ID).Scan(&status); err != nil {
+			t.Fatalf("round %d: read completion: %v", round, err)
+		}
+		if (approveErr == nil) != (status == "approved") || (approveErr != nil && status != "cancelled") {
+			t.Fatalf("round %d: approve err %v but completion %q", round, approveErr, status)
+		}
+	}
+}
+
 // TestIntegration_RemoveMemberRollsBack: the release and the delete are one
 // transaction. When the member delete fails after the release ran, the
-// release is undone: the member is still there and still holds their
-// accepted and pending quests, and the caller gets an error.
+// release is undone: the member is still there, still holds their accepted
+// quest, and their completion is still waiting for approval; the caller gets
+// an error.
 func TestIntegration_RemoveMemberRollsBack(t *testing.T) {
 	pool := testDB(t)
 	mailer := &captureMailer{}
@@ -648,6 +814,9 @@ func TestIntegration_RemoveMemberRollsBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ann mark done: %v", err)
 	}
+	if !marked.AwaitingApproval {
+		t.Fatalf("marked-done quest not awaiting approval: %+v", marked)
+	}
 
 	// The delete of this one member row fails; every other row is untouched.
 	fn := "fail_member_delete_" + strings.ReplaceAll(ann.ID.String(), "-", "")
@@ -679,18 +848,18 @@ CREATE TRIGGER ` + fn + ` BEFORE DELETE ON family_members FOR EACH ROW EXECUTE F
 	if err != nil {
 		t.Fatalf("Get pending: %v", err)
 	}
-	if gotPending.ClaimedBy == nil || *gotPending.ClaimedBy != ann.ID || !gotPending.DoneAt.Valid ||
-		!gotPending.DoneAt.Time.Equal(marked.DoneAt.Time) {
+	if gotPending.ClaimedBy != nil || !gotPending.AwaitingApproval ||
+		!gotPending.AvailableAt.Time.Equal(marked.AvailableAt.Time) {
 		t.Errorf("pending quest changed by a failed removal: %+v", gotPending)
 	}
 	gotAccepted, err := quests.Get(ctx, admin, h.ID, accepted.ID)
 	if err != nil {
 		t.Fatalf("Get accepted: %v", err)
 	}
-	if gotAccepted.ClaimedBy == nil || *gotAccepted.ClaimedBy != ann.ID || gotAccepted.DoneAt.Valid || !gotAccepted.ClaimedAt.Valid {
+	if gotAccepted.ClaimedBy == nil || *gotAccepted.ClaimedBy != ann.ID || !gotAccepted.ClaimedAt.Valid {
 		t.Errorf("accepted quest changed by a failed removal: %+v", gotAccepted)
 	}
-	if pend, err := quests.ListPending(ctx, admin, h.ID, ""); err != nil || len(pend) != 1 || pend[0].HouseholdQuest.ID != pending.ID {
+	if pend, err := quests.ListPending(ctx, admin, h.ID, ""); err != nil || len(pend) != 1 || pend[0].QuestID != pending.ID || pend[0].MemberID != ann.ID {
 		t.Errorf("pending list after a failed removal: %+v %v", pend, err)
 	}
 }

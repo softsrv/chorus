@@ -24,7 +24,7 @@ let signedOut;
 const quest = (over) => ({
   id: 'q1', household_id: H, library_id: null, name: 'Feed the cat', points: 5, repeat_days: 1,
   notes: 'Half a scoop, then fresh water.', available: true, claimed_by: null, claimed_at: null,
-  done_at: null, awaiting_approval: false, completed_at: null, available_at: null,
+  awaiting_approval: false, completed_at: null, available_at: null,
   created_at: '2025-01-01T00:00:00Z', updated_at: '2025-01-01T00:00:00Z', ...over,
 });
 
@@ -80,7 +80,7 @@ beforeEach(() => {
 });
 
 const text = () => env.$app.textContent;
-const actionCalls = () => calls.filter((c) => /\/quests\/[^/]+\/(accept|abandon|done|approve|reject)$/.test(c.path));
+const actionCalls = () => calls.filter((c) => /\/(quests\/[^/]+\/(accept|abandon|done)|quest-completions\/[^/]+\/(approve|reject))$/.test(c.path));
 
 async function becomeAnn() {
   await click(buttons(env.$app, 'Switch member')[0]);
@@ -174,11 +174,10 @@ test('CLM-3: a 409 quest_taken shows the already-taken message, reloads, keeps t
   assert.equal(signedOut, 0);
 });
 
-test('CLM-4: Abandon and Mark done only on own quests; awaiting approval shows the note and no controls', async () => {
+test('CLM-4: Abandon and Mark done only on own quests; Mine row has no badge', async () => {
   srv.quests = [
     quest({ id: 'q1', name: 'Own quest', available: false, claimed_by: 'm-a' }),
     quest({ id: 'q2', name: 'Bens quest', available: false, claimed_by: 'm-b' }),
-    quest({ id: 'q3', name: 'Own waiting', available: false, claimed_by: 'm-a', done_at: '2025-01-03T00:00:00Z', awaiting_approval: true }),
   ];
   await loadApp();
   await becomeAnn();
@@ -187,14 +186,31 @@ test('CLM-4: Abandon and Mark done only on own quests; awaiting approval shows t
   assert.equal(buttons(rowOf('Own quest'), 'Abandon').length, 1);
   assert.equal(buttons(rowOf('Bens quest'), 'Mark done').length + buttons(rowOf('Bens quest'), 'Abandon').length, 0);
   assert.match(rowOf('Bens quest').textContent, /Taken by Ben/);
-  assert.match(rowOf('Own waiting').textContent, /Waiting for approval/);
-  assert.equal(walk(rowOf('Own waiting')).filter((n) => n.tagName === 'BUTTON').length, 0);
+  assert.doesNotMatch(rowOf('Own quest').textContent, /Waiting for approval/);
 });
 
-test('CLM-5: Mark done posts the member, shows Waiting for approval, and points stay as the server has them', async () => {
+test('CLM-8: a re-taken chore whose earlier completion still waits shows Waiting for approval in Mine (with Mark done) and in Claimed', async () => {
+  srv.quests = [
+    quest({ id: 'q1', name: 'Own retaken', available: false, claimed_by: 'm-a', awaiting_approval: true }),
+    quest({ id: 'q2', name: 'Bens retaken', available: false, claimed_by: 'm-b', awaiting_approval: true }),
+  ];
+  await loadApp();
+  await becomeAnn();
+  const rowOf = (name) => walk(env.$app).find((n) => n.tagName === 'LI' && n.textContent.startsWith(name));
+  assert.match(section(env.$app, 'Mine'), /Own retaken/);
+  assert.match(rowOf('Own retaken').textContent, /Waiting for approval/);
+  assert.equal(buttons(rowOf('Own retaken'), 'Mark done').length, 1);
+  assert.equal(buttons(rowOf('Own retaken'), 'Abandon').length, 1);
+  assert.match(section(env.$app, 'Claimed'), /Bens retaken/);
+  assert.match(rowOf('Bens retaken').textContent, /Taken by Ben/);
+  assert.match(rowOf('Bens retaken').textContent, /Waiting for approval/);
+});
+
+test('CLM-5: Mark done posts the member, moves to Coming back later with Back date and Waiting for approval badge', async () => {
+  const future = '2030-01-02T00:00:00Z';
   srv.quests = [quest({ available: false, claimed_by: 'm-a' })];
   srv.extra[`POST ${HP}/quests/q1/done`] = () => {
-    srv.quests = [quest({ available: false, claimed_by: 'm-a', done_at: '2025-01-03T00:00:00Z', awaiting_approval: true })];
+    srv.quests = [quest({ available: false, claimed_by: null, available_at: future, awaiting_approval: true })];
     return [200, srv.quests[0]];
   };
   await loadApp();
@@ -204,7 +220,12 @@ test('CLM-5: Mark done posts the member, shows Waiting for approval, and points 
   const [done] = actionCalls();
   assert.equal(done.path, `${HP}/quests/q1/done`);
   assert.deepEqual(done.body, { member_id: 'm-a', pin: '' });
-  assert.match(section(env.$app, 'Mine'), /Feed the cat.*Waiting for approval/);
+  assert.match(section(env.$app, 'Mine'), /You have no quests yet\./);
+  assert.doesNotMatch(section(env.$app, 'Mine'), /Feed the cat/);
+  const comingBack = section(env.$app, 'Coming back later');
+  assert.match(comingBack, /Feed the cat/);
+  assert.match(comingBack, /Back/);
+  assert.match(comingBack, /Waiting for approval/);
   assert.equal(buttons(env.$app, 'Mark done').length, 0);
   assert.match(text(), /Viewing as: Ann · 0 points/);
 });
@@ -236,13 +257,32 @@ test('CLM-11: resting quest in Coming back later renders Back followed by fmtDat
   assert.ok(comingBack.includes(expectedText), `expected ${comingBack} to include ${expectedText}`);
 });
 
+test('CLM-8: resting quest with awaiting_approval shows Back date and badge; same quest available shows in Available with badge', async () => {
+  const future = '2030-01-02T00:00:00Z';
+  srv.quests = [
+    quest({ id: 'q1', name: 'Resting chore', available: false, claimed_by: null, available_at: future, awaiting_approval: true }),
+    quest({ id: 'q2', name: 'Available chore', available: true, claimed_by: null, available_at: future, awaiting_approval: true }),
+  ];
+  await loadApp();
+  await becomeAnn();
+  const comingBack = section(env.$app, 'Coming back later');
+  assert.match(comingBack, /Resting chore/);
+  assert.match(comingBack, /Back/);
+  assert.match(comingBack, /Waiting for approval/);
+
+  const avail = section(env.$app, 'Available');
+  assert.match(avail, /Available chore/);
+  assert.match(avail, /Waiting for approval/);
+});
+
 test('CLM-7: points show in the picker, header and Family tab, and refresh after an approval', async () => {
-  srv.pending = () => [200, { items: srv.quests.filter((q) => q.awaiting_approval).map((q) => ({ ...q, member_name: 'Ann' })) }];
-  srv.quests = [quest({ available: false, claimed_by: 'm-a', awaiting_approval: true, done_at: '2025-01-03T00:00:00Z' })];
-  srv.extra[`POST ${HP}/quests/q1/approve`] = () => {
+  srv.pending = () => [200, { items: [{ completion_id: 'c1', quest_id: 'q1', name: 'Feed the cat', points: 5, member_id: 'm-a', member_name: 'Ann', done_at: '2025-01-03T00:00:00Z' }] }];
+  srv.quests = [quest({ available: false, claimed_by: null, awaiting_approval: true, available_at: '2999-01-01T00:00:00Z' })];
+  srv.extra[`POST ${HP}/quest-completions/c1/approve`] = () => {
     srv.members = srv.members.map((m) => (m.id === 'm-a' ? { ...m, points: 5 } : m));
     srv.quests = [quest({ available: false, completed_at: '2025-01-04T00:00:00Z', available_at: '2999-01-01T00:00:00Z' })];
-    return [200, srv.quests[0]];
+    srv.pending = () => [200, { items: [] }];
+    return [200, { completion: { id: 'c1', quest_id: 'q1', member_id: 'm-a', done_at: '2025-01-03T00:00:00Z', approved_at: '2025-01-04T00:00:00Z', status: 'approved' }, member: srv.members[0], combo_bonuses: [] }];
   };
   await loadApp();
   assert.match(text(), /Ann: 0 points/);
@@ -286,9 +326,9 @@ test('CLM-9: a 404 on accept or approve shows Quest not found. and reloads', asy
   assert.match(text(), /Quest not found\./);
   assert.doesNotMatch(section(env.$app, 'Available'), /Feed the cat/);
 
-  let pendingItems = [{ ...quest({ id: 'q9', awaiting_approval: true, claimed_by: 'm-a' }), member_name: 'Ann' }];
+  let pendingItems = [{ completion_id: 'c9', quest_id: 'q9', name: 'Feed the cat', points: 5, member_id: 'm-a', member_name: 'Ann', done_at: '2025-01-03T00:00:00Z' }];
   srv.pending = () => [200, { items: pendingItems }];
-  srv.extra[`POST ${HP}/quests/q9/approve`] = () => { pendingItems = []; return err(404, 'not_found', 'Not found.'); };
+  srv.extra[`POST ${HP}/quest-completions/c9/approve`] = () => { pendingItems = []; return err(404, 'not_found', 'Not found.'); };
   await backToAdmin();
   const pendingBefore = calls.filter((c) => c.path.endsWith('/pending')).length;
   await click(buttons(env.$app, 'Approve')[0]);
@@ -306,8 +346,8 @@ async function unlockAdmin(pin) {
 test('CLM-10: Approvals lists name, member and points with both buttons, sends X-Admin-PIN, and has an empty state', async () => {
   srv.adminPinSet = true;
   let items = [
-    { ...quest({ id: 'q1', name: 'Feed the cat', points: 5, awaiting_approval: true, claimed_by: 'm-a' }), member_name: 'Ann' },
-    { ...quest({ id: 'q2', name: 'Take out trash', points: 10, awaiting_approval: true, claimed_by: 'm-b' }), member_name: 'Ben' },
+    { completion_id: 'c1', quest_id: 'q1', name: 'Feed the cat', points: 5, member_id: 'm-a', member_name: 'Ann', done_at: '2025-01-03T00:00:00Z' },
+    { completion_id: 'c2', quest_id: 'q2', name: 'Take out trash', points: 10, member_id: 'm-b', member_name: 'Ben', done_at: '2025-01-04T00:00:00Z' },
   ];
   srv.pending = (r) => (r.headers['X-Admin-PIN'] === '9999' ? [200, { items }] : err(403, 'admin_pin_required'));
   await loadApp();
@@ -318,7 +358,9 @@ test('CLM-10: Approvals lists name, member and points with both buttons, sends X
   assert.equal(req.headers['X-Admin-PIN'], '9999');
   const rowOf = (name) => walk(env.$app).find((n) => n.tagName === 'LI' && n.textContent.startsWith(name));
   assert.match(rowOf('Feed the cat').textContent, /Ann · 5 points/);
+  assert.match(rowOf('Feed the cat').textContent, new RegExp(new Date('2025-01-03T00:00:00Z').toLocaleString()));
   assert.match(rowOf('Take out trash').textContent, /Ben · 10 points/);
+  assert.match(rowOf('Take out trash').textContent, new RegExp(new Date('2025-01-04T00:00:00Z').toLocaleString()));
   for (const name of ['Feed the cat', 'Take out trash']) {
     assert.equal(buttons(rowOf(name), 'Approve').length, 1);
     assert.equal(buttons(rowOf(name), 'Send back').length, 1);
@@ -329,21 +371,25 @@ test('CLM-10: Approvals lists name, member and points with both buttons, sends X
   assert.match(text(), /Nothing waiting for approval\./);
 });
 
-test('CLM-11: Approve and Send back post an empty body with X-Admin-PIN; a sent-back quest is the member\'s to mark done again', async () => {
+test('CLM-11: Approve and Send back post an empty body to completion endpoints with X-Admin-PIN', async () => {
   srv.adminPinSet = true;
   srv.quests = [
-    quest({ id: 'q1', available: false, claimed_by: 'm-a', awaiting_approval: true, done_at: '2025-01-03T00:00:00Z' }),
-    quest({ id: 'q2', name: 'Water plants', available: false, claimed_by: 'm-a', awaiting_approval: true, done_at: '2025-01-03T00:00:00Z' }),
+    quest({ id: 'q1', available: false, claimed_by: null, awaiting_approval: true }),
+    quest({ id: 'q2', name: 'Water plants', available: false, claimed_by: null, awaiting_approval: true }),
   ];
-  srv.pending = () => [200, { items: srv.quests.filter((q) => q.awaiting_approval).map((q) => ({ ...q, member_name: 'Ann' })) }];
-  srv.extra[`POST ${HP}/quests/q1/approve`] = () => {
+  let items = [
+    { completion_id: 'c1', quest_id: 'q1', name: 'Feed the cat', points: 5, member_id: 'm-a', member_name: 'Ann', done_at: '2025-01-03T00:00:00Z' },
+    { completion_id: 'c2', quest_id: 'q2', name: 'Water plants', points: 5, member_id: 'm-a', member_name: 'Ann', done_at: '2025-01-03T00:00:00Z' },
+  ];
+  srv.pending = () => [200, { items }];
+  srv.extra[`POST ${HP}/quest-completions/c1/approve`] = () => {
     srv.members = srv.members.map((m) => (m.id === 'm-a' ? { ...m, points: 5 } : m));
-    srv.quests = srv.quests.map((q) => (q.id === 'q1' ? quest({ available: false, completed_at: '2025-01-04T00:00:00Z', available_at: '2999-01-01T00:00:00Z' }) : q));
-    return [200, {}];
+    items = items.filter((i) => i.completion_id !== 'c1');
+    return [200, { completion: { id: 'c1', quest_id: 'q1', member_id: 'm-a', done_at: '2025-01-03T00:00:00Z', approved_at: '2025-01-04T00:00:00Z', status: 'approved' }, member: srv.members[0], combo_bonuses: [] }];
   };
-  srv.extra[`POST ${HP}/quests/q2/reject`] = () => {
-    srv.quests = srv.quests.map((q) => (q.id === 'q2' ? { ...q, done_at: null, awaiting_approval: false } : q));
-    return [200, {}];
+  srv.extra[`POST ${HP}/quest-completions/c2/reject`] = () => {
+    items = items.filter((i) => i.completion_id !== 'c2');
+    return [200, { completion: { id: 'c2', quest_id: 'q2', member_id: 'm-a', done_at: '2025-01-03T00:00:00Z', status: 'rejected' } }];
   };
   await loadApp();
   await unlockAdmin('9999');
@@ -353,7 +399,7 @@ test('CLM-11: Approve and Send back post an empty body with X-Admin-PIN; a sent-
   await click(buttons(rowOf('Feed the cat'), 'Approve')[0]);
   const approve = actionCalls().at(-1);
   assert.equal(approve.method, 'POST');
-  assert.equal(approve.path, `${HP}/quests/q1/approve`);
+  assert.equal(approve.path, `${HP}/quest-completions/c1/approve`);
   assert.deepEqual(approve.body, {});
   assert.equal(approve.headers['X-Admin-PIN'], '9999');
   assert.match(text(), /Ann: 5 points/);
@@ -361,17 +407,11 @@ test('CLM-11: Approve and Send back post an empty body with X-Admin-PIN; a sent-
 
   await click(buttons(rowOf('Water plants'), 'Send back')[0]);
   const reject = actionCalls().at(-1);
-  assert.equal(reject.path, `${HP}/quests/q2/reject`);
+  assert.equal(reject.path, `${HP}/quest-completions/c2/reject`);
   assert.deepEqual(reject.body, {});
   assert.equal(reject.headers['X-Admin-PIN'], '9999');
   assert.match(text(), /Nothing waiting for approval\./);
   assert.match(text(), /Ann: 5 points/);
-
-  await becomeAnn();
-  const mine = sectionNode(env.$app, 'Mine');
-  assert.match(mine.textContent, /Water plants/);
-  assert.equal(buttons(mine, 'Mark done').length, 1);
-  assert.match(text(), /Viewing as: Ann · 5 points/);
 });
 
 test('CLM-10: takeCard fetches points-history with X-Member-PIN and renders table in order', async () => {
@@ -442,9 +482,9 @@ test('CLM-1: points history inserts API data as textContent with no markup or ch
 
 test('CLM-12: a 403 admin-PIN error says so, keeps the list and the session', async () => {
   srv.adminPinSet = true;
-  const items = [{ ...quest({ id: 'q1', awaiting_approval: true, claimed_by: 'm-a' }), member_name: 'Ann' }];
+  const items = [{ completion_id: 'c1', quest_id: 'q1', name: 'Feed the cat', points: 5, member_id: 'm-a', member_name: 'Ann', done_at: '2025-01-03T00:00:00Z' }];
   srv.pending = () => [200, { items }];
-  srv.extra[`POST ${HP}/quests/q1/approve`] = () => err(403, 'wrong_pin', 'Wrong PIN.');
+  srv.extra[`POST ${HP}/quest-completions/c1/approve`] = () => err(403, 'wrong_pin', 'Wrong PIN.');
   await loadApp();
   await unlockAdmin('9999');
   await click(buttons(env.$app, 'Approve')[0]);
@@ -460,6 +500,89 @@ test('CLM-12: a 403 admin-PIN error says so, keeps the list and the session', as
   assert.match(text(), /Wrong administrator PIN\./);
   assert.equal(sessionStorage.getItem(REFRESH_KEY), 'rt');
   assert.equal(signedOut, 0);
+});
+
+test('CLM-7: approvals card renders completions in order, with name, member points, date text, and completion POST paths', async () => {
+  srv.adminPinSet = true;
+  const d1 = '2025-01-01T10:00:00Z';
+  const d2 = '2025-01-02T10:00:00Z';
+  let items = [
+    { completion_id: 'c-old', quest_id: 'q1', name: 'First chore', points: 3, member_id: 'm-a', member_name: 'Ann', done_at: d1 },
+    { completion_id: 'c-new', quest_id: 'q2', name: 'Second chore', points: 7, member_id: 'm-b', member_name: 'Ben', done_at: d2 },
+  ];
+  srv.pending = () => [200, { items }];
+  srv.extra[`POST ${HP}/quest-completions/c-old/approve`] = () => {
+    items = items.filter((i) => i.completion_id !== 'c-old');
+    return [200, { completion: { id: 'c-old', status: 'approved' }, member: srv.members[0], combo_bonuses: [] }];
+  };
+  srv.extra[`POST ${HP}/quest-completions/c-new/reject`] = () => {
+    items = items.filter((i) => i.completion_id !== 'c-new');
+    return [200, { completion: { id: 'c-new', status: 'rejected' } }];
+  };
+  await loadApp();
+  await unlockAdmin('9999');
+
+  const approvals = () => walk(env.$app).find((n) => n.tagName === 'H3' && n.textContent === 'Approvals').parentNode;
+  const lis = walk(approvals()).filter((n) => n.tagName === 'LI');
+  assert.equal(lis.length, 2);
+  assert.ok(lis[0].textContent.includes('First chore'));
+  assert.ok(lis[0].textContent.includes('Ann · 3 points'));
+  assert.ok(lis[0].textContent.includes(new Date(d1).toLocaleString()));
+  assert.ok(lis[1].textContent.includes('Second chore'));
+  assert.ok(lis[1].textContent.includes('Ben · 7 points'));
+  assert.ok(lis[1].textContent.includes(new Date(d2).toLocaleString()));
+
+  await click(buttons(lis[0], 'Approve')[0]);
+  const approveCall = actionCalls().at(-1);
+  assert.equal(approveCall.path, `${HP}/quest-completions/c-old/approve`);
+
+  const remainingLis = walk(approvals()).filter((n) => n.tagName === 'LI');
+  assert.equal(remainingLis.length, 1);
+  await click(buttons(remainingLis[0], 'Send back')[0]);
+  const rejectCall = actionCalls().at(-1);
+  assert.equal(rejectCall.path, `${HP}/quest-completions/c-new/reject`);
+
+  assert.match(text(), /Nothing waiting for approval\./);
+});
+
+test('CLM-12: approvalsCard act() posts with completion_id only and never falls back to quest id', async () => {
+  srv.adminPinSet = true;
+  let items = [
+    { id: 'quest-x1', completion_id: 'comp-y1', quest_id: 'quest-x1', name: 'First chore', points: 3, member_id: 'm-a', member_name: 'Ann', done_at: '2025-01-01T10:00:00Z' },
+    { id: 'quest-x2', completion_id: 'comp-y2', quest_id: 'quest-x2', name: 'Second chore', points: 7, member_id: 'm-b', member_name: 'Ben', done_at: '2025-01-02T10:00:00Z' },
+  ];
+  srv.pending = () => [200, { items }];
+  srv.extra[`POST ${HP}/quest-completions/comp-y1/approve`] = () => {
+    items = items.filter((i) => i.completion_id !== 'comp-y1');
+    return [200, { completion: { id: 'comp-y1', status: 'approved' }, member: srv.members[0], combo_bonuses: [] }];
+  };
+  srv.extra[`POST ${HP}/quest-completions/comp-y2/reject`] = () => {
+    items = items.filter((i) => i.completion_id !== 'comp-y2');
+    return [200, { completion: { id: 'comp-y2', status: 'rejected' } }];
+  };
+  await loadApp();
+  await unlockAdmin('9999');
+
+  const approvals = () => walk(env.$app).find((n) => n.tagName === 'H3' && n.textContent === 'Approvals').parentNode;
+  const lis = () => walk(approvals()).filter((n) => n.tagName === 'LI');
+  assert.equal(lis().length, 2);
+
+  await click(buttons(lis()[0], 'Approve')[0]);
+  const approveCall = actionCalls().at(-1);
+  assert.equal(approveCall.path, `${HP}/quest-completions/comp-y1/approve`);
+  assert.ok(!approveCall.path.includes('quest-x1'), 'approve path must not contain quest id');
+
+  assert.equal(lis().length, 1);
+  await click(buttons(lis()[0], 'Send back')[0]);
+  const rejectCall = actionCalls().at(-1);
+  assert.equal(rejectCall.path, `${HP}/quest-completions/comp-y2/reject`);
+  assert.ok(!rejectCall.path.includes('quest-x2'), 'reject path must not contain quest id');
+
+  for (const c of calls) {
+    assert.ok(!c.path.includes('quest-x1'), 'no call path may contain quest-x1');
+    assert.ok(!c.path.includes('quest-x2'), 'no call path may contain quest-x2');
+  }
+  assert.match(text(), /Nothing waiting for approval\./);
 });
 
 test('CLM-12 guard: an unrefreshable 401 still signs out', async () => {
@@ -567,11 +690,11 @@ test('CLM-3: home view with no households shows the New household form as the pr
 // notice naming the chore and every combo paid; none paid, no notice.
 function approvalWithBonuses(bonuses) {
   srv.adminPinSet = true;
-  let items = [{ ...quest({ id: 'q1', name: 'Wipe counters', points: 10, awaiting_approval: true, claimed_by: 'm-a' }), member_name: 'Sam' }];
+  let items = [{ completion_id: 'c1', quest_id: 'q1', name: 'Wipe counters', points: 10, member_id: 'm-a', member_name: 'Sam', done_at: '2025-01-03T00:00:00Z' }];
   srv.pending = () => [200, { items }];
-  srv.extra[`POST ${HP}/quests/q1/approve`] = () => {
+  srv.extra[`POST ${HP}/quest-completions/c1/approve`] = () => {
     items = [];
-    return [200, { quest: quest({ id: 'q1', available: false }), member: srv.members[0], combo_bonuses: bonuses }];
+    return [200, { completion: { id: 'c1', quest_id: 'q1', member_id: 'm-a', done_at: '2025-01-03T00:00:00Z', approved_at: '2025-01-04T00:00:00Z', status: 'approved' }, member: srv.members[0], combo_bonuses: bonuses }];
   };
 }
 
