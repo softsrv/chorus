@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -123,96 +125,79 @@ func TestRateLimiter(t *testing.T) {
 		}
 	})
 
-	t.Run("concurrent requests at expired window reset atomically without overshooting limit", func(t *testing.T) {
-		t.Parallel()
-
+	// After a forced window expiry, a burst of concurrent requests must see
+	// exactly one window reset and share that new window's budget: no more
+	// than limit are admitted, whichever wrapper charges the limiter.
+	burstAfterExpiry := func(t *testing.T, wrap func(*middleware.RateLimiter) http.Handler, admittedCode int) {
+		t.Helper()
 		const limit = 5
-		const window = 50 * time.Millisecond
-		rl := middleware.NewRateLimiter(context.Background(), limit, window, middleware.IPKeyFunc(0))
+		const numGoroutines = 64
+		const addr = "192.168.1.1:1234"
+		rl := middleware.NewRateLimiter(context.Background(), limit, time.Minute, middleware.IPKeyFunc(0))
+		h := wrap(rl)
 
-		// Prime the entry so that an expired entry exists in rl.store.
-		primeReq := httptest.NewRequest(http.MethodGet, "/", nil)
-		primeReq.RemoteAddr = "192.168.1.1:1234"
-		rr := httptest.NewRecorder()
-		rl.Middleware(alwaysOK).ServeHTTP(rr, primeReq)
-		if rr.Code != http.StatusOK {
-			t.Fatalf("prime request failed: got %d, want 200", rr.Code)
-		}
+		for round := 0; round < 20; round++ {
+			// The stored entry is spent and already expired: without a reset
+			// every request would be refused, and a non-atomic reset lets
+			// more than limit through.
+			keyReq := httptest.NewRequest(http.MethodGet, "/", nil)
+			keyReq.RemoteAddr = addr
+			middleware.ExpireWindow(rl, keyReq)
 
-		// Wait until the window expires.
-		time.Sleep(60 * time.Millisecond)
-
-		// Set up Middleware and FailuresOnly handlers.
-		// FailuresOnly with a 403 handler charges a slot without refunding.
-		middlewareHandler := rl.Middleware(alwaysOK)
-		failuresOnlyHandler := rl.FailuresOnly(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusForbidden)
-		}))
-
-		const numGoroutines = 50
-		var (
-			wg        sync.WaitGroup
-			start     = make(chan struct{})
-			admitted  sync.Map
-			overLimit sync.Map
-		)
-
-		var (
-			admittedCount  int64
-			overLimitCount int64
-		)
-		_ = admitted
-		_ = overLimit
-
-		var (
-			admittedAtomic  atomic.Int64
-			overLimitAtomic atomic.Int64
-		)
-
-		for i := 0; i < numGoroutines; i++ {
-			wg.Add(1)
-			isFailuresOnly := (i%2 == 1)
-			go func() {
-				defer wg.Done()
-				<-start
-
-				req := httptest.NewRequest(http.MethodGet, "/", nil)
-				req.RemoteAddr = "192.168.1.1:1234"
-				rec := httptest.NewRecorder()
-
-				if isFailuresOnly {
-					failuresOnlyHandler.ServeHTTP(rec, req)
-					if rec.Code == http.StatusForbidden {
-						admittedAtomic.Add(1)
-					} else if rec.Code == http.StatusTooManyRequests {
-						overLimitAtomic.Add(1)
-					} else {
-						t.Errorf("unexpected status from FailuresOnly: %d", rec.Code)
+			start := make(chan struct{})
+			var (
+				wg        sync.WaitGroup
+				admitted  atomic.Int64
+				overLimit atomic.Int64
+				other     atomic.Int64
+			)
+			for i := 0; i < numGoroutines; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					req := httptest.NewRequest(http.MethodGet, "/", nil)
+					req.RemoteAddr = addr
+					rec := httptest.NewRecorder()
+					<-start
+					h.ServeHTTP(rec, req)
+					switch rec.Code {
+					case admittedCode:
+						admitted.Add(1)
+					case http.StatusTooManyRequests:
+						overLimit.Add(1)
+					default:
+						other.Add(1)
 					}
-				} else {
-					middlewareHandler.ServeHTTP(rec, req)
-					if rec.Code == http.StatusOK {
-						admittedAtomic.Add(1)
-					} else if rec.Code == http.StatusTooManyRequests {
-						overLimitAtomic.Add(1)
-					} else {
-						t.Errorf("unexpected status from Middleware: %d", rec.Code)
-					}
-				}
-			}()
-		}
+				}()
+			}
+			close(start)
+			wg.Wait()
 
-		close(start)
-		wg.Wait()
-
-		admittedCount = admittedAtomic.Load()
-		overLimitCount = overLimitAtomic.Load()
-
-		if admittedCount > limit {
-			t.Errorf("admitted %d requests in window, want at most %d", admittedCount, limit)
+			if got := admitted.Load(); got != limit {
+				t.Fatalf("round %d: admitted %d requests after window expiry, want exactly %d", round, got, limit)
+			}
+			if got := overLimit.Load(); got != numGoroutines-limit {
+				t.Fatalf("round %d: refused %d requests, want %d", round, got, numGoroutines-limit)
+			}
+			if got := other.Load(); got != 0 {
+				t.Fatalf("round %d: %d responses with an unexpected status", round, got)
+			}
 		}
-		if admittedCount+overLimitCount != numGoroutines {
-			t.Errorf("total responses (%d) != launched goroutines (%d)", admittedCount+overLimitCount, numGoroutines)
-		}
+	}
+
+	t.Run("concurrent Middleware requests after window expiry admit at most limit", func(t *testing.T) {
+		t.Parallel()
+		burstAfterExpiry(t, func(rl *middleware.RateLimiter) http.Handler {
+			return rl.Middleware(alwaysOK)
+		}, http.StatusOK)
+	})
+
+	t.Run("concurrent FailuresOnly 403s after window expiry admit at most limit", func(t *testing.T) {
+		t.Parallel()
+		burstAfterExpiry(t, func(rl *middleware.RateLimiter) http.Handler {
+			return rl.FailuresOnly(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusForbidden)
+			}))
+		}, http.StatusForbidden)
 	})
 }
