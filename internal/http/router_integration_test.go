@@ -690,6 +690,108 @@ func TestAPI_EndToEnd(t *testing.T) {
 	if string(rawPending["items"]) != "[]" {
 		t.Errorf("pending after approval: items = %s, want []", rawPending["items"])
 	}
+
+	// A shared quest completes for everyone on it: Kid accepts a shareable
+	// 100-point quest with a teamwork bonus of 20 and shares it with Kid two,
+	// who marks it done. One item waits, naming the marker in the old
+	// member_id/member_name and both members with 50 each in members;
+	// approving pays each 100/2 + 20 = 70 once, keeping completion, member
+	// (the marker) and combo_bonuses beside the new members and member_ids.
+	var teamQuest sharedBody
+	s.expectWithHeaders(http.StatusCreated, "POST", hp+"/quests", parent.AccessToken, adminHdr,
+		map[string]any{"name": "Clean the living room", "points": 100, "shareable": true, "teamwork_bonus": 20}, &teamQuest)
+	tq := hp + "/quests/" + teamQuest.ID.String()
+	s.expect(http.StatusOK, "POST", tq+"/accept", parent.AccessToken, map[string]any{"member_id": member.ID, "pin": "4321"}, nil)
+	s.expect(http.StatusOK, "POST", tq+"/share", parent.AccessToken,
+		map[string]any{"member_id": member.ID, "pin": "4321", "target_member_id": member2.ID, "target_pin": ""}, nil)
+	s.expect(http.StatusOK, "POST", tq+"/done", parent.AccessToken, map[string]any{"member_id": member2.ID}, nil)
+	var teamPending struct {
+		Items []struct {
+			CompletionID  uuid.UUID `json:"completion_id"`
+			QuestID       uuid.UUID `json:"quest_id"`
+			Name          string    `json:"name"`
+			Points        int       `json:"points"`
+			TeamworkBonus int       `json:"teamwork_bonus"`
+			MemberID      uuid.UUID `json:"member_id"`
+			MemberName    string    `json:"member_name"`
+			Members       []struct {
+				MemberID   uuid.UUID `json:"member_id"`
+				MemberName string    `json:"member_name"`
+				Points     int       `json:"points"`
+			} `json:"members"`
+		} `json:"items"`
+	}
+	s.expectWithHeaders(http.StatusOK, "GET", hp+"/quests/pending", parent.AccessToken, adminHdr, nil, &teamPending)
+	if len(teamPending.Items) != 1 {
+		t.Fatalf("pending after shared mark-done: %+v, want one item", teamPending.Items)
+	}
+	tp := teamPending.Items[0]
+	if tp.QuestID != teamQuest.ID || tp.Name != "Clean the living room" || tp.Points != 100 || tp.TeamworkBonus != 20 ||
+		tp.MemberID != member2.ID || tp.MemberName != "Kid two" || len(tp.Members) != 2 {
+		t.Errorf("shared pending item: %+v, want marker Kid two, bonus 20, two members", tp)
+	}
+	wantNames := map[uuid.UUID]string{member.ID: "Kid", member2.ID: "Kid two"}
+	for _, m := range tp.Members {
+		if wantNames[m.MemberID] != m.MemberName || m.Points != 50 {
+			t.Errorf("shared pending member: %+v, want one of %v with 50 points", m, wantNames)
+		}
+	}
+	if len(tp.Members) == 2 && tp.Members[0].MemberID == tp.Members[1].MemberID {
+		t.Errorf("shared pending members repeat one member: %+v", tp.Members)
+	}
+	tc := hp + "/quest-completions/" + tp.CompletionID.String()
+	var teamApproved struct {
+		Completion struct {
+			ID        uuid.UUID   `json:"id"`
+			QuestID   uuid.UUID   `json:"quest_id"`
+			MemberID  *uuid.UUID  `json:"member_id"`
+			MemberIDs []uuid.UUID `json:"member_ids"`
+			Status    string      `json:"status"`
+		} `json:"completion"`
+		Member struct {
+			ID     uuid.UUID `json:"id"`
+			Name   string    `json:"name"`
+			Points int       `json:"points"`
+		} `json:"member"`
+		ComboBonuses []json.RawMessage `json:"combo_bonuses"`
+		Members      []struct {
+			Member struct {
+				ID     uuid.UUID `json:"id"`
+				Points int       `json:"points"`
+			} `json:"member"`
+			PointsAwarded int `json:"points_awarded"`
+			TeamworkBonus int `json:"teamwork_bonus"`
+		} `json:"members"`
+	}
+	s.expectWithHeaders(http.StatusOK, "POST", tc+"/approve", parent.AccessToken, adminHdr, map[string]any{}, &teamApproved)
+	// Kid already had 9 from the trash chore; Kid two had nothing.
+	wantTotals := map[uuid.UUID]int{member.ID: 79, member2.ID: 70}
+	if teamApproved.Completion.ID != tp.CompletionID || teamApproved.Completion.QuestID != teamQuest.ID ||
+		teamApproved.Completion.Status != "approved" || teamApproved.Completion.MemberID == nil || *teamApproved.Completion.MemberID != member2.ID ||
+		len(teamApproved.Completion.MemberIDs) != 2 ||
+		teamApproved.Member.ID != member2.ID || teamApproved.Member.Name != "Kid two" || teamApproved.Member.Points != 70 ||
+		teamApproved.ComboBonuses == nil || len(teamApproved.ComboBonuses) != 0 || len(teamApproved.Members) != 2 {
+		t.Errorf("shared approve: %+v", teamApproved)
+	}
+	for _, id := range teamApproved.Completion.MemberIDs {
+		if _, ok := wantTotals[id]; !ok {
+			t.Errorf("shared approve member_ids: %v, want Kid and Kid two", teamApproved.Completion.MemberIDs)
+		}
+	}
+	for _, m := range teamApproved.Members {
+		if want, ok := wantTotals[m.Member.ID]; !ok || m.Member.Points != want || m.PointsAwarded != 50 || m.TeamworkBonus != 20 {
+			t.Errorf("shared approve member: %+v, want 50 + 20 bonus, total %d", m, want)
+		}
+	}
+	s.expectWithHeaders(http.StatusNotFound, "POST", tc+"/approve", parent.AccessToken, adminHdr, map[string]any{}, nil)
+	familyList.Items = nil
+	s.expect(http.StatusOK, "GET", hp+"/family-members", parent.AccessToken, nil, &familyList)
+	for _, m := range familyList.Items {
+		if want := wantTotals[m.ID]; m.Points != want {
+			t.Errorf("after shared approve and repeat: member %s points = %d, want %d", m.ID, m.Points, want)
+		}
+	}
+	s.expectWithHeaders(http.StatusNoContent, "DELETE", tq, parent.AccessToken, adminHdr, nil, nil)
 	// No self-complete route exists.
 	s.expect(http.StatusNotFound, "POST", qbase+"/complete", parent.AccessToken, map[string]any{"member_id": member.ID, "pin": "4321"}, nil)
 	s.expectWithHeaders(http.StatusNoContent, "DELETE", hp+"/admin-pin", parent.AccessToken, adminHdr, nil, nil)
