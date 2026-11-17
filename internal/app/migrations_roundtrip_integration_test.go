@@ -181,9 +181,14 @@ var snapshotQueries = []struct{ kind, sql string }{
 		WHERE n.nspname = $1 AND c.relkind IN ('r','p','v','m','f')
 			AND a.attnum > 0 AND NOT a.attisdropped
 		ORDER BY 1`},
+	// Validity is its own field (validated=true|false), so the definition text
+	// is compared without pg_get_constraintdef's trailing " NOT VALID" and a
+	// validity change shows up as exactly one field; see validityDriftAllowed.
 	{"constraint", `
 		SELECT coalesce(c.relname, '-') || ' ' || con.conname
-			|| ' type=' || con.contype || ' ' || pg_get_constraintdef(con.oid)
+			|| ' type=' || con.contype
+			|| ' ' || regexp_replace(pg_get_constraintdef(con.oid), ' NOT VALID$', '')
+			|| ' validated=' || con.convalidated
 		FROM pg_constraint con
 		JOIN pg_namespace n ON n.oid = con.connamespace
 		LEFT JOIN pg_class c ON c.oid = con.conrelid
@@ -243,6 +248,41 @@ func snapshotSchema(t *testing.T, pool *pgxpool.Pool, schema string) []string {
 	return out
 }
 
+// validityDriftAllowed lists the only (version, constraint) pairs whose down
+// step may restore a constraint NOT VALID where it was valid before up.
+// Down 11 re-adds chores_household_id_assignee_id_fkey NOT VALID on purpose:
+// rows of members retired by up 11 may no longer satisfy it, so validating
+// would fail the rollback. Every other validity change still fails.
+var validityDriftAllowed = []struct {
+	version        int
+	table, conname string
+}{
+	{11, "chores", "chores_household_id_assignee_id_fkey"},
+}
+
+// tolerateValidityDrift returns got with each allowlisted constraint line for
+// version that is validated=false in got and validated=true in want, and
+// otherwise identical, replaced by want's line. Nothing else is touched.
+func tolerateValidityDrift(version int, want, got []string) []string {
+	out := slices.Clone(got)
+	for _, a := range validityDriftAllowed {
+		if a.version != version {
+			continue
+		}
+		prefix := "constraint: " + a.table + " " + a.conname + " "
+		for _, w := range want {
+			if !strings.HasPrefix(w, prefix) || !strings.HasSuffix(w, " validated=true") {
+				continue
+			}
+			notValid := strings.TrimSuffix(w, "true") + "false"
+			if i := slices.Index(out, notValid); i >= 0 {
+				out[i] = w
+			}
+		}
+	}
+	return out
+}
+
 // diffSnapshots lists the lines only in want ("-") and only in got ("+").
 func diffSnapshots(want, got []string) string {
 	count := map[string]int{}
@@ -282,6 +322,33 @@ func TestIntegration_MigrationsRoundTrip(t *testing.T) {
 	admin := testDB(t) // schema create/drop and checks only; never runs migration files
 	ctx := context.Background()
 	pairs := loadMigrationPairs(t)
+
+	// The validity tolerance is one (version, constraint) pair; anything else
+	// that down leaves NOT VALID, or any other change, must still differ.
+	t.Run("validity_allowlist_is_narrow", func(t *testing.T) {
+		const fk = "constraint: chores chores_household_id_assignee_id_fkey type=f " +
+			"FOREIGN KEY (household_id, assignee_id) REFERENCES household_members(household_id, user_id) ON DELETE SET NULL (assignee_id)"
+		const other = "constraint: chores chores_pkey type=p PRIMARY KEY (id)"
+		cases := []struct {
+			name      string
+			version   int
+			want, got []string
+			equal     bool
+		}{
+			{"allowed pair", 11, []string{fk + " validated=true"}, []string{fk + " validated=false"}, true},
+			{"same constraint other version", 12, []string{fk + " validated=true"}, []string{fk + " validated=false"}, false},
+			{"other constraint version 11", 11, []string{other + " validated=true"}, []string{other + " validated=false"}, false},
+			{"allowed pair but definition changed", 11, []string{fk + " validated=true"},
+				[]string{strings.Replace(fk, "SET NULL (assignee_id)", "CASCADE", 1) + " validated=false"}, false},
+			{"allowed pair dropped", 11, []string{fk + " validated=true"}, nil, false},
+		}
+		for _, c := range cases {
+			got := tolerateValidityDrift(c.version, c.want, c.got)
+			if eq := slices.Equal(c.want, got); eq != c.equal {
+				t.Errorf("%s: equal after tolerance = %v, want %v:%s", c.name, eq, c.equal, diffSnapshots(c.want, got))
+			}
+		}
+	})
 
 	// Drop leftovers from an aborted run before any scratch schema is used.
 	rows, err := admin.Query(ctx,
@@ -345,7 +412,8 @@ func TestIntegration_MigrationsRoundTrip(t *testing.T) {
 			after := snapshotSchema(t, pool, schema)
 
 			execMigration(t, pool, "down "+p.name, p.down)
-			if got := snapshotSchema(t, pool, schema); !slices.Equal(before, got) {
+			got := tolerateValidityDrift(p.version, before, snapshotSchema(t, pool, schema))
+			if !slices.Equal(before, got) {
 				t.Fatalf("down %s did not restore the schema it had before up (- missing, + extra):%s",
 					p.name, diffSnapshots(before, got))
 			}
