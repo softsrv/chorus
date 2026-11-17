@@ -255,10 +255,8 @@ END $$`, fn, w.h.ID)); err != nil {
 	}
 }
 
-// TestIntegration_NoComboApprovalUnchanged proves no-combo approval unchanged: in a household with
-// no combos, approval credits the quest's points once, releases the quest
-// approves the completion with its mark-done time, writes only the quest entry (no combo entry),
-// and a repeated or concurrent approval still pays once.
+// TestIntegration_NoComboApprovalUnchanged proves that approving a completion in a household
+// with no combo credits the quest's points once and writes no combo history entry.
 func TestIntegration_NoComboApprovalUnchanged(t *testing.T) {
 	base := newComboHistoryBase(t, "nocombo")
 	w := newComboWorld(t, base, "No Combo Family")
