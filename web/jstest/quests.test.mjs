@@ -211,6 +211,7 @@ test('CLM-5: Mark done posts the member, moves to Coming back later with Back da
   assert.equal(done.path, `${HP}/quests/q1/done`);
   assert.deepEqual(done.body, { member_id: 'm-a', pin: '' });
   assert.match(section(env.$app, 'Mine'), /You have no quests yet\./);
+  assert.equal(buttons(sectionNode(env.$app, 'Mine'), 'Abandon').length, 0);
   assert.doesNotMatch(section(env.$app, 'Mine'), /Feed the cat/);
   const comingBack = section(env.$app, 'Coming back later');
   assert.match(comingBack, /Feed the cat/);
