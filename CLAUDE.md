@@ -63,7 +63,7 @@ Allowed import directions are enforced by `make boundaries` and owned by `intern
   - `internal/http` tests may additionally import `internal/auth` (for token minting in integration tests).
   - Tests may never import `cmd/app`.
 - **Web client rules:**
-  - `web/static/js/*.js` and `web/jstest/*.mjs` imports must resolve within `web/` or use Node builtins; they may never import from `internal/` or `cmd/`.
+  - `web/static/js/*.js` and `web/jstest/*.mjs` imports must resolve within `web/` or be `node:`-prefixed Node builtins (for example `node:fs`); they may never import from `internal/` or `cmd/`.
 
 ### Rules that keep the API hardened
 
