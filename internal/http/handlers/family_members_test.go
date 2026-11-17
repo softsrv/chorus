@@ -12,7 +12,6 @@ import (
 
 	"github.com/softsrv/chorus/internal/app"
 	"github.com/softsrv/chorus/internal/db"
-	"github.com/softsrv/chorus/internal/http/middleware"
 	"github.com/softsrv/chorus/internal/http/respond"
 )
 
