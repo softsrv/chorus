@@ -179,6 +179,31 @@ test('CLM-4: Abandon and Mark done only on own quests; Mine row has no badge', a
   assert.doesNotMatch(rowOf('Own quest').textContent, /Waiting for approval/);
 });
 
+test('abandon CLM-2: a 404 on Abandon shows exactly Quest not found.; a wrong PIN shows the PIN error; neither uses another give-up word', async () => {
+  const otherWords = /cancel|give up|drop|quit|withdraw|release|put back/i;
+  const alerts = (root) => walk(root).filter((n) => n.getAttribute?.('role') === 'alert' || /\balert\b/.test(n.className || '')).map((n) => n.textContent);
+
+  srv.quests = [quest({ available: false, claimed_by: 'm-a' })];
+  srv.extra[`POST ${HP}/quests/q1/abandon`] = () => { srv.quests = [quest({ available: false, claimed_by: 'm-b' })]; return err(404, 'not_found', 'Not found.'); };
+  await loadApp();
+  await becomeAnn();
+  await click(buttons(sectionNode(env.$app, 'Mine'), 'Abandon')[0]);
+  assert.equal(actionCalls().at(-1).path, `${HP}/quests/q1/abandon`);
+  const notFound = alerts(env.$app);
+  assert.deepEqual(notFound, ['Quest not found.']);
+  assert.doesNotMatch(notFound[0], otherWords);
+  assert.match(text(), /Quests for Ann/);
+
+  srv.quests = [quest({ available: false, claimed_by: 'm-a' })];
+  srv.extra[`POST ${HP}/quests/q1/abandon`] = () => err(403, 'wrong_pin', 'Wrong PIN.');
+  await click(walk(env.$app).find((n) => n.tagName === 'A' && n.textContent === 'Quests')); // re-read the list
+  await click(buttons(sectionNode(env.$app, 'Mine'), 'Abandon')[0]);
+  const pinError = alerts(document.body).find((t) => /PIN/.test(t));
+  assert.equal(pinError, 'That PIN is no longer correct. Pick the member again.');
+  assert.doesNotMatch(pinError, otherWords);
+  assert.match(text(), /Choose a family member to take quests\./);
+});
+
 test('CLM-8: a re-taken chore whose earlier completion still waits shows Waiting for approval in Mine (with Mark done) and in Claimed', async () => {
   srv.quests = [
     quest({ id: 'q1', name: 'Own retaken', available: false, claimed_by: 'm-a', awaiting_approval: true }),
@@ -211,6 +236,7 @@ test('CLM-5: Mark done posts the member, moves to Coming back later with Back da
   assert.equal(done.path, `${HP}/quests/q1/done`);
   assert.deepEqual(done.body, { member_id: 'm-a', pin: '' });
   assert.match(section(env.$app, 'Mine'), /You have no quests yet\./);
+  assert.equal(buttons(sectionNode(env.$app, 'Mine'), 'Abandon').length, 0);
   assert.doesNotMatch(section(env.$app, 'Mine'), /Feed the cat/);
   const comingBack = section(env.$app, 'Coming back later');
   assert.match(comingBack, /Feed the cat/);
