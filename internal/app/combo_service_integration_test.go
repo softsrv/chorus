@@ -487,6 +487,68 @@ func TestIntegration_ComboBonusPayment(t *testing.T) {
 		}
 	})
 
+	// CLM-4: approval day never decides the combo day.
+	// Case A: a member marks two combo chores done on the same household-local
+	// day; approve the first, back-date its approved_at by direct SQL to the
+	// previous local day, then approve the second; the combo bonus is paid
+	// exactly once.
+	// Case B (mirror): two completions marked done on different local days,
+	// both approved with approved_at on the same local day; pays no bonus.
+	t.Run("approved_at never decides combo day", func(t *testing.T) {
+		// Case A: same done_at day, different approved_at days -> pays bonus.
+		w := newComboWorld(t, base, "Combo App Day Same")
+		ann := w.member("Ann")
+		a, b := w.chore("Load dishwasher", 10), w.chore("Wipe counters", 15)
+		kitchen := w.combo("Kitchen Crew", 20, a, b)
+
+		w.markDone(a, ann, utc(10, 14, 0)) // Jan 10 NY
+		w.markDone(b, ann, utc(10, 15, 0)) // Jan 10 NY
+		if m, bonuses := w.approve(a); len(bonuses) != 0 || m.Points != 10 {
+			t.Fatalf("case A first approval: points %d bonuses %+v, want 10 and none", m.Points, bonuses)
+		}
+		if _, err := w.pool.Exec(w.ctx, `UPDATE quest_completions SET approved_at = $1 WHERE id = $2`, utc(9, 14, 0), w.last[a]); err != nil {
+			t.Fatalf("case A back-date approved_at: %v", err)
+		}
+		m, bonuses := w.approve(b)
+		if len(bonuses) != 1 || bonuses[0].ComboID != kitchen || bonuses[0].Name != "Kitchen Crew" || bonuses[0].BonusPoints != 20 {
+			t.Fatalf("case A last approval bonuses: %+v", bonuses)
+		}
+		if m.Points != 10+15+20 || w.points(ann) != 45 {
+			t.Fatalf("case A points: member %d, stored %d, want 45", m.Points, w.points(ann))
+		}
+		if w.awards() != 1 {
+			t.Fatalf("case A awards: %d, want 1", w.awards())
+		}
+
+		// Case B (mirror): different done_at days, same approved_at day -> no bonus.
+		wB := newComboWorld(t, base, "Combo App Day Diff")
+		ben := wB.member("Ben")
+		c, d := wB.chore("Sweep floor", 10), wB.chore("Mop floor", 15)
+		wB.combo("Floor Duty", 20, c, d)
+
+		wB.markDone(c, ben, utc(11, 14, 0)) // Jan 11 NY
+		wB.markDone(d, ben, utc(12, 14, 0)) // Jan 12 NY
+		if _, bonuses := wB.approve(c); len(bonuses) != 0 {
+			t.Fatalf("case B first approval paid %+v", bonuses)
+		}
+		if _, bonuses := wB.approve(d); len(bonuses) != 0 {
+			t.Fatalf("case B second approval paid %+v", bonuses)
+		}
+		var cAppDay, dAppDay time.Time
+		if err := wB.pool.QueryRow(wB.ctx, `SELECT (approved_at AT TIME ZONE 'America/New_York')::date FROM quest_completions WHERE id = $1`, wB.last[c]).Scan(&cAppDay); err != nil {
+			t.Fatalf("case B query c approved_at day: %v", err)
+		}
+		if err := wB.pool.QueryRow(wB.ctx, `SELECT (approved_at AT TIME ZONE 'America/New_York')::date FROM quest_completions WHERE id = $1`, wB.last[d]).Scan(&dAppDay); err != nil {
+			t.Fatalf("case B query d approved_at day: %v", err)
+		}
+		if cAppDay != dAppDay {
+			t.Fatalf("case B approved_at days differ: %v vs %v", cAppDay, dAppDay)
+		}
+		if wB.awards() != 0 || wB.points(ben) != 10+15 {
+			t.Fatalf("case B awards %d, Ben points %d, want 0 and 25", wB.awards(), wB.points(ben))
+		}
+	})
+
 	// CLM-5, criterion 2.1/3: a combo pays once per member and household day.
 	// A second full set the same day (a chore redone after a reject, say)
 	// pays chore points only; a full set on a later day pays again. A repeat
