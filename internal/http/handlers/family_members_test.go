@@ -3,17 +3,44 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/softsrv/chorus/internal/app"
+	"github.com/softsrv/chorus/internal/auth"
 	"github.com/softsrv/chorus/internal/db"
+	"github.com/softsrv/chorus/internal/http/middleware"
 	"github.com/softsrv/chorus/internal/http/respond"
 )
+
+const authTestSecret = "auth-test-secret-that-is-at-least-32-bytes!!"
+
+type stubFetcher struct {
+	user      db.User
+	sessionID uuid.UUID
+}
+
+func (s *stubFetcher) GetUserForSession(_ context.Context, arg db.GetUserForSessionParams) (db.User, error) {
+	if arg.SessionID != s.sessionID || arg.UserID != s.user.ID {
+		return db.User{}, errors.New("no rows")
+	}
+	return s.user, nil
+}
+
+func makeTestToken(t *testing.T, userID, sessionID uuid.UUID, expiry time.Duration) string {
+	t.Helper()
+	tp, err := auth.IssueAccessToken(userID, sessionID, authTestSecret, expiry)
+	if err != nil {
+		t.Fatalf("IssueAccessToken: %v", err)
+	}
+	return tp.AccessToken
+}
 
 type fakePointsHistoryService struct {
 	familyServicer
@@ -27,12 +54,6 @@ func (f *fakePointsHistoryService) PointsHistory(ctx context.Context, userID, ho
 	f.gotLimit = limit
 	f.gotOffset = offset
 	return []app.PointsAward{}, nil
-}
-
-func withAuthedUser(req *http.Request, u db.User) *http.Request {
-	type userContextKey struct{}
-	ctx := context.WithValue(req.Context(), userContextKey{}, u)
-	return req.WithContext(ctx)
 }
 
 func TestPointsHistory_ClampsPaging(t *testing.T) {
@@ -96,7 +117,9 @@ func TestPointsHistory_ClampsPaging(t *testing.T) {
 
 	householdID := uuid.New()
 	memberID := uuid.New()
-	user := db.User{ID: uuid.New()}
+	userID := uuid.New()
+	sessionID := uuid.New()
+	user := db.User{ID: userID, Email: "test@example.com", EmailVerified: true}
 
 	for _, tc := range cases {
 		tc := tc
@@ -106,14 +129,20 @@ func TestPointsHistory_ClampsPaging(t *testing.T) {
 			fakeSvc := &fakePointsHistoryService{}
 			h := NewFamilyMemberHandler(fakeSvc)
 
+			fetcher := &stubFetcher{user: user, sessionID: sessionID}
+			authMw := middleware.Authenticate(fetcher, authTestSecret)
+
+			mux := http.NewServeMux()
+			mux.Handle("GET /api/v1/households/{householdID}/family-members/{memberID}/points-history", authMw(http.HandlerFunc(h.PointsHistory)))
+
+			token := makeTestToken(t, userID, sessionID, time.Minute)
+
 			url := fmt.Sprintf("/api/v1/households/%s/family-members/%s/points-history%s", householdID, memberID, tc.query)
 			req := httptest.NewRequest(http.MethodGet, url, nil)
-			req.SetPathValue("householdID", householdID.String())
-			req.SetPathValue("memberID", memberID.String())
-			req = withAuthedUser(req, user)
+			req.Header.Set("Authorization", "Bearer "+token)
 
 			rec := httptest.NewRecorder()
-			h.PointsHistory(rec, req)
+			mux.ServeHTTP(rec, req)
 
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusOK, rec.Body.String())
@@ -153,7 +182,9 @@ func TestPointsHistory_NonIntegerIs422(t *testing.T) {
 
 	householdID := uuid.New()
 	memberID := uuid.New()
-	user := db.User{ID: uuid.New()}
+	userID := uuid.New()
+	sessionID := uuid.New()
+	user := db.User{ID: userID, Email: "test@example.com", EmailVerified: true}
 
 	for _, tc := range cases {
 		tc := tc
@@ -163,14 +194,20 @@ func TestPointsHistory_NonIntegerIs422(t *testing.T) {
 			fakeSvc := &fakePointsHistoryService{}
 			h := NewFamilyMemberHandler(fakeSvc)
 
+			fetcher := &stubFetcher{user: user, sessionID: sessionID}
+			authMw := middleware.Authenticate(fetcher, authTestSecret)
+
+			mux := http.NewServeMux()
+			mux.Handle("GET /api/v1/households/{householdID}/family-members/{memberID}/points-history", authMw(http.HandlerFunc(h.PointsHistory)))
+
+			token := makeTestToken(t, userID, sessionID, time.Minute)
+
 			url := fmt.Sprintf("/api/v1/households/%s/family-members/%s/points-history%s", householdID, memberID, tc.query)
 			req := httptest.NewRequest(http.MethodGet, url, nil)
-			req.SetPathValue("householdID", householdID.String())
-			req.SetPathValue("memberID", memberID.String())
-			req = withAuthedUser(req, user)
+			req.Header.Set("Authorization", "Bearer "+token)
 
 			rec := httptest.NewRecorder()
-			h.PointsHistory(rec, req)
+			mux.ServeHTTP(rec, req)
 
 			if rec.Code != http.StatusUnprocessableEntity {
 				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
