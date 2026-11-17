@@ -3,6 +3,8 @@ FROM golang:1.27-alpine AS builder
 
 WORKDIR /build
 
+SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
+
 # Download dependencies first (layer cache)
 COPY go.mod go.sum ./
 RUN go mod download
