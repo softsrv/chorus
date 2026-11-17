@@ -189,6 +189,31 @@ test('CLM-4: Abandon and Mark done only on own quests; Mine row has no badge', a
   assert.doesNotMatch(rowOf('Own quest').textContent, /Waiting for approval/);
 });
 
+test('abandon CLM-2: a 404 on Abandon shows exactly Quest not found.; a wrong PIN shows the PIN error; neither uses another give-up word', async () => {
+  const otherWords = /cancel|give up|drop|quit|withdraw|release|put back/i;
+  const alerts = (root) => walk(root).filter((n) => n.getAttribute?.('role') === 'alert' || /\balert\b/.test(n.className || '')).map((n) => n.textContent);
+
+  srv.quests = [quest({ available: false, claimed_by: 'm-a' })];
+  srv.extra[`POST ${HP}/quests/q1/abandon`] = () => { srv.quests = [quest({ available: false, claimed_by: 'm-b' })]; return err(404, 'not_found', 'Not found.'); };
+  await loadApp();
+  await becomeAnn();
+  await click(buttons(sectionNode(env.$app, 'Mine'), 'Abandon')[0]);
+  assert.equal(actionCalls().at(-1).path, `${HP}/quests/q1/abandon`);
+  const notFound = alerts(env.$app);
+  assert.deepEqual(notFound, ['Quest not found.']);
+  assert.doesNotMatch(notFound[0], otherWords);
+  assert.match(text(), /Quests for Ann/);
+
+  srv.quests = [quest({ available: false, claimed_by: 'm-a' })];
+  srv.extra[`POST ${HP}/quests/q1/abandon`] = () => err(403, 'wrong_pin', 'Wrong PIN.');
+  await click(walk(env.$app).find((n) => n.tagName === 'A' && n.textContent === 'Quests')); // re-read the list
+  await click(buttons(sectionNode(env.$app, 'Mine'), 'Abandon')[0]);
+  const pinError = alerts(document.body).find((t) => /PIN/.test(t));
+  assert.equal(pinError, 'That PIN is no longer correct. Pick the member again.');
+  assert.doesNotMatch(pinError, otherWords);
+  assert.match(text(), /Choose a family member to take quests\./);
+});
+
 test('CLM-8: a re-taken chore whose earlier completion still waits shows Waiting for approval in Mine (with Mark done) and in Claimed', async () => {
   srv.quests = [
     quest({ id: 'q1', name: 'Own retaken', available: false, claimed_by: 'm-a', awaiting_approval: true }),
@@ -221,6 +246,7 @@ test('CLM-5: Mark done posts the member, moves to Coming back later with Back da
   assert.equal(done.path, `${HP}/quests/q1/done`);
   assert.deepEqual(done.body, { member_id: 'm-a', pin: '' });
   assert.match(section(env.$app, 'Mine'), /You have no quests yet\./);
+  assert.equal(buttons(sectionNode(env.$app, 'Mine'), 'Abandon').length, 0);
   assert.doesNotMatch(section(env.$app, 'Mine'), /Feed the cat/);
   const comingBack = section(env.$app, 'Coming back later');
   assert.match(comingBack, /Feed the cat/);
@@ -445,6 +471,59 @@ test('CLM-10: takeCard fetches points-history with X-Member-PIN and renders tabl
   assert.equal(rowData[1][2], 'Feed the cat');
   assert.equal(rowData[2][1], '+10');
   assert.equal(rowData[2][2], 'Clean sweep');
+});
+
+test('a failing points-history read keeps the quest lists and actions; the error shows in the history section', async () => {
+  srv.quests = [quest(), quest({ id: 'q2', name: 'Fold laundry', available: false, claimed_by: 'm-a' })];
+  srv.pointsHistory = () => err(429, 'rate_limited', 'Too many requests.');
+  await loadApp();
+  await becomeAnn();
+
+  assert.match(section(env.$app, 'Available'), /Feed the cat/);
+  assert.match(section(env.$app, 'Mine'), /Fold laundry/);
+  assert.equal(buttons(env.$app, 'Mark done').length, 1);
+  assert.equal(buttons(env.$app, 'Abandon').length, 1);
+  const historyNode = sectionNode(env.$app, 'Points history');
+  assert.ok(historyNode, 'Points history section exists');
+  assert.match(historyNode.textContent, /Could not load points history/);
+  assert.equal(walk(historyNode).filter((n) => n.tagName === 'TABLE').length, 0);
+});
+
+test('a 403 wrong_pin on points-history returns to the member picker, not a blank tab', async () => {
+  await loadApp();
+  srv.pointsHistory = () => err(403, 'wrong_pin', 'Wrong PIN.');
+  await becomeBen();
+
+  assert.match(text(), /Viewing as: Administrator/);
+  assert.match(text(), /Choose a family member to take quests\./);
+  assert.equal(sessionStorage.getItem(REFRESH_KEY), 'rt', 'session kept');
+  assert.equal(signedOut, 0);
+});
+
+test('the points history is read once per member selection, not again on the rerender after accept or mark done', async () => {
+  srv.extra[`POST ${HP}/quests/q1/accept`] = (r) => {
+    srv.quests = [quest({ available: false, claimed_by: r.body.member_id, claimed_at: '2025-01-02T00:00:00Z' })];
+    return [200, srv.quests[0]];
+  };
+  srv.extra[`POST ${HP}/quests/q1/done`] = () => {
+    srv.quests = [quest({ available: false, awaiting_approval: true })];
+    return [200, srv.quests[0]];
+  };
+  srv.history = [{ id: 'a1', points: 10, reason: 'Clean sweep', earned_at: '2025-01-01T12:00:00Z' }];
+  const historyReads = () => calls.filter((c) => c.method === 'GET' && c.path.endsWith('/points-history'));
+  await loadApp();
+  await becomeAnn();
+  assert.equal(historyReads().length, 1, 'one read on selecting the member');
+
+  await click(buttons(env.$app, 'View')[0]);
+  await click(buttons(env.$app, 'Accept')[0]);
+  assert.match(section(env.$app, 'Mine'), /Feed the cat/);
+  await click(buttons(env.$app, 'Mark done')[0]);
+  assert.equal(historyReads().length, 1, 'actions rerender without reading the history again');
+  assert.match(sectionNode(env.$app, 'Points history').textContent, /Clean sweep/, 'the history still shows');
+
+  await becomeAnn();
+  assert.equal(historyReads().length, 2, 'picking the member again reads it afresh');
 });
 
 test('CLM-11: empty points-history renders empty message and no table', async () => {
@@ -812,6 +891,24 @@ test('streaks CLM-11: the quest form sends streak_bonus as a number; quest, edit
   const put = calls.filter((c) => c.method === 'PUT' && c.path === `${HP}/quests/q1`).at(-1);
   assert.equal(put.body.streak_bonus, -1, 'the server, not the client, judges the value');
   noInlineStyle();
+});
+
+test('streaks: the add form starts the streak bonus at 0, and a blank streak bonus is left out so the server saves 0', async () => {
+  srv.extra[`POST ${HP}/quests`] = (r) => [201, quest({ id: 'q2', ...r.body, streak_bonus: r.body.streak_bonus ?? 0 })];
+  await loadApp();
+  const $add = buttons(env.$app, 'Add quest')[0].parentNode;
+  const input = ($f, name) => walk($f).find((n) => (n.tagName === 'INPUT' || n.tagName === 'TEXTAREA') && n.name === name);
+  assert.equal(String(input($add, 'streak_bonus').value), '0', 'a new quest starts at 0');
+
+  input($add, 'name').value = 'Water plants';
+  input($add, 'points').value = '3';
+  input($add, 'repeat_days').value = '1';
+  input($add, 'streak_bonus').value = '';
+  await submit($add);
+  const post = calls.filter((c) => c.method === 'POST' && c.path === `${HP}/quests`).at(-1);
+  assert.ok(post, 'the quest was posted');
+  assert.equal('streak_bonus' in post.body, false, 'a blank streak bonus is not sent as an empty string');
+  assert.equal(post.body.points, 3);
 });
 
 // ── fix CLM-1: the combos read is the combos card's alone ───────────────────

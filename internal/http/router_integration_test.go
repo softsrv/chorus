@@ -401,13 +401,21 @@ func TestAPI_EndToEnd(t *testing.T) {
 	if n := readStreakBonus(); n != 5 {
 		t.Errorf("streak_bonus after valid update: %d, want 5", n)
 	}
-	// Back to the state the rest of this test expects: no streak bonus, no PIN.
+	// A PUT that omits streak_bonus keeps the stored one (an older client or a
+	// blank edit field never wipes it).
 	s.expectWithHeaders(http.StatusOK, "PUT", qp, parent.AccessToken, map[string]string{"X-Admin-PIN": "1357"}, map[string]any{
 		"name": "Walk the dog twice", "points": 20, "repeat_days": 1,
 	}, nil)
+	if n := readStreakBonus(); n != 5 {
+		t.Errorf("omitted streak_bonus on PUT: %d, want 5 kept", n)
+	}
+	// Back to the state the rest of this test expects: no streak bonus, no PIN.
+	s.expectWithHeaders(http.StatusOK, "PUT", qp, parent.AccessToken, map[string]string{"X-Admin-PIN": "1357"}, map[string]any{
+		"name": "Walk the dog twice", "points": 20, "repeat_days": 1, "streak_bonus": 0,
+	}, nil)
 	s.expectWithHeaders(http.StatusNoContent, "DELETE", hp+"/admin-pin", parent.AccessToken, map[string]string{"X-Admin-PIN": "1357"}, nil, nil)
 	if n := readStreakBonus(); n != 0 {
-		t.Errorf("omitted streak_bonus on PUT: %d, want 0", n)
+		t.Errorf("explicit streak_bonus 0 on PUT: %d, want 0", n)
 	}
 
 	// CLM-4: POST/PUT/DELETE on /api/v1/quest-library return 404 or 405.
@@ -1597,6 +1605,96 @@ func TestAPI_QuestPINRateLimit(t *testing.T) {
 	var rlErr apiError
 	ts.expect(http.StatusTooManyRequests, "POST", ap, u.AccessToken,
 		map[string]any{"member_id": m.ID, "pin": "1234"}, &rlErr)
+	if rlErr.Error.Code != "rate_limited" {
+		t.Errorf("expected rate_limited, got %q", rlErr.Error.Code)
+	}
+}
+
+// TestAPI_PointsHistoryHasItsOwnPINBudget proves the points-history read is
+// rate limited on a budget of its own for correct reads (reading it never
+// spends the PIN budget member actions need, and it is still limited
+// itself), while every wrong PIN on it is charged to the shared PIN budget,
+// so it gives no second budget of guesses.
+func TestAPI_PointsHistoryHasItsOwnPINBudget(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set; skipping integration test")
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	q := db.New(pool)
+	mail := &mailbox{text: map[string]string{}}
+	authSvc := app.NewAuthService(q, pool, mail, app.AuthServiceConfig{
+		JWTSecret: secret, AccessExpiry: 15 * time.Minute, RefreshExpiry: 24 * time.Hour,
+		BCryptCost: 10, PasswordMinLen: 8, AppBaseURL: "http://chorus.test", AppName: "Chorus",
+	})
+	t.Cleanup(authSvc.Shutdown)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	// PIN budget: member create + quest create + one accept + one wrong
+	// history PIN. History budget: three correct reads + the wrong one.
+	const pinLimit = 4
+	handler := internalhttp.NewRouter(ctx, internalhttp.RouterConfig{
+		Queries: q, Pool: pool, AuthSvc: authSvc,
+		UserSvc:      app.NewUserService(q),
+		HouseholdSvc: app.NewHouseholdService(q, pool),
+		FamilySvc:    app.NewFamilyService(q, pool, 10),
+		QuestSvc:     app.NewQuestService(q, pool),
+		JWTSecret:    secret,
+		PINRateLimit: pinLimit,
+	})
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	ts := &testServer{t: t, srv: srv, mail: mail, pool: pool}
+
+	u := ts.signUp("histrluser")
+	var h struct{ ID uuid.UUID }
+	ts.expect(http.StatusCreated, "POST", "/api/v1/households", u.AccessToken,
+		map[string]string{"name": "History RL Home", "timezone": "UTC"}, &h)
+	hp := "/api/v1/households/" + h.ID.String()
+
+	var m struct{ ID uuid.UUID }
+	ts.expect(http.StatusCreated, "POST", hp+"/family-members", u.AccessToken,
+		map[string]string{"name": "Kid", "pin": "1234"}, &m)
+	var quest struct{ ID uuid.UUID }
+	ts.expect(http.StatusCreated, "POST", hp+"/quests", u.AccessToken,
+		map[string]string{"name": "Mow Lawn"}, &quest)
+
+	histPath := hp + "/family-members/" + m.ID.String() + "/points-history"
+	pinHdr := map[string]string{"X-Member-PIN": "1234"}
+	for i := 0; i < pinLimit-1; i++ {
+		ts.expectWithHeaders(http.StatusOK, "GET", histPath, u.AccessToken, pinHdr, nil, nil)
+	}
+
+	// The history reads spent none of the action budget: accept still runs.
+	acceptPath := hp + "/quests/" + quest.ID.String() + "/accept"
+	ts.expect(http.StatusOK, "POST", acceptPath, u.AccessToken,
+		map[string]any{"member_id": m.ID, "pin": "1234"}, nil)
+
+	// A wrong PIN on the history read is refused and charged to the shared
+	// PIN budget, which it now fills: the next member action is limited.
+	var wrongPin apiError
+	ts.expectWithHeaders(http.StatusForbidden, "GET", histPath, u.AccessToken,
+		map[string]string{"X-Member-PIN": "0000"}, nil, &wrongPin)
+	if wrongPin.Error.Code != "wrong_pin" {
+		t.Errorf("expected wrong_pin, got %q", wrongPin.Error.Code)
+	}
+	var actionRL apiError
+	ts.expect(http.StatusTooManyRequests, "POST", acceptPath, u.AccessToken,
+		map[string]any{"member_id": m.ID, "pin": "1234"}, &actionRL)
+	if actionRL.Error.Code != "rate_limited" {
+		t.Errorf("accept after wrong history PIN: expected rate_limited, got %q", actionRL.Error.Code)
+	}
+
+	// The history read is still limited on its own budget.
+	var rlErr apiError
+	ts.expectWithHeaders(http.StatusTooManyRequests, "GET", histPath, u.AccessToken, pinHdr, nil, &rlErr)
 	if rlErr.Error.Code != "rate_limited" {
 		t.Errorf("expected rate_limited, got %q", rlErr.Error.Code)
 	}

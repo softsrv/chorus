@@ -330,12 +330,16 @@ let tab = 'quests';
 let activeMember = null; // { id, name, pin } after a successful verify
 let adminPin = null; // the admin PIN once entered, sent as X-Admin-PIN
 let adminPinState = { householdId: null, set: false }; // GET .../admin-pin
+// memberHistory is the active member's points history, read once per member
+// selection: { member (the activeMember object it was read for), items, error }.
+let memberHistory = null;
 
 // clearMemberState returns to the administrator's view with nothing unlocked.
 function clearMemberState() {
   activeMember = null;
   adminPin = null;
   adminPinState = { householdId: null, set: false };
+  memberHistory = null;
 }
 
 // activeMemberAction is the one accessor member actions (accept, abandon, mark
@@ -709,10 +713,29 @@ async function takeCard(h, quests, nameOf, rerender) {
   const $err = el('div');
   const $detail = el('div');
   const parts = partitionQuests(quests, activeMember.id);
-  const historyRes = await api('GET', `/households/${h.id}/family-members/${activeMember.id}/points-history`, undefined, {
-    headers: { 'X-Member-PIN': activeMember.pin ?? '' },
-  });
-  const history = historyRes?.items || [];
+  // The points history is this card's own read, made once per member
+  // selection (memberHistory is keyed on the activeMember object, which each
+  // pick replaces), never on the rerender after an accept, done or abandon:
+  // those actions award no points, and the read has a PIN-limited budget of
+  // its own. Its failure (a 429, a 5xx, a network error) shows inside the
+  // history section until the member is picked again or the page reloads,
+  // and the quest lists still render. A 403 wrong_pin goes to the same
+  // handler member actions use, which returns to the picker.
+  if (memberHistory?.member !== activeMember) {
+    const member = activeMember;
+    try {
+      const historyRes = await api('GET', `/households/${h.id}/family-members/${member.id}/points-history`, undefined, {
+        headers: { 'X-Member-PIN': member.pin ?? '' },
+      });
+      memberHistory = { member, items: historyRes?.items || [], error: null };
+    } catch (err) {
+      if (memberActionFailed(err)) return null;
+      console.error('points history', err);
+      memberHistory = { member, items: [], error: 'Could not load points history. Reload to try again.' };
+    }
+  }
+  const history = memberHistory.items;
+  const historyError = memberHistory.error;
 
   const act = (verb, q) => action(async () => {
     const body = activeMemberAction();
@@ -770,7 +793,7 @@ async function takeCard(h, quests, nameOf, rerender) {
         waitingBadge(q)), ''),
     el('div', { class: 'space-y-1' },
       el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Points history' }),
-      history.length
+      historyError ? alertBox('error', historyError) : history.length
         ? el('table', { class: 'table table-sm' },
             el('thead', {}, el('tr', {},
               el('th', { text: 'Date' }),
@@ -864,18 +887,20 @@ function manageQuestsCard(h, quests, library, page, rerender) {
   const unlocked = managementUnlocked();
 
   // A blank field is sent as typed, never as 0: the server owns validation
-  // and reports an error on the field.
+  // and reports an error on the field. The streak bonus is optional (the
+  // server defaults it to 0), so a blank one is left out of the body.
   const toNum = (val) => {
     if (typeof val === 'string' && val.trim() === '') return val;
     const n = Number(val);
     return Number.isNaN(n) ? val : n;
   };
+  const isBlank = (val) => val === undefined || val === null || (typeof val === 'string' && val.trim() === '');
 
   const toBody = (v) => ({
     name: v.name,
     points: toNum(v.points),
     repeat_days: toNum(v.repeat_days),
-    streak_bonus: toNum(v.streak_bonus),
+    ...(isBlank(v.streak_bonus) ? {} : { streak_bonus: toNum(v.streak_bonus) }),
     notes: v.notes,
   });
 
@@ -883,7 +908,7 @@ function manageQuestsCard(h, quests, library, page, rerender) {
     { name: 'name', label: 'Name', required: true, value: q.name },
     { name: 'points', label: 'Points', type: 'number', value: q.points ?? '' },
     { name: 'repeat_days', label: 'Repeats after (days, back at midnight)', type: 'number', value: q.repeat_days ?? '' },
-    { name: 'streak_bonus', label: 'Streak bonus', type: 'number', value: q.streak_bonus ?? '' },
+    { name: 'streak_bonus', label: 'Streak bonus', type: 'number', value: q.streak_bonus ?? 0 },
     { name: 'notes', label: 'Notes', type: 'textarea', value: q.notes ?? '' },
   ];
 

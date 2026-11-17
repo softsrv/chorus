@@ -77,6 +77,46 @@ func TestIntegration_QuestCRUD(t *testing.T) {
 	}
 	want("updated", updated.HouseholdQuest, "Mow the lawn (front)", 30, 14, "")
 
+	// CLM-1: an Update that omits streak_bonus keeps the stored one; an
+	// explicit value (0 included) is written; another household's quest id is
+	// ErrNotFound and leaves the quest as it was.
+	bonusQuest, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "Feed the cat", Points: num(3), StreakBonus: num(7)}, "")
+	if err != nil || bonusQuest.StreakBonus != 7 {
+		t.Fatalf("create with streak_bonus 7: %+v %v", bonusQuest, err)
+	}
+	kept, err := quests.Update(ctx, alice, h.ID, bonusQuest.ID, app.QuestInput{Name: "Feed the cat", Points: num(4)}, "")
+	if err != nil || kept.StreakBonus != 7 || kept.Points != 4 {
+		t.Fatalf("update without streak_bonus: got bonus %d points %d, %v; want 7, 4", kept.StreakBonus, kept.Points, err)
+	}
+	if stored, err := quests.Get(ctx, alice, h.ID, bonusQuest.ID); err != nil || stored.StreakBonus != 7 {
+		t.Fatalf("stored streak_bonus after omitted update: %d %v, want 7", stored.StreakBonus, err)
+	}
+	otherH, err := households.Create(ctx, alice, app.HouseholdInput{Name: "Other Quest Family"})
+	if err != nil {
+		t.Fatalf("create other household: %v", err)
+	}
+	if _, err := quests.Update(ctx, alice, otherH.ID, bonusQuest.ID, app.QuestInput{Name: "Smuggled"}, ""); !errors.Is(err, app.ErrNotFound) {
+		t.Fatalf("update via another household without streak_bonus: %v, want ErrNotFound", err)
+	}
+	if _, err := quests.Update(ctx, alice, otherH.ID, bonusQuest.ID, app.QuestInput{Name: "Smuggled", StreakBonus: num(1)}, ""); !errors.Is(err, app.ErrNotFound) {
+		t.Fatalf("update via another household with streak_bonus: %v, want ErrNotFound", err)
+	}
+	if stored, err := quests.Get(ctx, alice, h.ID, bonusQuest.ID); err != nil || stored.Name != "Feed the cat" || stored.StreakBonus != 7 {
+		t.Fatalf("quest changed by another household's update: %+v %v", stored, err)
+	}
+	cleared, err := quests.Update(ctx, alice, h.ID, bonusQuest.ID, app.QuestInput{Name: "Feed the cat", Points: num(4), StreakBonus: num(0)}, "")
+	if err != nil || cleared.StreakBonus != 0 {
+		t.Fatalf("update with streak_bonus 0: got %d %v, want 0", cleared.StreakBonus, err)
+	}
+	// An invalid streak_bonus is still a 422 naming the field.
+	var bonusVE *app.ValidationError
+	if _, err := quests.Update(ctx, alice, h.ID, bonusQuest.ID, app.QuestInput{Name: "Feed the cat", StreakBonus: num(-1)}, ""); !errors.As(err, &bonusVE) || bonusVE.Fields["streak_bonus"] == "" {
+		t.Fatalf("negative streak_bonus on update: %v", err)
+	}
+	if err := quests.Delete(ctx, alice, h.ID, bonusQuest.ID, ""); err != nil {
+		t.Fatalf("delete bonus quest: %v", err)
+	}
+
 	// Omitted numbers default to 0 points, every 1 day.
 	defaulted, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "Water plants"}, "")
 	if err != nil || defaulted.Points != 0 || defaulted.RepeatDays != 1 {
