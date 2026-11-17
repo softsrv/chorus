@@ -31,6 +31,8 @@ Test fixtures and configuration must use obviously fake values or be allowlisted
 
 Single test: `go test -tags integration -run TestAPI_EndToEnd ./internal/http/` (needs `TEST_DATABASE_URL`; `set -a; . ./.env; set +a` loads it).
 
+Tests are hermetic: in the internal/http and internal/app test binaries, internal/testnet.RefuseExternal makes http.DefaultTransport refuse non-loopback hosts; it does not cover non-HTTP dials (SMTP, the database) or http.Clients given their own Transport; and a new outbound client must take its endpoint from config and be pointed at an httptest fake (or a capture mailer) in tests.
+
 Local stack (`docker-compose.yml`): the app runs in the `app` container (dev image `deploy/dev.Dockerfile`, Go + air, repo bind-mounted at `/src`) on http://localhost:8080 (`PORT` in `.env` sets both the listen and published port; keep `APP_BASE_URL` in step). It reaches `postgres` and `smtp4dev` by service name over the internal `backend` network; compose overrides `DATABASE_URL`/`SMTP_HOST`/`SMTP_PORT` for it, so `.env` keeps host-side values. Published to the host (127.0.0.1 only): Postgres on `:5433` (databases `chorus` and `chorus_test`, used by host-side migrate and integration tests) and the smtp4dev web UI at http://localhost:5080, where verification and reset emails land. smtp4dev's SMTP port is not published.
 
 ## Architecture
