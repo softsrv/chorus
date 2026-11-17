@@ -911,6 +911,22 @@ test('streaks: the add form starts the streak bonus at 0, and a blank streak bon
   assert.equal(post.body.points, 3);
 });
 
+test('streaks: blanking the streak bonus on the edit form never sends 0; it is left out so the server keeps the stored bonus', async () => {
+  srv.quests = [quest({ streak_bonus: 7 })];
+  srv.extra[`PUT ${HP}/quests/q1`] = (r) => [200, quest({ ...r.body, streak_bonus: r.body.streak_bonus ?? 7 })];
+  await loadApp();
+  const input = ($f, name) => walk($f).find((n) => (n.tagName === 'INPUT' || n.tagName === 'TEXTAREA') && n.name === name);
+  await click(buttons(walk(env.$app).find((n) => n.tagName === 'H3' && n.textContent === 'Manage quests').parentNode, 'Edit')[0]);
+  const $edit = buttons(env.$app, 'Save')[0].parentNode;
+  assert.equal(String(input($edit, 'streak_bonus').value), '7');
+  input($edit, 'streak_bonus').value = '';
+  await submit($edit);
+  const put = calls.filter((c) => c.method === 'PUT' && c.path === `${HP}/quests/q1`).at(-1);
+  assert.ok(put, 'the quest was saved');
+  assert.equal('streak_bonus' in put.body, false, 'a blank streak bonus is omitted, never sent as 0');
+  assert.notEqual(put.body.streak_bonus, 0);
+});
+
 // ── fix CLM-1: the combos read is the combos card's alone ───────────────────
 
 const comboReads = () => calls.filter((c) => c.method === 'GET' && c.path === `${HP}/combos`);

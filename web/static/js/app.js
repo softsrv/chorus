@@ -887,8 +887,9 @@ function manageQuestsCard(h, quests, library, page, rerender) {
   const unlocked = managementUnlocked();
 
   // A blank field is sent as typed, never as 0: the server owns validation
-  // and reports an error on the field. The streak bonus is optional (the
-  // server defaults it to 0), so a blank one is left out of the body.
+  // and reports an error on the field. The streak bonus is optional, so a
+  // blank one is left out of the body: a new quest then saves 0 and an edit
+  // keeps the quest's stored bonus (never zeroes it).
   const toNum = (val) => {
     if (typeof val === 'string' && val.trim() === '') return val;
     const n = Number(val);
