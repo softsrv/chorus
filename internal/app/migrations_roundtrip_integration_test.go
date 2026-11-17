@@ -163,17 +163,17 @@ func applyUps(t *testing.T, pool *pgxpool.Pool, pairs []migrationPair) {
 // name; every query is ordered so equal schemas give equal snapshots.
 var snapshotQueries = []struct{ kind, sql string }{
 	{"relation", `
-		SELECT c.relname || ' kind=' || c.relkind
+		SELECT c.relname || ' kind=' || c.relkind::text
 		FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 		WHERE n.nspname = $1 AND c.relkind IN ('r','p','v','m','S','f')
 		ORDER BY 1`},
 	{"column", `
 		SELECT c.relname || '.' || a.attname
 			|| ' type=' || format_type(a.atttypid, a.atttypmod)
-			|| ' notnull=' || a.attnotnull
+			|| ' notnull=' || a.attnotnull::text
 			|| ' default=' || coalesce(pg_get_expr(d.adbin, d.adrelid), '')
-			|| ' identity=' || a.attidentity
-			|| ' generated=' || a.attgenerated
+			|| ' identity=' || a.attidentity::text
+			|| ' generated=' || a.attgenerated::text
 		FROM pg_attribute a
 		JOIN pg_class c ON c.oid = a.attrelid
 		JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -186,9 +186,9 @@ var snapshotQueries = []struct{ kind, sql string }{
 	// validity change shows up as exactly one field; see validityDriftAllowed.
 	{"constraint", `
 		SELECT coalesce(c.relname, '-') || ' ' || con.conname
-			|| ' type=' || con.contype
+			|| ' type=' || con.contype::text
 			|| ' ' || regexp_replace(pg_get_constraintdef(con.oid), ' NOT VALID$', '')
-			|| ' validated=' || con.convalidated
+			|| ' validated=' || con.convalidated::text
 		FROM pg_constraint con
 		JOIN pg_namespace n ON n.oid = con.connamespace
 		LEFT JOIN pg_class c ON c.oid = con.conrelid
@@ -212,7 +212,7 @@ var snapshotQueries = []struct{ kind, sql string }{
 		WHERE n.nspname = $1 AND NOT tg.tgisinternal
 		ORDER BY 1`},
 	{"type", `
-		SELECT t.typname || ' type=' || t.typtype || ' '
+		SELECT t.typname || ' type=' || t.typtype::text || ' '
 			|| coalesce((SELECT string_agg(e.enumlabel, ',' ORDER BY e.enumsortorder)
 				FROM pg_enum e WHERE e.enumtypid = t.oid), '')
 			|| coalesce(format_type(t.typbasetype, t.typtypmod), '')
