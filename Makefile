@@ -5,7 +5,7 @@ BIN_DIR          := ./bin
 -include .env
 export
 
-.PHONY: dev run build test test-js test-integration test-cover fmt vet lint vulncheck check \
+.PHONY: dev run build test test-js test-integration test-cover boundaries fmt vet lint vulncheck check \
         services-up services-down services-reset \
         daisyui-install tailwind tailwind-watch app \
         migrate-up migrate-down migrate-create migrate-status migrate-test \
@@ -58,6 +58,9 @@ test-cover:
 	go test -coverprofile=coverage.out ./...
 	go tool cover -html=coverage.out
 
+boundaries:
+	go test -run 'TestImportBoundaries|TestWebClientImportsStayInWeb' ./internal/archtest/
+
 fmt:
 	gofmt -w .
 
@@ -72,7 +75,7 @@ vulncheck:
 	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 # Everything CI runs.
-check: vet test test-js test-integration vulncheck
+check: boundaries vet test test-js test-integration vulncheck
 
 ## ── CSS ──────────────────────────────────────────────────────────────────────
 

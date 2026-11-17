@@ -30,7 +30,7 @@ The API contract is in [docs/API.md](docs/API.md). Development notes are in [CLA
 ```bash
 make test               # unit tests
 make test-integration   # against the chorus_test DB (docker compose creates it)
-make check              # everything CI runs, including govulncheck
+make check              # everything CI runs, including boundary check and govulncheck
 ```
 
 ## CI and images
