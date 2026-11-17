@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -103,9 +104,16 @@ func TestIntegration_ComboPointsHistory(t *testing.T) {
 		if comboRow.Reason != "Kitchen Crew" || comboRow.Points != 20 {
 			t.Fatalf("combo row %+v, want Kitchen Crew 20", comboRow)
 		}
-		// Both credits of one approval are earned at the same moment.
+		// Both credits of one approval are earned at the same moment (approval time, CLM-3).
 		if !comboRow.EarnedAt.Valid || !comboRow.EarnedAt.Time.Equal(questRow.EarnedAt.Time) {
 			t.Fatalf("combo earned_at %v, want the quest entry's %v", comboRow.EarnedAt, questRow.EarnedAt)
+		}
+		var bApprovedAt time.Time
+		if err := w.pool.QueryRow(w.ctx, `SELECT approved_at FROM quest_completions WHERE id = $1`, w.last[b]).Scan(&bApprovedAt); err != nil {
+			t.Fatalf("read approved_at: %v", err)
+		}
+		if !comboRow.EarnedAt.Time.Equal(bApprovedAt) {
+			t.Fatalf("combo earned_at %v, want approved_at %v", comboRow.EarnedAt.Time, bApprovedAt)
 		}
 		if m.Points != pointsBefore+sum || w.points(ann) != pointsBefore+15+20 {
 			t.Fatalf("points %d (stored %d), want %d + rows %d = 45", m.Points, w.points(ann), pointsBefore, sum)

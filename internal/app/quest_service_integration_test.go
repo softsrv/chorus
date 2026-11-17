@@ -882,6 +882,12 @@ func TestIntegration_QuestApproval(t *testing.T) {
 	}
 	comp2ID := rows[0].ID
 
+	// Back-date done_at a day before approval to prove history entry earned_at uses approved_at, not done_at (CLM-3).
+	backDatedDoneAt := time.Now().Add(-24 * time.Hour).Truncate(time.Second)
+	if _, err := pool.Exec(ctx, `UPDATE quest_completions SET done_at = $2 WHERE id = $1`, comp2ID, backDatedDoneAt); err != nil {
+		t.Fatalf("back-date completion: %v", err)
+	}
+
 	// With an admin PIN set, a missing or wrong PIN changes nothing.
 	if err := familySvc.SetAdminPin(ctx, alice, h.ID, "2468", ""); err != nil {
 		t.Fatalf("set admin pin: %v", err)
@@ -982,18 +988,21 @@ func TestIntegration_QuestApproval(t *testing.T) {
 		t.Errorf("Ben's points after repeat approve: %d, want 7", p)
 	}
 	// The concurrent and repeated approvals wrote exactly one history entry,
-	// for the credited points, earned at the completion's mark-done time.
+	// for the credited points, earned at the completion's approval time.
 	benAwards := awards(ben.ID)
 	if len(benAwards) != 1 {
 		t.Fatalf("Ben's history after approval: %d entries, want 1: %+v", len(benAwards), benAwards)
 	}
-	var markedDoneAt time.Time
-	if err := pool.QueryRow(ctx, `SELECT done_at FROM quest_completions WHERE id = $1`, comp2ID).Scan(&markedDoneAt); err != nil {
-		t.Fatalf("read done_at: %v", err)
+	var markedDoneAt, approvedAt time.Time
+	if err := pool.QueryRow(ctx, `SELECT done_at, approved_at FROM quest_completions WHERE id = $1`, comp2ID).Scan(&markedDoneAt, &approvedAt); err != nil {
+		t.Fatalf("read completion timestamps: %v", err)
+	}
+	if approvedAt.Equal(markedDoneAt) {
+		t.Fatalf("approved_at %v should differ from done_at %v", approvedAt, markedDoneAt)
 	}
 	if a := benAwards[0]; a.HouseholdID != h.ID || a.MemberID != ben.ID || a.Kind != "quest" || a.Reason != "Mow the lawn" ||
-		a.Points != 7 || !a.EarnedAt.Valid || !a.EarnedAt.Time.Equal(markedDoneAt) {
-		t.Errorf("Ben's history entry: %+v, want quest 'Mow the lawn' 7 points earned at %v", a, markedDoneAt)
+		a.Points != 7 || !a.EarnedAt.Valid || !a.EarnedAt.Time.Equal(approvedAt) || a.EarnedAt.Time.Equal(markedDoneAt) {
+		t.Errorf("Ben's history entry: %+v, want quest 'Mow the lawn' 7 points earned at approved_at %v (not done_at %v)", a, approvedAt, markedDoneAt)
 	}
 	if len(pending("2468")) != 0 {
 		t.Error("approved completion is still waiting")

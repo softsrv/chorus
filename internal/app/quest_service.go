@@ -436,7 +436,7 @@ type StreakBonus struct {
 // the member who marked it done, in one transaction: either all of it
 // happens or none does. Every credit (the chore's points, the streak bonus
 // and each combo bonus) also writes the member's points history entry,
-// earned at the completion's mark-done time. Admin only, behind the admin
+// earned at the completion's approval time. Admin only, behind the admin
 // PIN once one is set. A completion that is not pending (approved, rejected,
 // cancelled, or not in this household) is ErrNotFound, so a repeated or
 // concurrent approval credits the points and bonuses once. The quest itself
@@ -486,7 +486,7 @@ func (s *QuestService) Approve(ctx context.Context, userID, householdID, complet
 	if err != nil {
 		return Completion{}, db.FamilyMember{}, nil, StreakBonus{}, err
 	}
-	member, err := creditPoints(ctx, qtx, householdID, memberID, awardKindQuest, row.QuestName, row.Points, row.DoneAt)
+	member, err := creditPoints(ctx, qtx, householdID, memberID, awardKindQuest, row.QuestName, row.Points, row.ApprovedAt)
 	if err != nil {
 		return Completion{}, db.FamilyMember{}, nil, StreakBonus{}, err
 	}
@@ -494,7 +494,7 @@ func (s *QuestService) Approve(ctx context.Context, userID, householdID, complet
 	if err != nil {
 		return Completion{}, db.FamilyMember{}, nil, StreakBonus{}, err
 	}
-	member, bonuses, err := payCombos(ctx, qtx, householdID, row.QuestID, member, row.DoneAt)
+	member, bonuses, err := payCombos(ctx, qtx, householdID, row.QuestID, member, row.DoneAt, row.ApprovedAt)
 	if err != nil {
 		return Completion{}, db.FamilyMember{}, nil, StreakBonus{}, err
 	}
@@ -517,7 +517,7 @@ func (s *QuestService) Approve(ctx context.Context, userID, householdID, complet
 // as fixed when this completion was marked done (never recomputed now);
 // from the 3rd in a row on, a quest with a streak bonus above 0 pays it:
 // the credit and its points history entry (kind streak, reason
-// "streak: <quest name> <count>", earned at the mark-done time). The
+// "streak: <quest name> <count>", earned at the approval time). The
 // returned StreakBonus has Points 0 when nothing was paid. Any error is
 // returned for the caller to roll back.
 func payStreak(ctx context.Context, qtx *db.Queries, householdID uuid.UUID, member db.FamilyMember, row db.ApproveCompletionRow) (db.FamilyMember, StreakBonus, error) {
@@ -530,7 +530,7 @@ func payStreak(ctx context.Context, qtx *db.Queries, householdID uuid.UUID, memb
 		return member, streak, nil
 	}
 	reason := fmt.Sprintf("streak: %s %d", row.QuestName, streak.Count)
-	member, err := creditPoints(ctx, qtx, householdID, member.ID, awardKindStreak, reason, row.StreakBonus, row.DoneAt)
+	member, err := creditPoints(ctx, qtx, householdID, member.ID, awardKindStreak, reason, row.StreakBonus, row.ApprovedAt)
 	if err != nil {
 		return db.FamilyMember{}, StreakBonus{}, fmt.Errorf("credit streak bonus: %w", err)
 	}
@@ -540,14 +540,15 @@ func payStreak(ctx context.Context, qtx *db.Queries, householdID uuid.UUID, memb
 
 // payCombos runs inside Approve's transaction (qtx), after the completion
 // was approved. doneAt is that completion's mark-done time, which decides
-// the household day it counts toward. It locks the combos containing the
+// the household day it counts toward. earnedAt is the approval time, which
+// dates the points history entry. It locks the combos containing the
 // quest (so concurrent approvals of one combo's chores serialize and the
 // later one sees the earlier one's approval), then pays each combo the member
 // has finished: an award row with name and points snapshots, one claimed
 // completion per chore, and the bonus credit with its points history entry
-// (kind combo, the combo's name, earned at doneAt). Any error is returned
+// (kind combo, the combo's name, earned at earnedAt). Any error is returned
 // for the caller to roll back.
-func payCombos(ctx context.Context, qtx *db.Queries, householdID, questID uuid.UUID, member db.FamilyMember, doneAt pgtype.Timestamptz) (db.FamilyMember, []ComboBonus, error) {
+func payCombos(ctx context.Context, qtx *db.Queries, householdID, questID uuid.UUID, member db.FamilyMember, doneAt, earnedAt pgtype.Timestamptz) (db.FamilyMember, []ComboBonus, error) {
 	if _, err := qtx.LockCombosForQuest(ctx, db.LockCombosForQuestParams{HouseholdID: householdID, QuestID: questID}); err != nil {
 		return db.FamilyMember{}, nil, fmt.Errorf("lock combos: %w", err)
 	}
@@ -580,7 +581,7 @@ func payCombos(ctx context.Context, qtx *db.Queries, householdID, questID uuid.U
 			// Under the combo lock the set just checked must still be there.
 			return db.FamilyMember{}, nil, fmt.Errorf("claim combo %s: claimed %d completions, want %d", c.ID, claimed, c.ChoreCount)
 		}
-		member, err = creditPoints(ctx, qtx, householdID, member.ID, awardKindCombo, c.Name, c.BonusPoints, doneAt)
+		member, err = creditPoints(ctx, qtx, householdID, member.ID, awardKindCombo, c.Name, c.BonusPoints, earnedAt)
 		if err != nil {
 			return db.FamilyMember{}, nil, fmt.Errorf("credit combo bonus: %w", err)
 		}

@@ -92,8 +92,8 @@ func TestIntegration_PointsHistory(t *testing.T) {
 		if appr.ApprovedAt == nil {
 			t.Fatalf("quest %d approved_at is not set", i)
 		}
-		// History is earned at the completion's mark-done time (CLM-10).
-		approvalTimes = append(approvalTimes, appr.DoneAt)
+		// History is earned at the completion's approval time (CLM-3).
+		approvalTimes = append(approvalTimes, *appr.ApprovedAt)
 		// Small pause to guarantee distinct created_at / completed_at timestamps if required
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -401,18 +401,18 @@ func TestIntegration_QuestStreak(t *testing.T) {
 	if len(streakRows) != 1 || streakRows[0].Points != 5 {
 		t.Fatalf("streak history after 3rd approval: %+v, want one 5-point 'streak: Dishes 3'", streakRows)
 	}
-	var c3Done time.Time
-	if err := w.pool.QueryRow(w.ctx, `SELECT done_at FROM quest_completions WHERE id = $1`, c3).Scan(&c3Done); err != nil {
-		t.Fatalf("read done_at: %v", err)
+	var c3Approved time.Time
+	if err := w.pool.QueryRow(w.ctx, `SELECT approved_at FROM quest_completions WHERE id = $1`, c3).Scan(&c3Approved); err != nil {
+		t.Fatalf("read approved_at: %v", err)
 	}
 	questRows := 0
 	for _, a := range w.awardsWithReason("quest", "Dishes") {
-		if a.EarnedAt.Time.Equal(c3Done) {
+		if a.EarnedAt.Time.Equal(c3Approved) {
 			questRows++
 		}
 	}
-	if questRows != 1 || !streakRows[0].EarnedAt.Time.Equal(c3Done) {
-		t.Errorf("3rd approval: %d quest entries earned at %v, streak entry earned at %v; want 1 and the same time", questRows, c3Done, streakRows[0].EarnedAt.Time)
+	if questRows != 1 || !streakRows[0].EarnedAt.Time.Equal(c3Approved) {
+		t.Errorf("3rd approval: %d quest entries earned at %v, streak entry earned at %v; want 1 and the same time", questRows, c3Approved, streakRows[0].EarnedAt.Time)
 	}
 
 	c4 := w.markDone(dishes)
@@ -569,7 +569,7 @@ func TestIntegration_QuestStreakConcurrentApprove(t *testing.T) {
 // TestIntegration_QuestStreakLateApproval: CLM-10, the streak is fixed at
 // mark-done: completions marked done on days D, D+1, D+2 and approved long
 // after their streak expired still pay the bonus at 3, and every entry is
-// earned at its mark-done time.
+// earned at its approval time.
 func TestIntegration_QuestStreakLateApproval(t *testing.T) {
 	w := newStreakWorld(t, "streaklate")
 	cat := w.quest("Feed the cat", 3, 1, 5)
@@ -594,11 +594,20 @@ func TestIntegration_QuestStreakLateApproval(t *testing.T) {
 	w.approve("D+1", ids[1], 3, app.StreakBonus{Count: 2})
 	w.approve("D+2", ids[2], 8, app.StreakBonus{Points: 5, Count: 3})
 
+	var approvedTimes []time.Time
+	for _, id := range ids {
+		var appAt time.Time
+		if err := w.pool.QueryRow(w.ctx, `SELECT approved_at FROM quest_completions WHERE id = $1`, id).Scan(&appAt); err != nil {
+			t.Fatalf("read approved_at: %v", err)
+		}
+		approvedTimes = append(approvedTimes, appAt)
+	}
+
 	questRows := w.awardsWithReason("quest", "Feed the cat")
 	if len(questRows) != 3 {
 		t.Fatalf("quest entries: %d, want 3", len(questRows))
 	}
-	for _, want := range marked {
+	for _, want := range approvedTimes {
 		hits := 0
 		for _, a := range questRows {
 			if a.EarnedAt.Time.Equal(want) {
@@ -610,8 +619,8 @@ func TestIntegration_QuestStreakLateApproval(t *testing.T) {
 		}
 	}
 	streakRows := w.awardsWithReason("streak", "streak: Feed the cat 3")
-	if len(streakRows) != 1 || !streakRows[0].EarnedAt.Time.Equal(marked[2]) {
-		t.Errorf("streak entry: %+v, want one earned at %v", streakRows, marked[2])
+	if len(streakRows) != 1 || !streakRows[0].EarnedAt.Time.Equal(approvedTimes[2]) {
+		t.Errorf("streak entry: %+v, want one earned at %v", streakRows, approvedTimes[2])
 	}
 }
 
