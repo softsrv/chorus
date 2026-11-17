@@ -105,6 +105,7 @@ migrate-test:
 	migrate -path db/migrations -database "$(TEST_DATABASE_URL)" up
 
 migrate-roundtrip-test:
+	@url='$(TEST_DATABASE_URL)'; u="$${url%%\?*}"; db="$${u##*/}"; case "$$db" in *_test) ;; *) echo "migrate-roundtrip-test: refusing to run: TEST_DATABASE_URL database name must end in _test (got '$$db')" >&2; exit 1;; esac
 	go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@latest -path db/migrations -database "$(TEST_DATABASE_URL)" down -all
 	go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@latest -path db/migrations -database "$(TEST_DATABASE_URL)" up
 
