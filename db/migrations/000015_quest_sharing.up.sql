@@ -73,3 +73,24 @@ ALTER TABLE combo_award_completions
     DROP CONSTRAINT uq_combo_award_completions_combo_completion,
     ADD CONSTRAINT uq_combo_award_completions_combo_completion_member
         UNIQUE (combo_id, quest_completion_id, member_id);
+
+-- 5. A pending completion whose marker was removed under 000014 (member_id
+--    nulled by ON DELETE SET NULL) records no member at all: nobody could be
+--    paid for it, and from here on the Approvals list, approval and member
+--    removal reach a completion only through its marker or its recorded
+--    members. Each one is cancelled, as member removal does: no points move,
+--    and a quest resting on the cooldown that completion started (its
+--    completed_at is the completion's done_at, available_at still ahead) is
+--    available again right away. Every completion that still has its marker
+--    is untouched.
+WITH cancelled AS (
+    UPDATE quest_completions c
+    SET status = 'cancelled'
+    WHERE c.status = 'pending' AND c.member_id IS NULL
+    RETURNING c.household_id, c.quest_id, c.done_at
+)
+UPDATE household_quests q
+SET available_at = NOW(), updated_at = NOW()
+FROM cancelled c
+WHERE q.household_id = c.household_id AND q.id = c.quest_id
+  AND q.completed_at = c.done_at AND q.available_at > NOW();

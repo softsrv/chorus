@@ -69,8 +69,11 @@ type AbandonQuestParams struct {
 // pool, done_at cleared with the holder so the done_at-needs-a-holder CHECK
 // holds. A quest left with one member is no longer shared, so that member's
 // participant row goes too. A member not on the quest, or a quest not in
-// this household, matches no row and changes nothing. The quest is locked
-// after the caller's member locks (member first).
+// this household, matches no row and changes nothing. The caller holds the
+// member locks and then the quest's row lock (LockHouseholdQuest, a statement
+// of its own), so the participants counted here are the committed ones: a
+// concurrent share or abandon of the quest is either in this snapshot or
+// waits until this transaction ends.
 func (q *Queries) AbandonQuest(ctx context.Context, arg AbandonQuestParams) (HouseholdQuest, error) {
 	row := q.db.QueryRow(ctx, abandonQuest, arg.MemberID, arg.HouseholdID, arg.ID)
 	var i HouseholdQuest
@@ -683,6 +686,30 @@ func (q *Queries) ListQuestParticipants(ctx context.Context, arg ListQuestPartic
 	return items, nil
 }
 
+const lockHouseholdQuest = `-- name: LockHouseholdQuest :one
+SELECT id FROM household_quests
+WHERE household_id = $1 AND id = $2
+FOR UPDATE
+`
+
+type LockHouseholdQuestParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	ID          uuid.UUID `json:"id"`
+}
+
+// Locks one quest row of the household for the rest of the transaction,
+// taken in a statement of its own after the caller's member locks. A
+// statement run after it reads the quest's participants in a snapshot that
+// already holds every share, abandon, mark-done or removal of that quest that
+// committed while the lock waited (each takes this row lock), and none can
+// commit under it.
+func (q *Queries) LockHouseholdQuest(ctx context.Context, arg LockHouseholdQuestParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, lockHouseholdQuest, arg.HouseholdID, arg.ID)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
 const lockMemberPendingCompletions = `-- name: LockMemberPendingCompletions :many
 SELECT c.id
 FROM quest_completions c
@@ -858,7 +885,9 @@ type MarkQuestDoneRow struct {
 // joined_at, the lone marker at now. NOW() is one instant per transaction, so
 // completed_at equals the completion's done_at. A quest the member is not on
 // matches no row and writes nothing. No points move here. The caller holds
-// the row locks of every member on the quest.
+// the row locks of every member on the quest and then the quest's row lock
+// (LockHouseholdQuest, a statement of its own), so the participants recorded
+// and cleared here are the committed ones.
 func (q *Queries) MarkQuestDone(ctx context.Context, arg MarkQuestDoneParams) (MarkQuestDoneRow, error) {
 	row := q.db.QueryRow(ctx, markQuestDone,
 		arg.HouseholdID,

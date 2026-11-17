@@ -462,6 +462,15 @@ func (s *QuestService) Share(ctx context.Context, userID, householdID, questID u
 // slipped in between adds a member, and the locks are taken again in order
 // on a fresh pass (a bounded number of times). The acting member removed
 // meanwhile is ErrNotFound; another member removed meanwhile is skipped.
+//
+// Once the members are locked, the quest row is locked too, in a statement
+// of its own (LockHouseholdQuest). The caller's next statement then reads the
+// quest's participants in a snapshot taken after that lock was granted, so a
+// share, abandon or mark-done of the same quest that committed while it
+// waited is seen, and none can commit under it. Counting the members left in
+// the same statement that first waits on the quest row would read them as
+// they stood before such a commit. A quest not in this household locks
+// nothing; the caller's statement then matches no row.
 func lockQuestMembers(ctx context.Context, qtx *db.Queries, householdID, questID, actor uuid.UUID) error {
 	locked := map[uuid.UUID]bool{}
 	for range 3 {
@@ -476,6 +485,9 @@ func lockQuestMembers(ctx context.Context, qtx *db.Queries, householdID, questID
 			}
 		}
 		if !missing {
+			if _, err := qtx.LockHouseholdQuest(ctx, db.LockHouseholdQuestParams{HouseholdID: householdID, ID: questID}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("lock quest: %w", err)
+			}
 			return nil
 		}
 		for _, id := range want {
@@ -722,16 +734,23 @@ func (s *QuestService) Approve(ctx context.Context, userID, householdID, complet
 	if len(members) < 2 {
 		bonus = 0
 	}
+	// Validation keeps points + bonus inside int32; a row that is not (written
+	// around the service) is refused rather than credited a wrapped amount.
+	total64 := int64(split) + int64(bonus)
+	if total64 > math.MaxInt32 {
+		return fail(fmt.Errorf("approve completion %s: award %d exceeds the points range", completionID, total64))
+	}
+	total := int32(total64)
 	credited := make([]ApprovedMember, 0, len(members))
 	bonuses := []ComboBonus{}
 	var marker db.FamilyMember
 	for _, id := range members {
 		if err := qtx.SetCompletionMemberAward(ctx, db.SetCompletionMemberAwardParams{
-			PointsAwarded: pgtype.Int4{Int32: split + bonus, Valid: true}, HouseholdID: householdID, CompletionID: completionID, MemberID: id,
+			PointsAwarded: pgtype.Int4{Int32: total, Valid: true}, HouseholdID: householdID, CompletionID: completionID, MemberID: id,
 		}); err != nil {
 			return fail(fmt.Errorf("record award: %w", err))
 		}
-		member, err := qtx.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: householdID, ID: id, Delta: split + bonus})
+		member, err := qtx.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: householdID, ID: id, Delta: total})
 		if err != nil {
 			return fail(fmt.Errorf("credit points: %w", err))
 		}
@@ -913,6 +932,12 @@ func validateQuest(in QuestInput) (validQuest, error) {
 	}
 	if out.teamworkBonus > 0 && !out.shareable {
 		v.fail("teamwork_bonus", "needs shareable")
+	}
+	// Each member of a shared completion is paid their split (never more
+	// than points) plus the bonus, credited as one int32 amount, so the two
+	// together must fit in it.
+	if int64(out.points)+int64(out.teamworkBonus) > math.MaxInt32 {
+		v.fail("teamwork_bonus", fmt.Sprintf("together with points must not exceed %d", math.MaxInt32))
 	}
 	return out, v.err()
 }

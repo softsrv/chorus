@@ -81,6 +81,17 @@ WHERE household_id = sqlc.arg(household_id) AND id = sqlc.arg(id)
   AND (available_at IS NULL OR available_at <= NOW())
 RETURNING *;
 
+-- name: LockHouseholdQuest :one
+-- Locks one quest row of the household for the rest of the transaction,
+-- taken in a statement of its own after the caller's member locks. A
+-- statement run after it reads the quest's participants in a snapshot that
+-- already holds every share, abandon, mark-done or removal of that quest that
+-- committed while the lock waited (each takes this row lock), and none can
+-- commit under it.
+SELECT id FROM household_quests
+WHERE household_id = sqlc.arg(household_id) AND id = sqlc.arg(id)
+FOR UPDATE;
+
 -- name: AbandonQuest :one
 -- The acting member leaves a quest they hold or are on. Only their part goes:
 -- their participant row. If they held it, the holder of record moves to the
@@ -89,8 +100,11 @@ RETURNING *;
 -- pool, done_at cleared with the holder so the done_at-needs-a-holder CHECK
 -- holds. A quest left with one member is no longer shared, so that member's
 -- participant row goes too. A member not on the quest, or a quest not in
--- this household, matches no row and changes nothing. The quest is locked
--- after the caller's member locks (member first).
+-- this household, matches no row and changes nothing. The caller holds the
+-- member locks and then the quest's row lock (LockHouseholdQuest, a statement
+-- of its own), so the participants counted here are the committed ones: a
+-- concurrent share or abandon of the quest is either in this snapshot or
+-- waits until this transaction ends.
 WITH mine AS (
     SELECT q.household_id, q.id,
            q.claimed_by IS NOT DISTINCT FROM sqlc.arg(member_id)::uuid AS holder,
@@ -341,7 +355,9 @@ WHERE c.household_id = sqlc.arg(household_id) AND c.id = sqlc.arg(id)
 -- joined_at, the lone marker at now. NOW() is one instant per transaction, so
 -- completed_at equals the completion's done_at. A quest the member is not on
 -- matches no row and writes nothing. No points move here. The caller holds
--- the row locks of every member on the quest.
+-- the row locks of every member on the quest and then the quest's row lock
+-- (LockHouseholdQuest, a statement of its own), so the participants recorded
+-- and cleared here are the committed ones.
 WITH done AS (
     UPDATE household_quests q
     SET claimed_by = NULL, claimed_at = NULL,
