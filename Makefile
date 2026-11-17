@@ -8,7 +8,7 @@ export
 .PHONY: dev run build test test-js test-integration test-cover fmt vet lint vulncheck check \
         services-up services-down services-reset \
         daisyui-install tailwind tailwind-watch app \
-        migrate-up migrate-down migrate-create migrate-status migrate-test \
+        migrate-up migrate-down migrate-create migrate-status migrate-test migrate-roundtrip-test \
         sqlc-generate docker-build prod clean
 
 ## ── Development ─────────────────────────────────────────────────────────────
@@ -51,7 +51,7 @@ test-js:
 	node --test web/jstest/quests.test.mjs web/jstest/rewards.test.mjs web/jstest/combos.test.mjs
 
 # Integration tests run against TEST_DATABASE_URL (the chorus_test database).
-test-integration: migrate-test
+test-integration: migrate-test migrate-roundtrip-test
 	go test -race -tags integration -p 1 ./...
 
 test-cover:
@@ -103,6 +103,10 @@ migrate-down:
 
 migrate-test:
 	migrate -path db/migrations -database "$(TEST_DATABASE_URL)" up
+
+migrate-roundtrip-test:
+	go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@latest -path db/migrations -database "$(TEST_DATABASE_URL)" down -all
+	go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@latest -path db/migrations -database "$(TEST_DATABASE_URL)" up
 
 migrate-create:
 	@test -n "$(NAME)" || (echo "Usage: make migrate-create NAME=<name>" && exit 1)
