@@ -167,6 +167,11 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*), COALESCE(MAX(count), 0) FROM member_quest_streaks WHERE household_id = $1 AND member_id = $2 AND quest_id = $3`, h.ID, aliceMember.ID, alicePending.ID).Scan(&aliceStreakRowsBefore, &aliceStreakCountBefore); err != nil {
 		t.Fatalf("get alice streak before outsider attempts: %v", err)
 	}
+	// Alice's own mark-done above started her streak, so the after-check below
+	// compares against a real row and fails if an outsider moves it.
+	if aliceStreakRowsBefore != 1 || aliceStreakCountBefore < 1 {
+		t.Fatalf("alice streak before outsider attempts = %d rows, count %d; want 1 row with count >= 1", aliceStreakRowsBefore, aliceStreakCountBefore)
+	}
 	var malloryStreakRowsBefore int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM member_quest_streaks WHERE household_id = $1`, mh.ID).Scan(&malloryStreakRowsBefore); err != nil || malloryStreakRowsBefore != 0 {
 		t.Fatalf("mallory streak rows before outsider attempts = %d, want 0: %v", malloryStreakRowsBefore, err)
@@ -236,6 +241,32 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	}
 	if rows, err := quests.ListPending(ctx, mallory, mh.ID, ""); err != nil || len(rows) != 0 {
 		t.Errorf("mallory's own pending list shows other households' quests: %+v, %v", rows, err)
+	}
+	// CLM-14: no outsider MarkDone, Approve or Reject moved Alice's streak,
+	// and no streak row landed in (or crossed into) Mallory's household.
+	var aliceStreakRowsAfter, aliceStreakCountAfter int
+	if err := pool.QueryRow(ctx, `SELECT count(*), COALESCE(MAX(count), 0) FROM member_quest_streaks WHERE household_id = $1 AND member_id = $2 AND quest_id = $3`, h.ID, aliceMember.ID, alicePending.ID).Scan(&aliceStreakRowsAfter, &aliceStreakCountAfter); err != nil {
+		t.Fatalf("get alice streak after outsider attempts: %v", err)
+	}
+	if aliceStreakRowsAfter != aliceStreakRowsBefore {
+		t.Errorf("alice streak rows after outsider attempts = %d, want %d (unchanged)", aliceStreakRowsAfter, aliceStreakRowsBefore)
+	}
+	if aliceStreakCountAfter != aliceStreakCountBefore {
+		t.Errorf("alice streak count after outsider attempts = %d, want %d (unchanged)", aliceStreakCountAfter, aliceStreakCountBefore)
+	}
+	var malloryStreakRowsAfter int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM member_quest_streaks WHERE household_id = $1`, mh.ID).Scan(&malloryStreakRowsAfter); err != nil {
+		t.Fatalf("get mallory streak rows after outsider attempts: %v", err)
+	}
+	if malloryStreakRowsAfter != 0 {
+		t.Errorf("mallory household streak rows after outsider attempts = %d, want 0", malloryStreakRowsAfter)
+	}
+	var crossedStreakRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM member_quest_streaks WHERE household_id <> $1 AND (member_id = $2 OR quest_id = $3)`, h.ID, aliceMember.ID, alicePending.ID).Scan(&crossedStreakRows); err != nil {
+		t.Fatalf("get cross-household streak rows: %v", err)
+	}
+	if crossedStreakRows != 0 {
+		t.Errorf("streak rows for alice's member or quest outside her household = %d, want 0", crossedStreakRows)
 	}
 	// Family member and admin-pin isolation checks
 	_, checks["list family members"] = familySvc.List(ctx, mallory, h.ID)
