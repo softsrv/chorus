@@ -811,7 +811,7 @@ async function approvalsCard(h, members, rerender) {
   const act = (verb, q) => action(async () => {
     let res;
     try {
-      const cid = q.completion_id || q.id;
+      const cid = q.completion_id;
       res = await adminRequest('POST', `/households/${h.id}/quest-completions/${cid}/${verb}`, {});
     } catch (err) {
       if (isAdminPinError(err)) { wrongAdminPin(); return; }

@@ -469,6 +469,46 @@ test('CLM-7: approvals card renders completions in order, with name, member poin
   assert.match(text(), /Nothing waiting for approval\./);
 });
 
+test('CLM-12: approvalsCard act() posts with completion_id only and never falls back to quest id', async () => {
+  srv.adminPinSet = true;
+  let items = [
+    { id: 'quest-x1', completion_id: 'comp-y1', quest_id: 'quest-x1', name: 'First chore', points: 3, member_id: 'm-a', member_name: 'Ann', done_at: '2025-01-01T10:00:00Z' },
+    { id: 'quest-x2', completion_id: 'comp-y2', quest_id: 'quest-x2', name: 'Second chore', points: 7, member_id: 'm-b', member_name: 'Ben', done_at: '2025-01-02T10:00:00Z' },
+  ];
+  srv.pending = () => [200, { items }];
+  srv.extra[`POST ${HP}/quest-completions/comp-y1/approve`] = () => {
+    items = items.filter((i) => i.completion_id !== 'comp-y1');
+    return [200, { completion: { id: 'comp-y1', status: 'approved' }, member: srv.members[0], combo_bonuses: [] }];
+  };
+  srv.extra[`POST ${HP}/quest-completions/comp-y2/reject`] = () => {
+    items = items.filter((i) => i.completion_id !== 'comp-y2');
+    return [200, { completion: { id: 'comp-y2', status: 'rejected' } }];
+  };
+  await loadApp();
+  await unlockAdmin('9999');
+
+  const approvals = () => walk(env.$app).find((n) => n.tagName === 'H3' && n.textContent === 'Approvals').parentNode;
+  const lis = () => walk(approvals()).filter((n) => n.tagName === 'LI');
+  assert.equal(lis().length, 2);
+
+  await click(buttons(lis()[0], 'Approve')[0]);
+  const approveCall = actionCalls().at(-1);
+  assert.equal(approveCall.path, `${HP}/quest-completions/comp-y1/approve`);
+  assert.ok(!approveCall.path.includes('quest-x1'), 'approve path must not contain quest id');
+
+  assert.equal(lis().length, 1);
+  await click(buttons(lis()[0], 'Send back')[0]);
+  const rejectCall = actionCalls().at(-1);
+  assert.equal(rejectCall.path, `${HP}/quest-completions/comp-y2/reject`);
+  assert.ok(!rejectCall.path.includes('quest-x2'), 'reject path must not contain quest id');
+
+  for (const c of calls) {
+    assert.ok(!c.path.includes('quest-x1'), 'no call path may contain quest-x1');
+    assert.ok(!c.path.includes('quest-x2'), 'no call path may contain quest-x2');
+  }
+  assert.match(text(), /Nothing waiting for approval\./);
+});
+
 test('CLM-12 guard: an unrefreshable 401 still signs out', async () => {
   await loadApp();
   srv.pending = () => err(401, 'unauthorized', 'Unauthorized.');
