@@ -108,12 +108,26 @@ func TestIntegration_ComboPointsHistory(t *testing.T) {
 		if !comboRow.EarnedAt.Valid || !comboRow.EarnedAt.Time.Equal(questRow.EarnedAt.Time) {
 			t.Fatalf("combo earned_at %v, want the quest entry's %v", comboRow.EarnedAt, questRow.EarnedAt)
 		}
-		var bApprovedAt time.Time
-		if err := w.pool.QueryRow(w.ctx, `SELECT approved_at FROM quest_completions WHERE id = $1`, w.last[b]).Scan(&bApprovedAt); err != nil {
-			t.Fatalf("read approved_at: %v", err)
+		var bDoneAt, bApprovedAt time.Time
+		if err := w.pool.QueryRow(w.ctx, `SELECT done_at, approved_at FROM quest_completions WHERE id = $1`, w.last[b]).Scan(&bDoneAt, &bApprovedAt); err != nil {
+			t.Fatalf("read completion timestamps: %v", err)
+		}
+		loc, err := time.LoadLocation("America/New_York")
+		if err != nil {
+			t.Fatalf("load location America/New_York: %v", err)
+		}
+		doneY, doneM, doneD := bDoneAt.In(loc).Date()
+		apprY, apprM, apprD := bApprovedAt.In(loc).Date()
+		doneDate := time.Date(doneY, doneM, doneD, 0, 0, 0, 0, loc)
+		apprDate := time.Date(apprY, apprM, apprD, 0, 0, 0, 0, loc)
+		if !doneDate.Before(apprDate) {
+			t.Fatalf("done_at date %v not strictly before approved_at date %v in %s", doneDate, apprDate, loc)
 		}
 		if !comboRow.EarnedAt.Time.Equal(bApprovedAt) {
 			t.Fatalf("combo earned_at %v, want approved_at %v", comboRow.EarnedAt.Time, bApprovedAt)
+		}
+		if comboRow.EarnedAt.Time.Equal(bDoneAt) {
+			t.Fatalf("combo earned_at %v equals done_at %v, want approval-dated", comboRow.EarnedAt.Time, bDoneAt)
 		}
 		if m.Points != pointsBefore+sum || w.points(ann) != pointsBefore+15+20 {
 			t.Fatalf("points %d (stored %d), want %d + rows %d = 45", m.Points, w.points(ann), pointsBefore, sum)
