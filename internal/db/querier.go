@@ -26,11 +26,19 @@ type Querier interface {
 	// must match the marker the caller already locked; the caller holds the
 	// locks of every recorded member, so the member set cannot change under it.
 	ApproveCompletion(ctx context.Context, arg ApproveCompletionParams) (ApproveCompletionRow, error)
-	// Cancels every completion of the member still waiting for approval. No
-	// points move. As on reject, a quest whose running cooldown one of those
-	// completions started (the quest's completed_at is its done_at, available_at
+	// Takes a member who is leaving the household off every completion still
+	// waiting for approval. Their quest_completion_members row goes. Where they
+	// marked it done, the marker moves first to the earliest remaining recorded
+	// member (added_at, then member_id), so the item stays listed and
+	// approvable and the marker key is never nulled under it; the rest are paid
+	// as the remaining n at approval. A completion with no recorded member left
+	// (a lone member's, or one recorded before quest sharing) is cancelled. No
+	// points move. As on reject, a quest whose running cooldown a cancelled
+	// completion started (the quest's completed_at is its done_at, available_at
 	// still ahead) is available again right away: the chore was never approved,
-	// so it does not sit resting. Cooldowns started by anyone else stay.
+	// so it does not sit resting. Cooldowns started by anyone else stay. The
+	// completions are locked after the caller's lock on the member row (member
+	// first, the order Approve uses).
 	CancelMemberPendingCompletions(ctx context.Context, arg CancelMemberPendingCompletionsParams) error
 	// Counts one completion per chore of the combo toward the award: for each
 	// chore, the member's earliest approved completion on award_day (household-local) not
@@ -214,8 +222,15 @@ type Querier interface {
 	RejectCompletion(ctx context.Context, arg RejectCompletionParams) (RejectCompletionRow, error)
 	// Re-arms first-sign-in provisioning for a user who has no household left.
 	ReleaseHouseholdProvisioning(ctx context.Context, id uuid.UUID) error
-	// Returns every quest the member holds to the pool. done_at is cleared with
-	// the holder, so the done_at-needs-a-holder CHECK holds. No points move.
+	// Takes a member who is leaving the household off every quest they are on.
+	// Their participant rows go. On a quest they hold, the holder of record
+	// moves to the earliest remaining participant (joined_at, then member_id),
+	// who keeps their joined_at as claimed_at; a quest with no participant left
+	// is returned to the pool, done_at cleared with the holder so the
+	// done_at-needs-a-holder CHECK holds. A quest left with one member is no
+	// longer shared, so that member's participant row goes too. The quests are
+	// locked after the caller's lock on the member row (member first). No
+	// points move.
 	ReleaseMemberQuests(ctx context.Context, arg ReleaseMemberQuestsParams) error
 	RenameFamilyMember(ctx context.Context, arg RenameFamilyMemberParams) (FamilyMember, error)
 	ResetLoginAttempts(ctx context.Context, id uuid.UUID) error

@@ -118,11 +118,39 @@ func (q *Queries) ApproveCompletion(ctx context.Context, arg ApproveCompletionPa
 }
 
 const cancelMemberPendingCompletions = `-- name: CancelMemberPendingCompletions :exec
-WITH cancelled AS (
+WITH mine AS (
+    SELECT c.id, c.household_id,
+           (c.member_id IS NULL OR c.member_id = $1::uuid) AS marker,
+           (SELECT cm.member_id FROM quest_completion_members cm
+            WHERE cm.household_id = c.household_id AND cm.completion_id = c.id
+              AND cm.member_id <> $1::uuid
+            ORDER BY cm.added_at ASC, cm.member_id ASC
+            LIMIT 1) AS next_member
+    FROM quest_completions c
+    WHERE c.household_id = $2 AND c.status = 'pending'
+      AND (c.member_id = $1::uuid OR EXISTS (
+          SELECT 1 FROM quest_completion_members cm
+          WHERE cm.household_id = c.household_id AND cm.completion_id = c.id
+            AND cm.member_id = $1::uuid
+      ))
+    FOR UPDATE OF c
+), left_completions AS (
+    DELETE FROM quest_completion_members cm
+    USING mine m
+    WHERE cm.household_id = m.household_id AND cm.completion_id = m.id
+      AND cm.member_id = $1::uuid
+    RETURNING cm.completion_id
+), handed_over AS (
+    UPDATE quest_completions hc
+    SET member_id = m.next_member
+    FROM mine m
+    WHERE hc.id = m.id AND m.marker AND m.next_member IS NOT NULL
+    RETURNING hc.id
+), cancelled AS (
     UPDATE quest_completions cc
     SET status = 'cancelled'
-    WHERE cc.household_id = $1 AND cc.member_id = $2
-      AND cc.status = 'pending'
+    FROM mine m
+    WHERE cc.id = m.id AND m.marker AND m.next_member IS NULL
     RETURNING cc.household_id, cc.quest_id, cc.done_at
 )
 UPDATE household_quests q
@@ -133,17 +161,25 @@ WHERE q.household_id = c.household_id AND q.id = c.quest_id
 `
 
 type CancelMemberPendingCompletionsParams struct {
-	HouseholdID uuid.UUID  `json:"household_id"`
-	MemberID    *uuid.UUID `json:"member_id"`
+	MemberID    uuid.UUID `json:"member_id"`
+	HouseholdID uuid.UUID `json:"household_id"`
 }
 
-// Cancels every completion of the member still waiting for approval. No
-// points move. As on reject, a quest whose running cooldown one of those
-// completions started (the quest's completed_at is its done_at, available_at
+// Takes a member who is leaving the household off every completion still
+// waiting for approval. Their quest_completion_members row goes. Where they
+// marked it done, the marker moves first to the earliest remaining recorded
+// member (added_at, then member_id), so the item stays listed and
+// approvable and the marker key is never nulled under it; the rest are paid
+// as the remaining n at approval. A completion with no recorded member left
+// (a lone member's, or one recorded before quest sharing) is cancelled. No
+// points move. As on reject, a quest whose running cooldown a cancelled
+// completion started (the quest's completed_at is its done_at, available_at
 // still ahead) is available again right away: the chore was never approved,
-// so it does not sit resting. Cooldowns started by anyone else stay.
+// so it does not sit resting. Cooldowns started by anyone else stay. The
+// completions are locked after the caller's lock on the member row (member
+// first, the order Approve uses).
 func (q *Queries) CancelMemberPendingCompletions(ctx context.Context, arg CancelMemberPendingCompletionsParams) error {
-	_, err := q.db.Exec(ctx, cancelMemberPendingCompletions, arg.HouseholdID, arg.MemberID)
+	_, err := q.db.Exec(ctx, cancelMemberPendingCompletions, arg.MemberID, arg.HouseholdID)
 	return err
 }
 
@@ -793,20 +829,60 @@ func (q *Queries) RejectCompletion(ctx context.Context, arg RejectCompletionPara
 }
 
 const releaseMemberQuests = `-- name: ReleaseMemberQuests :exec
-UPDATE household_quests
-SET claimed_by = NULL, claimed_at = NULL, done_at = NULL, updated_at = NOW()
-WHERE household_id = $1 AND claimed_by = $2
+WITH mine AS (
+    SELECT q.household_id, q.id,
+           q.claimed_by IS NOT DISTINCT FROM $1::uuid AS holder,
+           nxt.member_id AS next_member, nxt.joined_at AS next_joined_at,
+           (SELECT count(*) FROM household_quest_participants r
+            WHERE r.household_id = q.household_id AND r.quest_id = q.id
+              AND r.member_id <> $1::uuid) AS remaining
+    FROM household_quests q
+    LEFT JOIN LATERAL (
+        SELECT p.member_id, p.joined_at FROM household_quest_participants p
+        WHERE p.household_id = q.household_id AND p.quest_id = q.id
+          AND p.member_id <> $1::uuid
+        ORDER BY p.joined_at ASC, p.member_id ASC
+        LIMIT 1
+    ) nxt ON true
+    WHERE q.household_id = $2
+      AND (q.claimed_by = $1::uuid OR EXISTS (
+          SELECT 1 FROM household_quest_participants p
+          WHERE p.household_id = q.household_id AND p.quest_id = q.id
+            AND p.member_id = $1::uuid
+      ))
+    FOR UPDATE OF q
+), left_quests AS (
+    DELETE FROM household_quest_participants p
+    USING mine m
+    WHERE p.household_id = m.household_id AND p.quest_id = m.id
+      AND (p.member_id = $1::uuid OR m.remaining <= 1)
+    RETURNING p.quest_id
+)
+UPDATE household_quests q
+SET claimed_by = m.next_member,
+    claimed_at = CASE WHEN m.next_member IS NULL THEN NULL ELSE m.next_joined_at END,
+    done_at = CASE WHEN m.next_member IS NULL THEN NULL ELSE q.done_at END,
+    updated_at = NOW()
+FROM mine m
+WHERE q.household_id = m.household_id AND q.id = m.id AND m.holder
 `
 
 type ReleaseMemberQuestsParams struct {
-	HouseholdID uuid.UUID  `json:"household_id"`
-	MemberID    *uuid.UUID `json:"member_id"`
+	MemberID    uuid.UUID `json:"member_id"`
+	HouseholdID uuid.UUID `json:"household_id"`
 }
 
-// Returns every quest the member holds to the pool. done_at is cleared with
-// the holder, so the done_at-needs-a-holder CHECK holds. No points move.
+// Takes a member who is leaving the household off every quest they are on.
+// Their participant rows go. On a quest they hold, the holder of record
+// moves to the earliest remaining participant (joined_at, then member_id),
+// who keeps their joined_at as claimed_at; a quest with no participant left
+// is returned to the pool, done_at cleared with the holder so the
+// done_at-needs-a-holder CHECK holds. A quest left with one member is no
+// longer shared, so that member's participant row goes too. The quests are
+// locked after the caller's lock on the member row (member first). No
+// points move.
 func (q *Queries) ReleaseMemberQuests(ctx context.Context, arg ReleaseMemberQuestsParams) error {
-	_, err := q.db.Exec(ctx, releaseMemberQuests, arg.HouseholdID, arg.MemberID)
+	_, err := q.db.Exec(ctx, releaseMemberQuests, arg.MemberID, arg.HouseholdID)
 	return err
 }
 

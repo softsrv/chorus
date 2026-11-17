@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -127,7 +128,7 @@ func TestIntegration_QuestCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get after invalid update: %v", err)
 	}
-	if beforeInvalidUpdate != afterInvalidUpdate {
+	if !reflect.DeepEqual(beforeInvalidUpdate, afterInvalidUpdate) {
 		t.Fatalf("row changed after rejected update: %+v -> %+v", beforeInvalidUpdate, afterInvalidUpdate)
 	}
 
@@ -1090,11 +1091,19 @@ func TestIntegration_QuestApproval(t *testing.T) {
 		soloRows[0].MemberName != "Ben" || soloRows[0].Points != 100 {
 		t.Fatalf("pending unshared shareable completion: %+v", soloRows)
 	}
+	if m := soloRows[0].Members; len(m) != 1 || m[0].MemberID != ben.ID || m[0].Name != "Ben" || m[0].Award != 100 ||
+		soloRows[0].TeamworkBonus != 0 {
+		t.Errorf("pending unshared shareable members: %+v bonus %d, want Ben alone with 100 and no bonus", m, soloRows[0].TeamworkBonus)
+	}
 	benBeforeSolo := points(ben.ID)
 	annBeforeSolo := points(ann.ID)
-	soloComp, soloMember, soloBonuses, _, err := quests.Approve(ctx, alice, h.ID, soloRows[0].ID, "")
+	soloComp, soloMember, soloBonuses, soloApproved, err := quests.Approve(ctx, alice, h.ID, soloRows[0].ID, "")
 	if err != nil {
 		t.Fatalf("approve unshared shareable completion: %v", err)
+	}
+	if len(soloApproved) != 1 || soloApproved[0].Member.ID != ben.ID || soloApproved[0].PointsAwarded != 100 ||
+		soloApproved[0].TeamworkBonus != 0 {
+		t.Errorf("approved members of unshared shareable completion: %+v, want Ben alone with 100 and no bonus", soloApproved)
 	}
 	if soloComp.Status != "approved" || soloComp.MemberID == nil || *soloComp.MemberID != ben.ID {
 		t.Errorf("approved unshared shareable completion: %+v", soloComp)

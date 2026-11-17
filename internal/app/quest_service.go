@@ -125,18 +125,26 @@ func splitPoints(points int32, n int) int32 {
 	return int32((int64(points) + int64(n) - 1) / int64(n))
 }
 
-// releaseMemberQuests returns every quest the member holds to the household's
-// pool and cancels the member's completions still waiting for approval. It is
-// the one place that clears a quest's holder when a member goes; qtx is the
-// caller's transaction, so the release commits or rolls back with the
-// removal. No points move. A quest resting on a cooldown that one of the
-// cancelled completions started is available again right away, as on reject;
-// every other cooldown stays.
+// releaseMemberQuests takes a member who is leaving the household off every
+// quest and every completion waiting for approval. It is the one place that
+// clears or moves a quest's holder when a member goes; qtx is the caller's
+// transaction, which already holds the member's row lock (member first, then
+// quests and completions, the order the quest actions and Approve use), so the
+// release commits or rolls back with the removal. No points move.
+//
+// Only the member's own part goes: their participant and completion-member
+// rows. A shared quest they held passes to the earliest remaining
+// participant and is released only when nobody is left; a shared completion
+// they marked done passes to the earliest remaining recorded member, stays
+// listed and is paid at approval as the remaining n. A quest or completion
+// that was theirs alone is released or cancelled as before, and a quest
+// resting on a cooldown that a cancelled completion started is available
+// again right away, as on reject; every other cooldown stays.
 func releaseMemberQuests(ctx context.Context, qtx *db.Queries, householdID, memberID uuid.UUID) error {
-	if err := qtx.ReleaseMemberQuests(ctx, db.ReleaseMemberQuestsParams{HouseholdID: householdID, MemberID: &memberID}); err != nil {
+	if err := qtx.ReleaseMemberQuests(ctx, db.ReleaseMemberQuestsParams{HouseholdID: householdID, MemberID: memberID}); err != nil {
 		return fmt.Errorf("release member quests: %w", err)
 	}
-	if err := qtx.CancelMemberPendingCompletions(ctx, db.CancelMemberPendingCompletionsParams{HouseholdID: householdID, MemberID: &memberID}); err != nil {
+	if err := qtx.CancelMemberPendingCompletions(ctx, db.CancelMemberPendingCompletionsParams{HouseholdID: householdID, MemberID: memberID}); err != nil {
 		return fmt.Errorf("cancel member completions: %w", err)
 	}
 	return nil
