@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/softsrv/chorus/internal/app"
@@ -445,6 +447,54 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		t.Errorf("wrong member and admin PIN points history returned rows: %+v", wrongHist2)
 	}
 
+	// A DB fault inside PIN verification (after getHousehold and the member
+	// lookup succeed) is returned wrapped, not reported as ErrWrongPIN.
+	// (a) Member path: PointsHistory reads GetFamilyMember once for the
+	// existence check; the 2nd read is VerifyMemberPin's pin_hash read.
+	memberFault := &faultDBTX{inner: pool, query: "GetFamilyMember", failOnCall: 2}
+	memberFaultSvc := app.NewFamilyService(db.New(memberFault), pool, 10)
+	nonPinHist, err := memberFaultSvc.PointsHistory(ctx, alice, h.ID, aliceMember.ID, "1234", "", 50, 0)
+	if memberFault.calls < 2 {
+		t.Fatalf("member-path fault never reached VerifyMemberPin: %d GetFamilyMember calls, err %v", memberFault.calls, err)
+	}
+	if err == nil {
+		t.Errorf("PointsHistory with member verify fault: expected error, got nil")
+	} else if errors.Is(err, app.ErrWrongPIN) {
+		t.Errorf("PointsHistory with member verify fault returned ErrWrongPIN: %v", err)
+	}
+	if !errors.Is(err, errInjected) {
+		t.Errorf("PointsHistory with member verify fault: want wrapped injected error, got %v", err)
+	}
+	if len(nonPinHist) != 0 {
+		t.Errorf("PointsHistory with member verify fault returned rows: %+v", nonPinHist)
+	}
+
+	// (b) Admin path: wrong member PIN, then the admin PIN check hits a fault
+	// reading the household's admin PIN.
+	if err := familySvc.SetAdminPin(ctx, alice, h.ID, "5555", ""); err != nil {
+		t.Fatalf("SetAdminPin for admin-path fault: %v", err)
+	}
+	adminFault := &faultDBTX{inner: pool, query: "GetAdminPin", failOnCall: 1}
+	adminFaultSvc := app.NewFamilyService(db.New(adminFault), pool, 10)
+	nonPinAdminHist, err := adminFaultSvc.PointsHistory(ctx, alice, h.ID, aliceMember.ID, "0000", "5555", 50, 0)
+	if adminFault.calls < 1 {
+		t.Fatalf("admin-path fault never reached VerifyAdminPin: err %v", err)
+	}
+	if err == nil {
+		t.Errorf("PointsHistory with admin verify fault: expected error, got nil")
+	} else if errors.Is(err, app.ErrWrongPIN) {
+		t.Errorf("PointsHistory with admin verify fault returned ErrWrongPIN: %v", err)
+	}
+	if !errors.Is(err, errInjected) {
+		t.Errorf("PointsHistory with admin verify fault: want wrapped injected error, got %v", err)
+	}
+	if len(nonPinAdminHist) != 0 {
+		t.Errorf("PointsHistory with admin verify fault returned rows: %+v", nonPinAdminHist)
+	}
+	if err := familySvc.ClearAdminPin(ctx, alice, h.ID, "5555"); err != nil {
+		t.Fatalf("ClearAdminPin after admin-path fault: %v", err)
+	}
+
 	// Bob's history in household B is separate.
 	bobHist, err := familySvc.PointsHistory(ctx, bob, bh.ID, bobMember.ID, "4321", "", 50, 0)
 	if err != nil {
@@ -633,3 +683,50 @@ func TestIntegration_DeleteAccountDeletesHousehold(t *testing.T) {
 		t.Errorf("user still exists: count = %d, want 0", userCount)
 	}
 }
+
+// errInjected is the fault faultDBTX returns for its targeted query.
+var errInjected = errors.New("injected db fault")
+
+// faultDBTX delegates every call to the real pool, except the failOnCall-th
+// run of the sqlc query named query, which fails with errInjected. It injects
+// a DB fault at one point; it mocks nothing about the service under test.
+type faultDBTX struct {
+	inner      db.DBTX
+	query      string // sqlc query name, e.g. "GetAdminPin"
+	failOnCall int
+	calls      int
+}
+
+func (f *faultDBTX) hit(sql string) bool {
+	if !strings.HasPrefix(sql, "-- name: "+f.query+" :") {
+		return false
+	}
+	f.calls++
+	return f.calls == f.failOnCall
+}
+
+func (f *faultDBTX) Exec(ctx context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error) {
+	if f.hit(sql) {
+		return pgconn.CommandTag{}, errInjected
+	}
+	return f.inner.Exec(ctx, sql, args...)
+}
+
+func (f *faultDBTX) Query(ctx context.Context, sql string, args ...interface{}) (pgx.Rows, error) {
+	if f.hit(sql) {
+		return nil, errInjected
+	}
+	return f.inner.Query(ctx, sql, args...)
+}
+
+func (f *faultDBTX) QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row {
+	if f.hit(sql) {
+		return errRow{}
+	}
+	return f.inner.QueryRow(ctx, sql, args...)
+}
+
+// errRow is a pgx.Row whose Scan fails with errInjected.
+type errRow struct{}
+
+func (errRow) Scan(...any) error { return errInjected }

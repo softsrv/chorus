@@ -137,11 +137,18 @@ func (s *FamilyService) PointsHistory(ctx context.Context, userID, householdID, 
 	}
 
 	authorized := false
-	if _, err := VerifyMemberPin(ctx, s.q, householdID, memberID, memberPin); err == nil {
+	_, memberErr := VerifyMemberPin(ctx, s.q, householdID, memberID, memberPin)
+	if memberErr == nil {
 		authorized = true
-	} else if adminPin != "" {
-		if err := s.VerifyAdminPin(ctx, userID, householdID, adminPin); err == nil {
+	} else if !errors.Is(memberErr, ErrWrongPIN) {
+		return nil, fmt.Errorf("verify member pin: %w", memberErr)
+	}
+
+	if !authorized && adminPin != "" {
+		if adminErr := s.VerifyAdminPin(ctx, userID, householdID, adminPin); adminErr == nil {
 			authorized = true
+		} else if !errors.Is(adminErr, ErrWrongPIN) {
+			return nil, fmt.Errorf("verify admin pin: %w", adminErr)
 		}
 	}
 

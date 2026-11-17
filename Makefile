@@ -14,9 +14,10 @@ export
 ## ── Development ─────────────────────────────────────────────────────────────
 
 # Full hot-reload: Postgres + smtp4dev, migrate, then the app container (air
-# watching the bind-mounted source) + Tailwind watch on the host.
+# watching the bind-mounted source) detached, + Tailwind watch on the host.
 dev: services-up migrate-up tailwind
-	$(MAKE) -j2 app tailwind-watch
+	docker compose up -d --build app
+	$(MAKE) tailwind-watch
 
 # Postgres + smtp4dev only (the app container is started by dev/run).
 services-up:
