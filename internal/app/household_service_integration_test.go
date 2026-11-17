@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -131,6 +132,37 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	_, checks["accept quest as own member"] = quests.Accept(ctx, mallory, h.ID, aliceQuest.ID, app.MemberAction{MemberID: malloryMember.ID})
 	_, checks["accept quest via own household with alice's member"] = quests.Accept(ctx, mallory, mh.ID, aliceQuest.ID, app.MemberAction{MemberID: aliceMember.ID, PIN: "1234"})
 	_, checks["accept quest via own household"] = quests.Accept(ctx, mallory, mh.ID, aliceQuest.ID, app.MemberAction{MemberID: malloryMember.ID})
+	// Sharing: Alice's member holds a shareable quest. An outsider cannot share
+	// it, it cannot be shared to another household's member or an unknown id,
+	// and it cannot be reached through Mallory's own household.
+	aliceShareable, err := quests.Create(ctx, alice, h.ID, app.QuestInput{
+		Name: "Sweep", Points: num(100), Shareable: true, TeamworkBonus: num(20),
+	}, "")
+	if err != nil {
+		t.Fatalf("Create shareable quest: %v", err)
+	}
+	if _, err := quests.Accept(ctx, alice, h.ID, aliceShareable.ID, app.MemberAction{MemberID: aliceMember.ID, PIN: "1234"}); err != nil {
+		t.Fatalf("Accept shareable quest: %v", err)
+	}
+	aliceKid, err := familySvc.Create(ctx, alice, h.ID, app.FamilyMemberInput{Name: "Alice Kid"}, "")
+	if err != nil {
+		t.Fatalf("Create alice kid: %v", err)
+	}
+	malloryMember2, err := familySvc.Create(ctx, mallory, mh.ID, app.FamilyMemberInput{Name: "Mallory Member 2"}, "")
+	if err != nil {
+		t.Fatalf("Create mallory member 2: %v", err)
+	}
+	unknownMemberID, err := uuid.NewV7()
+	if err != nil {
+		t.Fatalf("new uuid: %v", err)
+	}
+	shareActor := app.MemberAction{MemberID: aliceMember.ID, PIN: "1234"}
+	_, checks["share quest"] = quests.Share(ctx, mallory, h.ID, aliceShareable.ID, shareActor, app.MemberAction{MemberID: aliceKid.ID})
+	_, checks["share quest as own member"] = quests.Share(ctx, mallory, h.ID, aliceShareable.ID, app.MemberAction{MemberID: malloryMember.ID}, app.MemberAction{MemberID: aliceKid.ID})
+	_, checks["share quest to another household's member"] = quests.Share(ctx, alice, h.ID, aliceShareable.ID, shareActor, app.MemberAction{MemberID: malloryMember.ID})
+	_, checks["share quest to unknown member"] = quests.Share(ctx, alice, h.ID, aliceShareable.ID, shareActor, app.MemberAction{MemberID: unknownMemberID})
+	_, checks["share quest via own household"] = quests.Share(ctx, mallory, mh.ID, aliceShareable.ID, app.MemberAction{MemberID: malloryMember.ID}, app.MemberAction{MemberID: malloryMember2.ID})
+	_, checks["share quest via own household with alice's members"] = quests.Share(ctx, mallory, mh.ID, aliceShareable.ID, shareActor, app.MemberAction{MemberID: aliceKid.ID})
 	// Alice's member takes a second quest and marks it done, so an outsider
 	// has a pending quest to try to approve, send back, abandon or list.
 	alicePending, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "Laundry", Points: num(4)}, "")
@@ -330,8 +362,38 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		got.RepeatDays != 1 || got.Notes != "Wash and dry" || got.ClaimedBy != nil || got.ClaimedAt.Valid {
 		t.Errorf("alice's quest was modified: %+v, %v", got, err)
 	}
-	if list, _, err := quests.List(ctx, alice, h.ID, app.QuestPage{Limit: 10}); err != nil || len(list) != 3 {
-		t.Errorf("alice's quests after outsider attempts: %d, %v; want exactly 3 (no smuggled create or copy)", len(list), err)
+	if list, _, err := quests.List(ctx, alice, h.ID, app.QuestPage{Limit: 10}); err != nil || len(list) != 4 {
+		t.Errorf("alice's quests after outsider attempts: %d, %v; want exactly 4 (no smuggled create or copy)", len(list), err)
+	}
+	// Every refused share left Alice's shareable quest unshared and still hers.
+	if got, err := quests.Get(ctx, alice, h.ID, aliceShareable.ID); err != nil || got.Shared() || len(got.Participants) > 1 ||
+		got.ClaimedBy == nil || *got.ClaimedBy != aliceMember.ID {
+		t.Errorf("alice's shareable quest changed by refused shares: %+v, %v; want unshared, held by alice's member", got, err)
+	}
+	var shareRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM household_quest_participants WHERE quest_id = $1`, aliceShareable.ID).Scan(&shareRows); err != nil || shareRows != 0 {
+		t.Errorf("participant rows after refused shares = %d, %v; want 0", shareRows, err)
+	}
+	// Positive control: the same share inside Alice's household succeeds, and
+	// the quest's participants are Alice's members only.
+	shared, err := quests.Share(ctx, alice, h.ID, aliceShareable.ID, shareActor, app.MemberAction{MemberID: aliceKid.ID})
+	if err != nil || !shared.Shared() || len(shared.Participants) != 2 ||
+		!slices.Contains(shared.Participants, aliceMember.ID) || !slices.Contains(shared.Participants, aliceKid.ID) {
+		t.Fatalf("alice shares with her kid = %+v, %v; want participants alice member and alice kid", shared, err)
+	}
+	if list, _, err := quests.List(ctx, alice, h.ID, app.QuestPage{Limit: 10}); err == nil {
+		for _, q := range list {
+			for _, p := range q.Participants {
+				if p == malloryMember.ID || p == malloryMember2.ID {
+					t.Errorf("alice's quest %s lists mallory's member %s as a participant", q.ID, p)
+				}
+			}
+		}
+	} else {
+		t.Errorf("alice's quest list after share: %v", err)
+	}
+	if rows, _, err := quests.List(ctx, mallory, mh.ID, app.QuestPage{Limit: 10}); err != nil || len(rows) != 0 {
+		t.Errorf("mallory's own quest list shows other households' quests: %+v, %v", rows, err)
 	}
 	if rows, err := quests.ListPending(ctx, alice, h.ID, ""); err != nil || len(rows) != 1 || rows[0].QuestID != alicePending.ID ||
 		rows[0].MemberID != aliceMember.ID {
