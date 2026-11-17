@@ -470,8 +470,14 @@ func TestAPI_EndToEnd(t *testing.T) {
 	shareErr = apiError{}
 	s.expect(http.StatusForbidden, "POST", sq+"/share", parent.AccessToken,
 		map[string]any{"member_id": member.ID, "pin": "4321", "target_member_id": member2.ID, "target_pin": "0000"}, &shareErr)
-	if shareErr.Error.Code != "wrong_pin" {
-		t.Errorf("share with wrong target pin: code %q, want wrong_pin", shareErr.Error.Code)
+	if shareErr.Error.Code != "wrong_pin" || shareErr.Error.Fields["target_pin"] == "" {
+		t.Errorf("share with wrong target pin: %+v, want wrong_pin with a target_pin field", shareErr)
+	}
+	shareErr = apiError{}
+	s.expect(http.StatusForbidden, "POST", sq+"/share", parent.AccessToken,
+		map[string]any{"member_id": member.ID, "pin": "0000", "target_member_id": member2.ID, "target_pin": ""}, &shareErr)
+	if shareErr.Error.Code != "wrong_pin" || len(shareErr.Error.Fields) != 0 {
+		t.Errorf("share with wrong sharer pin: %+v, want wrong_pin with no fields", shareErr)
 	}
 	s.expect(http.StatusNotFound, "POST", sq+"/share", parent.AccessToken,
 		map[string]any{"member_id": member.ID, "pin": "4321", "target_member_id": uuid.New()}, nil)

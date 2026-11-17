@@ -272,6 +272,10 @@ func TestIntegration_QuestSharing(t *testing.T) {
 		}
 		if _, err := quests.Share(ctx, admin, hid, c.quest, c.act, c.target); !errors.Is(err, c.want) {
 			t.Errorf("%s: %v, want %v", c.name, err, c.want)
+		} else if c.want == app.ErrWrongPIN && errors.Is(err, app.ErrWrongTargetPIN) != (c.act.MemberID == ann && c.act.PIN == annAct.PIN) {
+			// Whose PIN failed is told apart: the target's is ErrWrongTargetPIN,
+			// the sharer's is not.
+			t.Errorf("%s: %v, ErrWrongTargetPIN only for the target's PIN", c.name, err)
 		}
 	}
 	if n := participantRows(t, pool, shared.ID); n != 0 {

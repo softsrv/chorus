@@ -25,6 +25,10 @@ var (
 	ErrNotFound = errors.New("not found")
 	// ErrWrongPIN is returned when a member PIN or admin PIN does not match.
 	ErrWrongPIN = errors.New("wrong PIN")
+	// ErrWrongTargetPIN is a wrong PIN for the member a quest is being shared
+	// with, not the acting member. It is also ErrWrongPIN, so callers that do
+	// not care whose PIN failed see it as one.
+	ErrWrongTargetPIN = fmt.Errorf("target member: %w", ErrWrongPIN)
 	// ErrAdminPinRequired is returned when an admin PIN is set on the household
 	// but was not provided in the request.
 	ErrAdminPinRequired = errors.New("admin PIN is required")

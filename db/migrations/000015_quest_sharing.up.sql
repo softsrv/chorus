@@ -33,7 +33,10 @@ CREATE INDEX idx_household_quest_participants_member
     ON household_quest_participants (household_id, member_id);
 
 -- 3. Every member a shared completion covers. quest_completions.member_id
---    stays the member who marked it done. points_awarded is set when the
+--    is the member who marked it done; if that member is removed while the
+--    completion is pending, it moves to the earliest remaining recorded
+--    member (it is nulled only when no recorded member is left, and the
+--    completion is then cancelled). points_awarded is set when the
 --    completion is approved. added_at, ties broken by member_id, orders
 --    "earliest remaining member".
 ALTER TABLE quest_completions

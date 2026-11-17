@@ -1151,6 +1151,127 @@ func TestIntegration_RemoveMemberRacesQuestActions(t *testing.T) {
 		}
 	})
 
+	// A share that commits while the removal of another participant waits
+	// on the quest must be counted by the removal: the holder keeps their
+	// participant row, and the new member is on the quest with them.
+	t.Run("a share committing during the removal of a participant keeps the holder and the new member", func(t *testing.T) {
+		mk := func(name string) uuid.UUID {
+			t.Helper()
+			m, err := familySvc.Create(ctx, admin, h.ID, app.FamilyMemberInput{Name: name}, "")
+			if err != nil {
+				t.Fatalf("create %s: %v", name, err)
+			}
+			return m.ID
+		}
+		holder, leaver, joiner := mk("Holder"), mk("Leaver"), mk("Joiner")
+		sq, err := quests.Create(ctx, admin, h.ID, app.QuestInput{Name: "Shared race", Points: num(10), Shareable: true, TeamworkBonus: num(2)}, "")
+		if err != nil {
+			t.Fatalf("create shareable quest: %v", err)
+		}
+		holderAct := app.MemberAction{MemberID: holder}
+		if _, err := quests.Accept(ctx, admin, h.ID, sq.ID, holderAct); err != nil {
+			t.Fatalf("holder accept: %v", err)
+		}
+		if _, err := quests.Share(ctx, admin, h.ID, sq.ID, holderAct, app.MemberAction{MemberID: leaver}); err != nil {
+			t.Fatalf("share with leaver: %v", err)
+		}
+
+		// The holder's share to the joiner, written and held uncommitted with
+		// the locks Share takes (both member rows, then the quest row).
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+		qtx := q.WithTx(tx)
+		for _, id := range []uuid.UUID{holder, joiner} {
+			if _, err := qtx.LockFamilyMember(ctx, db.LockFamilyMemberParams{HouseholdID: h.ID, ID: id}); err != nil {
+				t.Fatalf("lock member: %v", err)
+			}
+		}
+		added, err := qtx.ShareQuest(ctx, db.ShareQuestParams{HouseholdID: h.ID, ID: sq.ID, MemberID: holder, TargetMemberID: joiner})
+		if err != nil || len(added) == 0 {
+			t.Fatalf("share with joiner: %v %v", added, err)
+		}
+
+		removeErr := make(chan error, 1)
+		go func() { removeErr <- familySvc.Remove(ctx, admin, h.ID, leaver, "") }()
+		waitForLockWait(t, pool)
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit share: %v", err)
+		}
+		if err := <-removeErr; err != nil {
+			t.Fatalf("Remove: %v", err)
+		}
+
+		got, err := quests.Get(ctx, admin, h.ID, sq.ID)
+		if err != nil {
+			t.Fatalf("get quest: %v", err)
+		}
+		want := []uuid.UUID{holder, joiner}
+		slices.SortFunc(want, func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
+		gotIDs := slices.Clone(got.Participants)
+		slices.SortFunc(gotIDs, func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
+		if !slices.Equal(gotIDs, want) || got.ClaimedBy == nil || *got.ClaimedBy != holder {
+			t.Errorf("after the removal: participants %v claimed_by %v, want %v held by %v", got.Participants, got.ClaimedBy, want, holder)
+		}
+	})
+
+	// Remove and Share run at once, many times: whichever lands first, the
+	// quest stays held by the holder, the holder is on it whenever it is
+	// shared, and a shared quest has at least two members.
+	t.Run("remove of a participant against share", func(t *testing.T) {
+		for round := range 10 {
+			mk := func(name string) uuid.UUID {
+				t.Helper()
+				m, err := familySvc.Create(ctx, admin, h.ID, app.FamilyMemberInput{Name: name}, "")
+				if err != nil {
+					t.Fatalf("round %d: create %s: %v", round, name, err)
+				}
+				return m.ID
+			}
+			holder, leaver, joiner := mk("Holder"), mk("Leaver"), mk("Joiner")
+			sq, err := quests.Create(ctx, admin, h.ID, app.QuestInput{Name: "Shared race", Points: num(10), Shareable: true}, "")
+			if err != nil {
+				t.Fatalf("round %d: create quest: %v", round, err)
+			}
+			holderAct := app.MemberAction{MemberID: holder}
+			if _, err := quests.Accept(ctx, admin, h.ID, sq.ID, holderAct); err != nil {
+				t.Fatalf("round %d: accept: %v", round, err)
+			}
+			if _, err := quests.Share(ctx, admin, h.ID, sq.ID, holderAct, app.MemberAction{MemberID: leaver}); err != nil {
+				t.Fatalf("round %d: share with leaver: %v", round, err)
+			}
+			var wg sync.WaitGroup
+			var shareErr, removeErr error
+			start := make(chan struct{})
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				<-start
+				_, shareErr = quests.Share(ctx, admin, h.ID, sq.ID, holderAct, app.MemberAction{MemberID: joiner})
+			}()
+			go func() {
+				defer wg.Done()
+				<-start
+				removeErr = familySvc.Remove(ctx, admin, h.ID, leaver, "")
+			}()
+			close(start)
+			wg.Wait()
+			if removeErr != nil || shareErr != nil {
+				t.Fatalf("round %d: remove %v, share %v", round, removeErr, shareErr)
+			}
+			got, err := quests.Get(ctx, admin, h.ID, sq.ID)
+			if err != nil {
+				t.Fatalf("round %d: get: %v", round, err)
+			}
+			if got.ClaimedBy == nil || *got.ClaimedBy != holder || len(got.Participants) != 2 ||
+				!slices.Contains(got.Participants, holder) || !slices.Contains(got.Participants, joiner) {
+				t.Fatalf("round %d: participants %v claimed_by %v, want holder %v and joiner %v", round, got.Participants, got.ClaimedBy, holder, joiner)
+			}
+		}
+	})
+
 	t.Run("concurrent accepts and mark-done against remove", func(t *testing.T) {
 		const rounds, accepts = 10, 4
 		for round := range rounds {

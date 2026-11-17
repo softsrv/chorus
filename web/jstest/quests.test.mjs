@@ -824,6 +824,41 @@ test('sharing CLM-6: Share on the holder\'s shareable quest picks a member not o
   noInlineStyle();
 });
 
+test('sharing CLM-6 / 1.1/5: a wrong PIN for the sharer (no target_pin field) clears the active member as on accept, even after the target typed their PIN', async () => {
+  srv.quests = [quest({ id: 'q1', name: 'Clean the living room', available: false, claimed_by: 'm-a', shareable: true, teamwork_bonus: 20 })];
+  srv.extra[`POST ${HP}/quests/q1/share`] = () => err(403, 'wrong_pin', 'Wrong PIN.');
+  await loadApp();
+  await becomeAnn();
+  const rowOf = () => walk(env.$app).find((n) => n.tagName === 'LI' && n.textContent.startsWith('Clean the living room'));
+  await click(buttons(rowOf(), 'Share')[0]);
+  const picker = walk(env.$app).find((n) => n.className === 'font-semibold' && n.textContent === 'Share Clean the living room with').parentNode;
+  await click(buttons(picker, 'Ben')[0]);
+  const $pin = walk(env.$app).find((n) => n.tagName === 'INPUT' && n.name === 'pin');
+  $pin.value = '5678';
+  await submit($pin.parentNode.parentNode);
+  assert.match(text(), /Choose a family member to take quests\./);
+  assert.match(document.body.textContent, /That PIN is no longer correct\. Pick the member again\./);
+  assert.doesNotMatch(text(), /Wrong PIN\. Try again\./);
+  assert.equal(signedOut, 0);
+});
+
+test('sharing CLM-6 / 1.1/5: a wrong target PIN (fields.target_pin) stays on the target\'s PIN form and keeps the active member', async () => {
+  srv.quests = [quest({ id: 'q1', name: 'Clean the living room', available: false, claimed_by: 'm-a', shareable: true, teamwork_bonus: 20 })];
+  srv.extra[`POST ${HP}/quests/q1/share`] = () => [403, { error: { code: 'wrong_pin', message: 'Wrong PIN.', fields: { target_pin: 'is wrong' } } }];
+  await loadApp();
+  await becomeAnn();
+  const rowOf = () => walk(env.$app).find((n) => n.tagName === 'LI' && n.textContent.startsWith('Clean the living room'));
+  await click(buttons(rowOf(), 'Share')[0]);
+  const picker = walk(env.$app).find((n) => n.className === 'font-semibold' && n.textContent === 'Share Clean the living room with').parentNode;
+  await click(buttons(picker, 'Ben')[0]);
+  const $pin = walk(env.$app).find((n) => n.tagName === 'INPUT' && n.name === 'pin');
+  $pin.value = '5678';
+  await submit($pin.parentNode.parentNode);
+  assert.match(text(), /Wrong PIN\. Try again\./);
+  assert.match(text(), /Ben enters their PIN to accept/);
+  assert.doesNotMatch(text(), /Choose a family member to take quests\./);
+});
+
 test('sharing CLM-6: no Share on a quest that is not shareable, one held by someone else, or when nobody is left to share with', async () => {
   srv.quests = [
     quest({ id: 'q1', name: 'Take out trash', available: false, claimed_by: 'm-a' }),

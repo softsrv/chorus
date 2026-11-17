@@ -683,6 +683,92 @@ func (q *Queries) ListQuestParticipants(ctx context.Context, arg ListQuestPartic
 	return items, nil
 }
 
+const lockMemberPendingCompletions = `-- name: LockMemberPendingCompletions :many
+SELECT c.id
+FROM quest_completions c
+WHERE c.household_id = $1 AND c.status = 'pending'
+  AND (c.member_id = $2::uuid OR EXISTS (
+      SELECT 1 FROM quest_completion_members cm
+      WHERE cm.household_id = c.household_id AND cm.completion_id = c.id
+        AND cm.member_id = $2::uuid
+  ))
+ORDER BY c.id
+FOR UPDATE OF c
+`
+
+type LockMemberPendingCompletionsParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	MemberID    uuid.UUID `json:"member_id"`
+}
+
+// Locks, in id order, every pending completion of the household that the
+// member marked done or is recorded on, before CancelMemberPendingCompletions
+// reads them, so its earliest remaining member is read after any concurrent
+// removal of another member on the same completion has committed.
+func (q *Queries) LockMemberPendingCompletions(ctx context.Context, arg LockMemberPendingCompletionsParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, lockMemberPendingCompletions, arg.HouseholdID, arg.MemberID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockMemberQuests = `-- name: LockMemberQuests :many
+SELECT q.id
+FROM household_quests q
+WHERE q.household_id = $1
+  AND (q.claimed_by = $2::uuid OR EXISTS (
+      SELECT 1 FROM household_quest_participants p
+      WHERE p.household_id = q.household_id AND p.quest_id = q.id
+        AND p.member_id = $2::uuid
+  ))
+ORDER BY q.id
+FOR UPDATE OF q
+`
+
+type LockMemberQuestsParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	MemberID    uuid.UUID `json:"member_id"`
+}
+
+// Locks, in id order, every quest of the household that the member holds or
+// is on, before ReleaseMemberQuests reads them. ReleaseMemberQuests counts
+// the members left on each quest; it runs as a statement of its own after
+// this lock, so its snapshot already holds every share, abandon or mark-done
+// that committed while the lock waited (each takes the quest row lock), and
+// none can commit under it.
+func (q *Queries) LockMemberQuests(ctx context.Context, arg LockMemberQuestsParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, lockMemberQuests, arg.HouseholdID, arg.MemberID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markQuestDone = `-- name: MarkQuestDone :one
 WITH done AS (
     UPDATE household_quests q
@@ -917,6 +1003,8 @@ type ReleaseMemberQuestsParams struct {
 }
 
 // Takes a member who is leaving the household off every quest they are on.
+// The caller has locked those quests first (LockMemberQuests), so the
+// members counted here are the ones committed on each quest.
 // Their participant rows go. On a quest they hold, the holder of record
 // moves to the earliest remaining participant (joined_at, then member_id),
 // who keeps their joined_at as claimed_at; a quest with no participant left

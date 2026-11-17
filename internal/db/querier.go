@@ -206,6 +206,18 @@ type Querier interface {
 	// with the key-share lock a foreign-key check takes, so rows that would point
 	// at this member wait until the transaction ends.
 	LockFamilyMember(ctx context.Context, arg LockFamilyMemberParams) (uuid.UUID, error)
+	// Locks, in id order, every pending completion of the household that the
+	// member marked done or is recorded on, before CancelMemberPendingCompletions
+	// reads them, so its earliest remaining member is read after any concurrent
+	// removal of another member on the same completion has committed.
+	LockMemberPendingCompletions(ctx context.Context, arg LockMemberPendingCompletionsParams) ([]uuid.UUID, error)
+	// Locks, in id order, every quest of the household that the member holds or
+	// is on, before ReleaseMemberQuests reads them. ReleaseMemberQuests counts
+	// the members left on each quest; it runs as a statement of its own after
+	// this lock, so its snapshot already holds every share, abandon or mark-done
+	// that committed while the lock waited (each takes the quest row lock), and
+	// none can commit under it.
+	LockMemberQuests(ctx context.Context, arg LockMemberQuestsParams) ([]uuid.UUID, error)
 	LockUserProvisioning(ctx context.Context, id uuid.UUID) (pgtype.Timestamptz, error)
 	MarkGoogleCalendarConnectionBroken(ctx context.Context, userID uuid.UUID) (int64, error)
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
@@ -238,6 +250,8 @@ type Querier interface {
 	// Re-arms first-sign-in provisioning for a user who has no household left.
 	ReleaseHouseholdProvisioning(ctx context.Context, id uuid.UUID) error
 	// Takes a member who is leaving the household off every quest they are on.
+	// The caller has locked those quests first (LockMemberQuests), so the
+	// members counted here are the ones committed on each quest.
 	// Their participant rows go. On a quest they hold, the holder of record
 	// moves to the earliest remaining participant (joined_at, then member_id),
 	// who keeps their joined_at as claimed_at; a quest with no participant left
