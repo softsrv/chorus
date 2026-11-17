@@ -69,7 +69,7 @@ lint:
 	golangci-lint run
 
 vulncheck:
-	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
 # Everything CI runs.
 check: vet test test-js test-integration vulncheck
