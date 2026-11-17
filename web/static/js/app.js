@@ -711,8 +711,7 @@ async function questsTab(h, $root, notice = null) {
 
   const cards = [
     notice && alertBox('warning', notice),
-    member ? await takeCard(h, quests, nameOf, rerender, member) : card(null,
-    activeMember ? takeCard(h, quests, members, rerender) : card(null,
+    member ? await takeCard(h, quests, members, rerender, member) : card(null,
       el('h3', { class: 'font-semibold', text: 'Quests' }),
       el('p', { class: 'text-sm opacity-70', text: 'Choose a family member to take quests.' })),
     !member && await approvalsCard(h, members, rerender),
@@ -753,9 +752,11 @@ async function loadCombosData(h, firstPage) {
 // it now: a chore re-taken after its cooldown keeps showing the earlier
 // completion that waits, and Mark done stays, since each marking is its own
 // completion.
-async function takeCard(h, quests, nameOf, rerender, member = activeMember) {
+async function takeCard(h, quests, members, rerender, member = activeMember) {
   const $err = el('div');
   const $detail = el('div');
+  const $share = el('div');
+  const nameOf = Object.fromEntries(members.map((m) => [m.id, m.name]));
   // Everything this card shows and sends belongs to `member`, the member it
   // was started for: the lists, the title, the history and the actions. A
   // different member picked (or the selection cleared) while the history
@@ -791,12 +792,6 @@ async function takeCard(h, quests, nameOf, rerender, member = activeMember) {
   }
   const history = result.items;
   const historyError = result.error;
-function takeCard(h, quests, members, rerender) {
-  const $err = el('div');
-  const $detail = el('div');
-  const $share = el('div');
-  const parts = partitionQuests(quests, activeMember.id);
-  const nameOf = Object.fromEntries(members.map((m) => [m.id, m.name]));
 
   const act = (verb, q) => action(async () => {
     if (activeMember !== member) return; // this card is stale: never send another member's identity for its quests
@@ -830,7 +825,7 @@ function takeCard(h, quests, members, rerender) {
   // shareCandidates: the household members a quest can still be shared with,
   // everyone but the active member and those already on it.
   const shareCandidates = (q) => {
-    const on = new Set([activeMember.id, ...(q.participants || [])]);
+    const on = new Set([member.id, ...(q.participants || [])]);
     return members.filter((m) => !on.has(m.id));
   };
 
@@ -840,6 +835,7 @@ function takeCard(h, quests, members, rerender) {
   // active member's, handled as on accept: the member is cleared and the
   // user is sent back to the picker.
   const share = async (q, m, targetPin) => {
+    if (activeMember !== member) return; // this card is stale: never send another member's identity
     const body = activeMemberAction();
     if (!body) return;
     try {
@@ -869,12 +865,12 @@ function takeCard(h, quests, members, rerender) {
 
   // Share is offered only on a shareable quest the active member holds, and
   // only while someone in the household is not yet on it.
-  const shareButton = (q) => q.shareable && q.claimed_by === activeMember.id && shareCandidates(q).length > 0 &&
+  const shareButton = (q) => q.shareable && q.claimed_by === member.id && shareCandidates(q).length > 0 &&
     el('button', { class: 'btn btn-ghost btn-xs', text: 'Share', onclick: (e) => { e.preventDefault(); showShare(q); } });
 
   const sharedWith = (q) => {
     if (!q.shared) return null;
-    const others = (q.participants || []).filter((id) => id !== activeMember.id).map((id) => nameOf[id] || 'a former member');
+    const others = (q.participants || []).filter((id) => id !== member.id).map((id) => nameOf[id] || 'a former member');
     return [
       el('span', { class: 'badge badge-sm', text: 'Shared' }),
       el('span', { class: 'text-xs opacity-70', text: `Shared with ${joinNames(others)}` }),
@@ -938,13 +934,11 @@ function approvalNotice(q, res) {
   const paid = bonuses.map((b) => `combo bonus '${b.name}' +${b.bonus_points}`);
   if (res && res.streak_bonus > 0) paid.push(`Streak bonus +${res.streak_bonus} (streak ${res.streak_count})`);
   if (paid.length === 0) return null;
-  return `Approved '${q.name}' for ${q.member_name}: +${q.points} points, ${paid.join(', ')}`;
-  if (bonuses.length === 0) return null;
-  const paid = bonuses.map((b) => `combo bonus '${b.name}' +${b.bonus_points}`).join(', ');
+  const list = paid.join(', ');
   const who = pendingMembers(q);
-  if (who.length < 2) return `Approved '${q.name}' for ${who[0].member_name}: +${who[0].points} points, ${paid}`;
+  if (who.length < 2) return `Approved '${q.name}' for ${who[0].member_name}: +${who[0].points} points, ${list}`;
   const bonus = q.teamwork_bonus || 0;
-  return `Approved '${q.name}' for ${joinNames(who.map((m) => m.member_name))}: +${who[0].points} points and +${bonus} teamwork bonus each, ${paid}`;
+  return `Approved '${q.name}' for ${joinNames(who.map((m) => m.member_name))}: +${who[0].points} points and +${bonus} teamwork bonus each, ${list}`;
 }
 
 // approvalsCard is the administrator's list of quests marked done. Loading,
