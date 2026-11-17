@@ -632,8 +632,9 @@ type MarkQuestDoneRow struct {
 // The same statement moves the member's streak for the quest (streaked):
 // count+1 when marked done by its expires_at, else 1, with a new expires_at
 // of local midnight starting the day after 2 x repeat_days days from today.
-// The step it replaces is kept in prev_* so a reject can undo it. The
-// completion stores the resulting count (streak_count), so its approval,
+// (prev_* still records the step it replaces; a reject no longer reads it
+// but recomputes the streak: RecomputeMemberQuestStreak.) The completion
+// stores the resulting count (streak_count), so its approval,
 // however late, pays the streak as of this mark-done. The streak write
 // touches only member_quest_streaks: never available_at or the cooldown.
 func (q *Queries) MarkQuestDone(ctx context.Context, arg MarkQuestDoneParams) (MarkQuestDoneRow, error) {
