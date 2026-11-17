@@ -180,6 +180,31 @@ test('CLM-4: Abandon and Mark done only on own quests; Mine row has no badge', a
   assert.doesNotMatch(rowOf('Own quest').textContent, /Waiting for approval/);
 });
 
+test('abandon CLM-2: a 404 on Abandon shows exactly Quest not found.; a wrong PIN shows the PIN error; neither uses another give-up word', async () => {
+  const otherWords = /cancel|give up|drop|quit|withdraw|release|put back/i;
+  const alerts = (root) => walk(root).filter((n) => n.getAttribute?.('role') === 'alert' || /\balert\b/.test(n.className || '')).map((n) => n.textContent);
+
+  srv.quests = [quest({ available: false, claimed_by: 'm-a' })];
+  srv.extra[`POST ${HP}/quests/q1/abandon`] = () => { srv.quests = [quest({ available: false, claimed_by: 'm-b' })]; return err(404, 'not_found', 'Not found.'); };
+  await loadApp();
+  await becomeAnn();
+  await click(buttons(sectionNode(env.$app, 'Mine'), 'Abandon')[0]);
+  assert.equal(actionCalls().at(-1).path, `${HP}/quests/q1/abandon`);
+  const notFound = alerts(env.$app);
+  assert.deepEqual(notFound, ['Quest not found.']);
+  assert.doesNotMatch(notFound[0], otherWords);
+  assert.match(text(), /Quests for Ann/);
+
+  srv.quests = [quest({ available: false, claimed_by: 'm-a' })];
+  srv.extra[`POST ${HP}/quests/q1/abandon`] = () => err(403, 'wrong_pin', 'Wrong PIN.');
+  await click(walk(env.$app).find((n) => n.tagName === 'A' && n.textContent === 'Quests')); // re-read the list
+  await click(buttons(sectionNode(env.$app, 'Mine'), 'Abandon')[0]);
+  const pinError = alerts(document.body).find((t) => /PIN/.test(t));
+  assert.equal(pinError, 'That PIN is no longer correct. Pick the member again.');
+  assert.doesNotMatch(pinError, otherWords);
+  assert.match(text(), /Choose a family member to take quests\./);
+});
+
 test('CLM-8: a re-taken chore whose earlier completion still waits shows Waiting for approval in Mine (with Mark done) and in Claimed', async () => {
   srv.quests = [
     quest({ id: 'q1', name: 'Own retaken', available: false, claimed_by: 'm-a', awaiting_approval: true }),
@@ -212,6 +237,7 @@ test('CLM-5: Mark done posts the member, moves to Coming back later with Back da
   assert.equal(done.path, `${HP}/quests/q1/done`);
   assert.deepEqual(done.body, { member_id: 'm-a', pin: '' });
   assert.match(section(env.$app, 'Mine'), /You have no quests yet\./);
+  assert.equal(buttons(sectionNode(env.$app, 'Mine'), 'Abandon').length, 0);
   assert.doesNotMatch(section(env.$app, 'Mine'), /Feed the cat/);
   const comingBack = section(env.$app, 'Coming back later');
   assert.match(comingBack, /Feed the cat/);
@@ -822,6 +848,41 @@ test('sharing CLM-6: Share on the holder\'s shareable quest picks a member not o
   assert.equal(shareCalls().length, 2, 'a member without a PIN is shared with at once');
   assert.deepEqual(shareCalls()[1].body, { member_id: 'm-a', pin: '', target_member_id: 'm-c', target_pin: '' });
   noInlineStyle();
+});
+
+test('sharing CLM-6 / 1.1/5: a wrong PIN for the sharer (no target_pin field) clears the active member as on accept, even after the target typed their PIN', async () => {
+  srv.quests = [quest({ id: 'q1', name: 'Clean the living room', available: false, claimed_by: 'm-a', shareable: true, teamwork_bonus: 20 })];
+  srv.extra[`POST ${HP}/quests/q1/share`] = () => err(403, 'wrong_pin', 'Wrong PIN.');
+  await loadApp();
+  await becomeAnn();
+  const rowOf = () => walk(env.$app).find((n) => n.tagName === 'LI' && n.textContent.startsWith('Clean the living room'));
+  await click(buttons(rowOf(), 'Share')[0]);
+  const picker = walk(env.$app).find((n) => n.className === 'font-semibold' && n.textContent === 'Share Clean the living room with').parentNode;
+  await click(buttons(picker, 'Ben')[0]);
+  const $pin = walk(env.$app).find((n) => n.tagName === 'INPUT' && n.name === 'pin');
+  $pin.value = '5678';
+  await submit($pin.parentNode.parentNode);
+  assert.match(text(), /Choose a family member to take quests\./);
+  assert.match(document.body.textContent, /That PIN is no longer correct\. Pick the member again\./);
+  assert.doesNotMatch(text(), /Wrong PIN\. Try again\./);
+  assert.equal(signedOut, 0);
+});
+
+test('sharing CLM-6 / 1.1/5: a wrong target PIN (fields.target_pin) stays on the target\'s PIN form and keeps the active member', async () => {
+  srv.quests = [quest({ id: 'q1', name: 'Clean the living room', available: false, claimed_by: 'm-a', shareable: true, teamwork_bonus: 20 })];
+  srv.extra[`POST ${HP}/quests/q1/share`] = () => [403, { error: { code: 'wrong_pin', message: 'Wrong PIN.', fields: { target_pin: 'is wrong' } } }];
+  await loadApp();
+  await becomeAnn();
+  const rowOf = () => walk(env.$app).find((n) => n.tagName === 'LI' && n.textContent.startsWith('Clean the living room'));
+  await click(buttons(rowOf(), 'Share')[0]);
+  const picker = walk(env.$app).find((n) => n.className === 'font-semibold' && n.textContent === 'Share Clean the living room with').parentNode;
+  await click(buttons(picker, 'Ben')[0]);
+  const $pin = walk(env.$app).find((n) => n.tagName === 'INPUT' && n.name === 'pin');
+  $pin.value = '5678';
+  await submit($pin.parentNode.parentNode);
+  assert.match(text(), /Wrong PIN\. Try again\./);
+  assert.match(text(), /Ben enters their PIN to accept/);
+  assert.doesNotMatch(text(), /Choose a family member to take quests\./);
 });
 
 test('sharing CLM-6: no Share on a quest that is not shareable, one held by someone else, or when nobody is left to share with', async () => {

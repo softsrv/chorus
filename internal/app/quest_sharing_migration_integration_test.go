@@ -69,6 +69,9 @@ func TestIntegration_QuestSharingMigration(t *testing.T) {
 	// 2. Seed at version 14: two members with points, a quest with an
 	//    approved and a pending completion.
 	hhID := uuid.New()
+	// The quest and completion seeded in step 2 with no marker; completions()
+	// leaves them out, since up cancels that completion.
+	orphanQuestID, orphanID := uuid.New(), uuid.New()
 	if _, err := tx.Exec(ctx, "INSERT INTO households (id, name, timezone) VALUES ($1, 'Sharing Fam', 'America/Chicago')", hhID); err != nil {
 		t.Fatalf("insert household: %v", err)
 	}
@@ -103,7 +106,7 @@ func TestIntegration_QuestSharingMigration(t *testing.T) {
 	}
 	completions := func() []completion {
 		t.Helper()
-		rows, err := tx.Query(ctx, "SELECT id, member_id, done_at, status FROM quest_completions WHERE household_id = $1 ORDER BY done_at, id", hhID)
+		rows, err := tx.Query(ctx, "SELECT id, member_id, done_at, status FROM quest_completions WHERE household_id = $1 AND quest_id <> $2 ORDER BY done_at, id", hhID, orphanQuestID)
 		if err != nil {
 			t.Fatalf("query completions: %v", err)
 		}
@@ -128,6 +131,29 @@ func TestIntegration_QuestSharingMigration(t *testing.T) {
 			t.Fatalf("points: %v", err)
 		}
 		return p
+	}
+	// A pending completion whose marker was removed under 000014 (member_id
+	// nulled by ON DELETE SET NULL), on a quest resting on the cooldown it
+	// started. Up cancels it, as member removal would, and reopens that
+	// cooldown; nobody's points move.
+	orphanDoneAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+	if _, err := tx.Exec(ctx, `INSERT INTO household_quests (id, household_id, name, points, repeat_days, completed_at, available_at)
+		VALUES ($1, $2, 'Orphaned', 10, 7, $3, $3 + interval '7 days')`, orphanQuestID, hhID, orphanDoneAt); err != nil {
+		t.Fatalf("insert orphan quest: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO quest_completions (id, household_id, quest_id, member_id, done_at, status)
+		VALUES ($1, $2, $3, NULL, $4, 'pending')`, orphanID, hhID, orphanQuestID, orphanDoneAt); err != nil {
+		t.Fatalf("insert orphan completion: %v", err)
+	}
+	orphan := func() (string, time.Time) {
+		t.Helper()
+		var status string
+		var availableAt time.Time
+		if err := tx.QueryRow(ctx, `SELECT c.status, q.available_at FROM quest_completions c
+			JOIN household_quests q ON q.id = c.quest_id WHERE c.id = $1`, orphanID).Scan(&status, &availableAt); err != nil {
+			t.Fatalf("read orphan: %v", err)
+		}
+		return status, availableAt
 	}
 	before := completions()
 	if len(before) != 2 {
@@ -173,6 +199,9 @@ func TestIntegration_QuestSharingMigration(t *testing.T) {
 		t.Fatalf("rows after up: participants %d, completion members %d (err %v), want 0 and 0", participantRows, memberRows, err)
 	}
 	assertUnchanged("after up")
+	if status, availableAt := orphan(); status != "cancelled" || availableAt.After(time.Now().Add(time.Minute)) {
+		t.Fatalf("pending completion with no member after up: status %s, quest available_at %v; want cancelled and available now", status, availableAt)
+	}
 
 	// 4. A shared pending completion covering Ann and Bob, plus a pending
 	//    completion that records only one member (allowed to go down).

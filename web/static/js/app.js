@@ -789,15 +789,17 @@ function takeCard(h, quests, members, rerender) {
   };
 
   // share POSTs the active member's action plus the picked member and their
-  // PIN. A 403 wrong_pin with no target PIN asked can only be the active
-  // member's; one after a target PIN was typed is shown on that PIN's form.
+  // PIN. The server marks a wrong target PIN with fields.target_pin; it is
+  // rethrown so the target's PIN form shows it. Any other wrong_pin is the
+  // active member's, handled as on accept: the member is cleared and the
+  // user is sent back to the picker.
   const share = async (q, m, targetPin) => {
     const body = activeMemberAction();
     if (!body) return;
     try {
       await api('POST', `/households/${h.id}/quests/${q.id}/share`, { ...body, target_member_id: m.id, target_pin: targetPin });
     } catch (err) {
-      if (m.has_pin && err instanceof ApiError && err.code === 'wrong_pin') throw err;
+      if (err instanceof ApiError && err.code === 'wrong_pin' && err.fields && err.fields.target_pin) throw err;
       if (memberActionFailed(err)) return;
       const msg = questNotice(err);
       if (msg) { rerender(msg); return; }

@@ -81,6 +81,17 @@ WHERE household_id = sqlc.arg(household_id) AND id = sqlc.arg(id)
   AND (available_at IS NULL OR available_at <= NOW())
 RETURNING *;
 
+-- name: LockHouseholdQuest :one
+-- Locks one quest row of the household for the rest of the transaction,
+-- taken in a statement of its own after the caller's member locks. A
+-- statement run after it reads the quest's participants in a snapshot that
+-- already holds every share, abandon, mark-done or removal of that quest that
+-- committed while the lock waited (each takes this row lock), and none can
+-- commit under it.
+SELECT id FROM household_quests
+WHERE household_id = sqlc.arg(household_id) AND id = sqlc.arg(id)
+FOR UPDATE;
+
 -- name: AbandonQuest :one
 -- The acting member leaves a quest they hold or are on. Only their part goes:
 -- their participant row. If they held it, the holder of record moves to the
@@ -89,8 +100,11 @@ RETURNING *;
 -- pool, done_at cleared with the holder so the done_at-needs-a-holder CHECK
 -- holds. A quest left with one member is no longer shared, so that member's
 -- participant row goes too. A member not on the quest, or a quest not in
--- this household, matches no row and changes nothing. The quest is locked
--- after the caller's member locks (member first).
+-- this household, matches no row and changes nothing. The caller holds the
+-- member locks and then the quest's row lock (LockHouseholdQuest, a statement
+-- of its own), so the participants counted here are the committed ones: a
+-- concurrent share or abandon of the quest is either in this snapshot or
+-- waits until this transaction ends.
 WITH mine AS (
     SELECT q.household_id, q.id,
            q.claimed_by IS NOT DISTINCT FROM sqlc.arg(member_id)::uuid AS holder,
@@ -176,8 +190,28 @@ SELECT member_id FROM household_quest_participants
 WHERE household_id = sqlc.arg(household_id) AND quest_id = sqlc.arg(quest_id)
 ORDER BY joined_at ASC, member_id ASC;
 
+-- name: LockMemberQuests :many
+-- Locks, in id order, every quest of the household that the member holds or
+-- is on, before ReleaseMemberQuests reads them. ReleaseMemberQuests counts
+-- the members left on each quest; it runs as a statement of its own after
+-- this lock, so its snapshot already holds every share, abandon or mark-done
+-- that committed while the lock waited (each takes the quest row lock), and
+-- none can commit under it.
+SELECT q.id
+FROM household_quests q
+WHERE q.household_id = sqlc.arg(household_id)
+  AND (q.claimed_by = sqlc.arg(member_id)::uuid OR EXISTS (
+      SELECT 1 FROM household_quest_participants p
+      WHERE p.household_id = q.household_id AND p.quest_id = q.id
+        AND p.member_id = sqlc.arg(member_id)::uuid
+  ))
+ORDER BY q.id
+FOR UPDATE OF q;
+
 -- name: ReleaseMemberQuests :exec
 -- Takes a member who is leaving the household off every quest they are on.
+-- The caller has locked those quests first (LockMemberQuests), so the
+-- members counted here are the ones committed on each quest.
 -- Their participant rows go. On a quest they hold, the holder of record
 -- moves to the earliest remaining participant (joined_at, then member_id),
 -- who keeps their joined_at as claimed_at; a quest with no participant left
@@ -222,6 +256,22 @@ SET claimed_by = m.next_member,
     updated_at = NOW()
 FROM mine m
 WHERE q.household_id = m.household_id AND q.id = m.id AND m.holder;
+
+-- name: LockMemberPendingCompletions :many
+-- Locks, in id order, every pending completion of the household that the
+-- member marked done or is recorded on, before CancelMemberPendingCompletions
+-- reads them, so its earliest remaining member is read after any concurrent
+-- removal of another member on the same completion has committed.
+SELECT c.id
+FROM quest_completions c
+WHERE c.household_id = sqlc.arg(household_id) AND c.status = 'pending'
+  AND (c.member_id = sqlc.arg(member_id)::uuid OR EXISTS (
+      SELECT 1 FROM quest_completion_members cm
+      WHERE cm.household_id = c.household_id AND cm.completion_id = c.id
+        AND cm.member_id = sqlc.arg(member_id)::uuid
+  ))
+ORDER BY c.id
+FOR UPDATE OF c;
 
 -- name: CancelMemberPendingCompletions :exec
 -- Takes a member who is leaving the household off every completion still
@@ -305,7 +355,9 @@ WHERE c.household_id = sqlc.arg(household_id) AND c.id = sqlc.arg(id)
 -- joined_at, the lone marker at now. NOW() is one instant per transaction, so
 -- completed_at equals the completion's done_at. A quest the member is not on
 -- matches no row and writes nothing. No points move here. The caller holds
--- the row locks of every member on the quest.
+-- the row locks of every member on the quest and then the quest's row lock
+-- (LockHouseholdQuest, a statement of its own), so the participants recorded
+-- and cleared here are the committed ones.
 WITH done AS (
     UPDATE household_quests q
     SET claimed_by = NULL, claimed_at = NULL,

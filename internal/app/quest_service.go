@@ -79,8 +79,12 @@ func (v QuestView) Shared() bool { return len(v.Participants) > 1 }
 
 // Completion is one time a member marked a chore done. Status is pending,
 // approved, rejected or cancelled; ApprovedAt is set only when approved.
-// MemberID is nil once the member has been removed. MemberIDs, set on an
-// approval, lists every member the completion credited, earliest first.
+// MemberID is the member who marked it done. When that member is removed
+// while a shared completion is pending, MemberID moves to the earliest
+// remaining recorded member, so the completion stays listed and approvable.
+// It is nil only on a completion from before quest sharing whose member was
+// removed (the key is ON DELETE SET NULL). MemberIDs, set on an approval,
+// lists every member the completion credited, earliest first.
 type Completion struct {
 	ID         uuid.UUID
 	QuestID    uuid.UUID
@@ -140,9 +144,25 @@ func splitPoints(points int32, n int) int32 {
 // that was theirs alone is released or cancelled as before, and a quest
 // resting on a cooldown that a cancelled completion started is available
 // again right away, as on reject; every other cooldown stays.
+//
+// Each ReleaseMemberQuests and CancelMemberPendingCompletions statement counts
+// the members left on a quest or completion from its own snapshot, so the
+// quests and the completions are locked first, each in a statement of its own
+// (id order). A share, abandon or mark-done of the same quest takes that
+// quest's row lock, and a removal of another member on the same completion
+// takes that completion's lock. Either one commits before the lock is granted
+// and is then in the snapshot, or it waits until this removal commits. A
+// statement that read its members before such a commit would drop the
+// holder's participant row and leave a new member's behind.
 func releaseMemberQuests(ctx context.Context, qtx *db.Queries, householdID, memberID uuid.UUID) error {
+	if _, err := qtx.LockMemberQuests(ctx, db.LockMemberQuestsParams{HouseholdID: householdID, MemberID: memberID}); err != nil {
+		return fmt.Errorf("lock member quests: %w", err)
+	}
 	if err := qtx.ReleaseMemberQuests(ctx, db.ReleaseMemberQuestsParams{HouseholdID: householdID, MemberID: memberID}); err != nil {
 		return fmt.Errorf("release member quests: %w", err)
+	}
+	if _, err := qtx.LockMemberPendingCompletions(ctx, db.LockMemberPendingCompletionsParams{HouseholdID: householdID, MemberID: memberID}); err != nil {
+		return fmt.Errorf("lock member completions: %w", err)
 	}
 	if err := qtx.CancelMemberPendingCompletions(ctx, db.CancelMemberPendingCompletionsParams{HouseholdID: householdID, MemberID: memberID}); err != nil {
 		return fmt.Errorf("cancel member completions: %w", err)
@@ -380,7 +400,8 @@ func (s *QuestService) Abandon(ctx context.Context, userID, householdID, questID
 
 // Share adds target to the acting member's shareable quest, so both hold it.
 // Both members prove themselves with their own PIN, as on accept: a wrong
-// PIN for either is ErrWrongPIN. A quest that is not in this household, not
+// PIN for the acting member is ErrWrongPIN, one for the target is
+// ErrWrongTargetPIN (also ErrWrongPIN). A quest that is not in this household, not
 // shareable or not held by the acting member, and a target that is not a
 // member of this household, are ErrNotFound. Sharing with oneself or with a
 // member already on the quest is ErrAlreadyParticipant. Nothing changes on
@@ -390,6 +411,9 @@ func (s *QuestService) Share(ctx context.Context, userID, householdID, questID u
 		return QuestView{}, err
 	}
 	if _, err := VerifyMemberPin(ctx, s.q, householdID, target.MemberID, target.PIN); err != nil {
+		if errors.Is(err, ErrWrongPIN) {
+			return QuestView{}, ErrWrongTargetPIN
+		}
 		return QuestView{}, err
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -438,6 +462,15 @@ func (s *QuestService) Share(ctx context.Context, userID, householdID, questID u
 // slipped in between adds a member, and the locks are taken again in order
 // on a fresh pass (a bounded number of times). The acting member removed
 // meanwhile is ErrNotFound; another member removed meanwhile is skipped.
+//
+// Once the members are locked, the quest row is locked too, in a statement
+// of its own (LockHouseholdQuest). The caller's next statement then reads the
+// quest's participants in a snapshot taken after that lock was granted, so a
+// share, abandon or mark-done of the same quest that committed while it
+// waited is seen, and none can commit under it. Counting the members left in
+// the same statement that first waits on the quest row would read them as
+// they stood before such a commit. A quest not in this household locks
+// nothing; the caller's statement then matches no row.
 func lockQuestMembers(ctx context.Context, qtx *db.Queries, householdID, questID, actor uuid.UUID) error {
 	locked := map[uuid.UUID]bool{}
 	for range 3 {
@@ -452,6 +485,9 @@ func lockQuestMembers(ctx context.Context, qtx *db.Queries, householdID, questID
 			}
 		}
 		if !missing {
+			if _, err := qtx.LockHouseholdQuest(ctx, db.LockHouseholdQuestParams{HouseholdID: householdID, ID: questID}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("lock quest: %w", err)
+			}
 			return nil
 		}
 		for _, id := range want {
@@ -698,16 +734,23 @@ func (s *QuestService) Approve(ctx context.Context, userID, householdID, complet
 	if len(members) < 2 {
 		bonus = 0
 	}
+	// Validation keeps points + bonus inside int32; a row that is not (written
+	// around the service) is refused rather than credited a wrapped amount.
+	total64 := int64(split) + int64(bonus)
+	if total64 > math.MaxInt32 {
+		return fail(fmt.Errorf("approve completion %s: award %d exceeds the points range", completionID, total64))
+	}
+	total := int32(total64)
 	credited := make([]ApprovedMember, 0, len(members))
 	bonuses := []ComboBonus{}
 	var marker db.FamilyMember
 	for _, id := range members {
 		if err := qtx.SetCompletionMemberAward(ctx, db.SetCompletionMemberAwardParams{
-			PointsAwarded: pgtype.Int4{Int32: split + bonus, Valid: true}, HouseholdID: householdID, CompletionID: completionID, MemberID: id,
+			PointsAwarded: pgtype.Int4{Int32: total, Valid: true}, HouseholdID: householdID, CompletionID: completionID, MemberID: id,
 		}); err != nil {
 			return fail(fmt.Errorf("record award: %w", err))
 		}
-		member, err := qtx.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: householdID, ID: id, Delta: split + bonus})
+		member, err := qtx.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: householdID, ID: id, Delta: total})
 		if err != nil {
 			return fail(fmt.Errorf("credit points: %w", err))
 		}
@@ -889,6 +932,12 @@ func validateQuest(in QuestInput) (validQuest, error) {
 	}
 	if out.teamworkBonus > 0 && !out.shareable {
 		v.fail("teamwork_bonus", "needs shareable")
+	}
+	// Each member of a shared completion is paid their split (never more
+	// than points) plus the bonus, credited as one int32 amount, so the two
+	// together must fit in it.
+	if int64(out.points)+int64(out.teamworkBonus) > math.MaxInt32 {
+		v.fail("teamwork_bonus", fmt.Sprintf("together with points must not exceed %d", math.MaxInt32))
 	}
 	return out, v.err()
 }

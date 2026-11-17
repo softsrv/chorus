@@ -33,7 +33,10 @@ CREATE INDEX idx_household_quest_participants_member
     ON household_quest_participants (household_id, member_id);
 
 -- 3. Every member a shared completion covers. quest_completions.member_id
---    stays the member who marked it done. points_awarded is set when the
+--    is the member who marked it done; if that member is removed while the
+--    completion is pending, it moves to the earliest remaining recorded
+--    member (it is nulled only when no recorded member is left, and the
+--    completion is then cancelled). points_awarded is set when the
 --    completion is approved. added_at, ties broken by member_id, orders
 --    "earliest remaining member".
 ALTER TABLE quest_completions
@@ -70,3 +73,24 @@ ALTER TABLE combo_award_completions
     DROP CONSTRAINT uq_combo_award_completions_combo_completion,
     ADD CONSTRAINT uq_combo_award_completions_combo_completion_member
         UNIQUE (combo_id, quest_completion_id, member_id);
+
+-- 5. A pending completion whose marker was removed under 000014 (member_id
+--    nulled by ON DELETE SET NULL) records no member at all: nobody could be
+--    paid for it, and from here on the Approvals list, approval and member
+--    removal reach a completion only through its marker or its recorded
+--    members. Each one is cancelled, as member removal does: no points move,
+--    and a quest resting on the cooldown that completion started (its
+--    completed_at is the completion's done_at, available_at still ahead) is
+--    available again right away. Every completion that still has its marker
+--    is untouched.
+WITH cancelled AS (
+    UPDATE quest_completions c
+    SET status = 'cancelled'
+    WHERE c.status = 'pending' AND c.member_id IS NULL
+    RETURNING c.household_id, c.quest_id, c.done_at
+)
+UPDATE household_quests q
+SET available_at = NOW(), updated_at = NOW()
+FROM cancelled c
+WHERE q.household_id = c.household_id AND q.id = c.quest_id
+  AND q.completed_at = c.done_at AND q.available_at > NOW();

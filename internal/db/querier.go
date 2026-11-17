@@ -19,8 +19,11 @@ type Querier interface {
 	// pool, done_at cleared with the holder so the done_at-needs-a-holder CHECK
 	// holds. A quest left with one member is no longer shared, so that member's
 	// participant row goes too. A member not on the quest, or a quest not in
-	// this household, matches no row and changes nothing. The quest is locked
-	// after the caller's member locks (member first).
+	// this household, matches no row and changes nothing. The caller holds the
+	// member locks and then the quest's row lock (LockHouseholdQuest, a statement
+	// of its own), so the participants counted here are the committed ones: a
+	// concurrent share or abandon of the quest is either in this snapshot or
+	// waits until this transaction ends.
 	AbandonQuest(ctx context.Context, arg AbandonQuestParams) (HouseholdQuest, error)
 	AddHouseholdMember(ctx context.Context, arg AddHouseholdMemberParams) error
 	AddMemberPoints(ctx context.Context, arg AddMemberPointsParams) (FamilyMember, error)
@@ -206,6 +209,25 @@ type Querier interface {
 	// with the key-share lock a foreign-key check takes, so rows that would point
 	// at this member wait until the transaction ends.
 	LockFamilyMember(ctx context.Context, arg LockFamilyMemberParams) (uuid.UUID, error)
+	// Locks one quest row of the household for the rest of the transaction,
+	// taken in a statement of its own after the caller's member locks. A
+	// statement run after it reads the quest's participants in a snapshot that
+	// already holds every share, abandon, mark-done or removal of that quest that
+	// committed while the lock waited (each takes this row lock), and none can
+	// commit under it.
+	LockHouseholdQuest(ctx context.Context, arg LockHouseholdQuestParams) (uuid.UUID, error)
+	// Locks, in id order, every pending completion of the household that the
+	// member marked done or is recorded on, before CancelMemberPendingCompletions
+	// reads them, so its earliest remaining member is read after any concurrent
+	// removal of another member on the same completion has committed.
+	LockMemberPendingCompletions(ctx context.Context, arg LockMemberPendingCompletionsParams) ([]uuid.UUID, error)
+	// Locks, in id order, every quest of the household that the member holds or
+	// is on, before ReleaseMemberQuests reads them. ReleaseMemberQuests counts
+	// the members left on each quest; it runs as a statement of its own after
+	// this lock, so its snapshot already holds every share, abandon or mark-done
+	// that committed while the lock waited (each takes the quest row lock), and
+	// none can commit under it.
+	LockMemberQuests(ctx context.Context, arg LockMemberQuestsParams) ([]uuid.UUID, error)
 	LockUserProvisioning(ctx context.Context, id uuid.UUID) (pgtype.Timestamptz, error)
 	MarkGoogleCalendarConnectionBroken(ctx context.Context, userID uuid.UUID) (int64, error)
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
@@ -221,7 +243,9 @@ type Querier interface {
 	// joined_at, the lone marker at now. NOW() is one instant per transaction, so
 	// completed_at equals the completion's done_at. A quest the member is not on
 	// matches no row and writes nothing. No points move here. The caller holds
-	// the row locks of every member on the quest.
+	// the row locks of every member on the quest and then the quest's row lock
+	// (LockHouseholdQuest, a statement of its own), so the participants recorded
+	// and cleared here are the committed ones.
 	MarkQuestDone(ctx context.Context, arg MarkQuestDoneParams) (MarkQuestDoneRow, error)
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
 	MarkVerificationCodeUsed(ctx context.Context, id uuid.UUID) (int64, error)
@@ -238,6 +262,8 @@ type Querier interface {
 	// Re-arms first-sign-in provisioning for a user who has no household left.
 	ReleaseHouseholdProvisioning(ctx context.Context, id uuid.UUID) error
 	// Takes a member who is leaving the household off every quest they are on.
+	// The caller has locked those quests first (LockMemberQuests), so the
+	// members counted here are the ones committed on each quest.
 	// Their participant rows go. On a quest they hold, the holder of record
 	// moves to the earliest remaining participant (joined_at, then member_id),
 	// who keeps their joined_at as claimed_at; a quest with no participant left
