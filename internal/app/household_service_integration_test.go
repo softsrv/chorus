@@ -445,6 +445,29 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		t.Errorf("wrong member and admin PIN points history returned rows: %+v", wrongHist2)
 	}
 
+	// Non-PIN verify failure (e.g. cancelled context) is not reported as ErrWrongPIN and returns no items.
+	cancCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	nonPinHist, err := familySvc.PointsHistory(cancCtx, alice, h.ID, aliceMember.ID, "1234", "", 50, 0)
+	if err == nil {
+		t.Errorf("PointsHistory with cancelled context expected error, got nil")
+	} else if errors.Is(err, app.ErrWrongPIN) {
+		t.Errorf("PointsHistory with cancelled context returned ErrWrongPIN: %v", err)
+	}
+	if len(nonPinHist) != 0 {
+		t.Errorf("PointsHistory with cancelled context returned rows: %+v", nonPinHist)
+	}
+
+	nonPinAdminHist, err := familySvc.PointsHistory(cancCtx, alice, h.ID, aliceMember.ID, "0000", "5555", 50, 0)
+	if err == nil {
+		t.Errorf("PointsHistory with wrong member PIN and cancelled context expected error, got nil")
+	} else if errors.Is(err, app.ErrWrongPIN) {
+		t.Errorf("PointsHistory with wrong member PIN and cancelled context returned ErrWrongPIN: %v", err)
+	}
+	if len(nonPinAdminHist) != 0 {
+		t.Errorf("PointsHistory with wrong member PIN and cancelled context returned rows: %+v", nonPinAdminHist)
+	}
+
 	// Bob's history in household B is separate.
 	bobHist, err := familySvc.PointsHistory(ctx, bob, bh.ID, bobMember.ID, "4321", "", 50, 0)
 	if err != nil {
