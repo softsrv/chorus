@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -245,7 +246,8 @@ func TestIntegration_NoComboApprovalUnchanged(t *testing.T) {
 	ann := w.member("Ann")
 	chore := w.chore("Feed cat", 10)
 
-	w.markDone(chore, ann, utc(10, 14, 0))
+	doneAt := utc(10, 14, 0)
+	w.markDone(chore, ann, doneAt)
 	approved, m, bonuses, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, chore, "")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
@@ -256,9 +258,18 @@ func TestIntegration_NoComboApprovalUnchanged(t *testing.T) {
 	if m.ID != ann || m.Points != 10 {
 		t.Fatalf("credited member %+v, want Ann with 10", m)
 	}
-	if !approved.CompletedAt.Valid || !approved.AvailableAt.Valid || approved.ClaimedBy != nil || approved.DoneAt.Valid ||
-		!approved.AvailableAt.Time.After(approved.CompletedAt.Time) {
-		t.Fatalf("approved quest not released with a countdown: %+v", approved)
+	// Released, completed, and out of the pool until local midnight in the
+	// household's timezone, repeat_days days after the day it was marked done
+	// (done_at is back-dated, so available_at may be before completed_at).
+	loc, err := time.LoadLocation(w.h.Timezone)
+	if err != nil {
+		t.Fatalf("load household timezone %q: %v", w.h.Timezone, err)
+	}
+	y, mo, d := doneAt.In(loc).Date()
+	wantBack := time.Date(y, mo, d+int(approved.RepeatDays), 0, 0, 0, 0, loc)
+	if approved.RepeatDays != 1 || !approved.CompletedAt.Valid || approved.ClaimedBy != nil || approved.DoneAt.Valid ||
+		!approved.AvailableAt.Valid || !approved.AvailableAt.Time.Equal(wantBack) {
+		t.Fatalf("approved quest: %+v, want released with repeat_days 1 and available_at %v", approved, wantBack)
 	}
 	hist := w.history(ann)
 	if len(hist) != 1 || hist[0].Kind != "quest" || hist[0].Reason != "Feed cat" || hist[0].Points != 10 {
