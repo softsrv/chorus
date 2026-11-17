@@ -49,6 +49,7 @@ type ComboAwardCompletion struct {
 	ComboAwardID      uuid.UUID `json:"combo_award_id"`
 	ComboID           uuid.UUID `json:"combo_id"`
 	QuestCompletionID uuid.UUID `json:"quest_completion_id"`
+	MemberID          uuid.UUID `json:"member_id"`
 }
 
 type ComboQuest struct {
@@ -162,21 +163,30 @@ type HouseholdMembersRetired struct {
 }
 
 type HouseholdQuest struct {
-	ID          uuid.UUID          `json:"id"`
+	ID            uuid.UUID          `json:"id"`
+	HouseholdID   uuid.UUID          `json:"household_id"`
+	LibraryID     *uuid.UUID         `json:"library_id"`
+	Name          string             `json:"name"`
+	Points        int32              `json:"points"`
+	RepeatDays    int32              `json:"repeat_days"`
+	Notes         string             `json:"notes"`
+	ClaimedBy     *uuid.UUID         `json:"claimed_by"`
+	ClaimedAt     pgtype.Timestamptz `json:"claimed_at"`
+	DoneAt        pgtype.Timestamptz `json:"done_at"`
+	CompletedAt   pgtype.Timestamptz `json:"completed_at"`
+	AvailableAt   pgtype.Timestamptz `json:"available_at"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	Shareable     bool               `json:"shareable"`
+	TeamworkBonus int32              `json:"teamwork_bonus"`
+	StreakBonus   int32              `json:"streak_bonus"`
+}
+
+type HouseholdQuestParticipant struct {
 	HouseholdID uuid.UUID          `json:"household_id"`
-	LibraryID   *uuid.UUID         `json:"library_id"`
-	Name        string             `json:"name"`
-	Points      int32              `json:"points"`
-	RepeatDays  int32              `json:"repeat_days"`
-	Notes       string             `json:"notes"`
-	ClaimedBy   *uuid.UUID         `json:"claimed_by"`
-	ClaimedAt   pgtype.Timestamptz `json:"claimed_at"`
-	DoneAt      pgtype.Timestamptz `json:"done_at"`
-	CompletedAt pgtype.Timestamptz `json:"completed_at"`
-	AvailableAt pgtype.Timestamptz `json:"available_at"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
-	StreakBonus int32              `json:"streak_bonus"`
+	QuestID     uuid.UUID          `json:"quest_id"`
+	MemberID    uuid.UUID          `json:"member_id"`
+	JoinedAt    pgtype.Timestamptz `json:"joined_at"`
 }
 
 type HouseholdReward struct {
@@ -243,6 +253,14 @@ type QuestCompletion struct {
 	ApprovedAt  pgtype.Timestamptz `json:"approved_at"`
 	Status      string             `json:"status"`
 	StreakCount pgtype.Int4        `json:"streak_count"`
+}
+
+type QuestCompletionMember struct {
+	HouseholdID   uuid.UUID          `json:"household_id"`
+	CompletionID  uuid.UUID          `json:"completion_id"`
+	MemberID      uuid.UUID          `json:"member_id"`
+	PointsAwarded pgtype.Int4        `json:"points_awarded"`
+	AddedAt       pgtype.Timestamptz `json:"added_at"`
 }
 
 type QuestLibrary struct {

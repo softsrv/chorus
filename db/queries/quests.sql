@@ -11,10 +11,16 @@ SELECT * FROM quest_library WHERE id = $1;
 
 -- name: ListHouseholdQuests :many
 -- awaiting_approval: the quest has a completion waiting for the administrator.
+-- participants: the members on the quest when it is shared, earliest first.
 SELECT sqlc.embed(q), EXISTS (
     SELECT 1 FROM quest_completions c
     WHERE c.household_id = q.household_id AND c.quest_id = q.id AND c.status = 'pending'
-) AS awaiting_approval
+) AS awaiting_approval,
+ARRAY(
+    SELECT p.member_id FROM household_quest_participants p
+    WHERE p.household_id = q.household_id AND p.quest_id = q.id
+    ORDER BY p.joined_at, p.member_id
+)::uuid[] AS participants
 FROM household_quests q
 WHERE q.household_id = sqlc.arg(household_id)
 ORDER BY q.created_at ASC, q.id ASC
@@ -24,11 +30,17 @@ LIMIT sqlc.arg(row_limit) OFFSET sqlc.arg(row_offset);
 SELECT * FROM household_quests WHERE household_id = $1 AND id = $2;
 
 -- name: GetHouseholdQuestView :one
--- One quest with awaiting_approval, as ListHouseholdQuests reads it.
+-- One quest with awaiting_approval and participants, as ListHouseholdQuests
+-- reads it.
 SELECT sqlc.embed(q), EXISTS (
     SELECT 1 FROM quest_completions c
     WHERE c.household_id = q.household_id AND c.quest_id = q.id AND c.status = 'pending'
-) AS awaiting_approval
+) AS awaiting_approval,
+ARRAY(
+    SELECT p.member_id FROM household_quest_participants p
+    WHERE p.household_id = q.household_id AND p.quest_id = q.id
+    ORDER BY p.joined_at, p.member_id
+)::uuid[] AS participants
 FROM household_quests q
 WHERE q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id);
 
@@ -41,13 +53,17 @@ SELECT EXISTS (
 ) AS awaiting_approval;
 
 -- name: CreateHouseholdQuest :one
-INSERT INTO household_quests (id, household_id, library_id, name, points, repeat_days, notes, streak_bonus, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+INSERT INTO household_quests (id, household_id, library_id, name, points, repeat_days, notes, shareable, teamwork_bonus, streak_bonus, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
 RETURNING *;
 
 -- name: UpdateHouseholdQuest :one
+-- Full replacement of the editable fields. A new points, shareable or
+-- teamwork_bonus applies from the next approval: a pending completion is
+-- paid from the quest as it stands when it is approved.
 UPDATE household_quests
-SET name = $3, points = $4, repeat_days = $5, notes = $6, streak_bonus = $7, updated_at = NOW()
+SET name = $3, points = $4, repeat_days = $5, notes = $6,
+    shareable = $7, teamwork_bonus = $8, streak_bonus = $9, updated_at = NOW()
 WHERE household_id = $1 AND id = $2
 RETURNING *;
 
@@ -65,32 +81,245 @@ WHERE household_id = sqlc.arg(household_id) AND id = sqlc.arg(id)
   AND (available_at IS NULL OR available_at <= NOW())
 RETURNING *;
 
--- name: AbandonQuest :one
--- Puts a quest back in the pool. Only its current holder can abandon it.
-UPDATE household_quests
-SET claimed_by = NULL, claimed_at = NULL, updated_at = NOW()
+-- name: LockHouseholdQuest :one
+-- Locks one quest row of the household for the rest of the transaction,
+-- taken in a statement of its own after the caller's member locks. A
+-- statement run after it reads the quest's participants in a snapshot that
+-- already holds every share, abandon, mark-done or removal of that quest that
+-- committed while the lock waited (each takes this row lock), and none can
+-- commit under it.
+SELECT id FROM household_quests
 WHERE household_id = sqlc.arg(household_id) AND id = sqlc.arg(id)
-  AND claimed_by = sqlc.arg(member_id)
-RETURNING *;
+FOR UPDATE;
+
+-- name: AbandonQuest :one
+-- The acting member leaves a quest they hold or are on. Only their part goes:
+-- their participant row. If they held it, the holder of record moves to the
+-- earliest remaining participant (joined_at, then member_id), who keeps
+-- their joined_at as claimed_at; a quest with nobody left is back in the
+-- pool, done_at cleared with the holder so the done_at-needs-a-holder CHECK
+-- holds. A quest left with one member is no longer shared, so that member's
+-- participant row goes too. A member not on the quest, or a quest not in
+-- this household, matches no row and changes nothing. The caller holds the
+-- member locks and then the quest's row lock (LockHouseholdQuest, a statement
+-- of its own), so the participants counted here are the committed ones: a
+-- concurrent share or abandon of the quest is either in this snapshot or
+-- waits until this transaction ends.
+WITH mine AS (
+    SELECT q.household_id, q.id,
+           q.claimed_by IS NOT DISTINCT FROM sqlc.arg(member_id)::uuid AS holder,
+           nxt.member_id AS next_member, nxt.joined_at AS next_joined_at,
+           (SELECT count(*) FROM household_quest_participants r
+            WHERE r.household_id = q.household_id AND r.quest_id = q.id
+              AND r.member_id <> sqlc.arg(member_id)::uuid) AS remaining
+    FROM household_quests q
+    LEFT JOIN LATERAL (
+        SELECT p.member_id, p.joined_at FROM household_quest_participants p
+        WHERE p.household_id = q.household_id AND p.quest_id = q.id
+          AND p.member_id <> sqlc.arg(member_id)::uuid
+        ORDER BY p.joined_at ASC, p.member_id ASC
+        LIMIT 1
+    ) nxt ON true
+    WHERE q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id)
+      AND (q.claimed_by = sqlc.arg(member_id)::uuid OR EXISTS (
+          SELECT 1 FROM household_quest_participants p
+          WHERE p.household_id = q.household_id AND p.quest_id = q.id
+            AND p.member_id = sqlc.arg(member_id)::uuid
+      ))
+    FOR UPDATE OF q
+), left_quest AS (
+    DELETE FROM household_quest_participants p
+    USING mine m
+    WHERE p.household_id = m.household_id AND p.quest_id = m.id
+      AND (p.member_id = sqlc.arg(member_id)::uuid OR m.remaining <= 1)
+    RETURNING p.quest_id
+)
+UPDATE household_quests q
+SET claimed_by = CASE WHEN m.holder THEN m.next_member ELSE q.claimed_by END,
+    claimed_at = CASE WHEN NOT m.holder THEN q.claimed_at
+                      WHEN m.next_member IS NULL THEN NULL
+                      ELSE m.next_joined_at END,
+    done_at = CASE WHEN m.holder AND m.next_member IS NULL THEN NULL ELSE q.done_at END,
+    updated_at = NOW()
+FROM mine m
+WHERE q.household_id = m.household_id AND q.id = m.id
+RETURNING q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes,
+          q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at,
+          q.created_at, q.updated_at, q.shareable, q.teamwork_bonus, q.streak_bonus;
+
+-- name: ShareQuest :many
+-- The holder of a shareable quest adds another member of the household to
+-- it. One statement: the quest must be in this household, shareable and held
+-- by the acting member, and the target must be a household member other than
+-- the actor who is not on the quest yet; otherwise nothing is written. The
+-- first share also records the holder, joined at the time they accepted, so
+-- the holder stays the earliest member. Returns the member ids it added.
+WITH quest AS (
+    SELECT q.household_id, q.id, q.claimed_at
+    FROM household_quests q
+    WHERE q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id)
+      AND q.shareable AND q.claimed_by = sqlc.arg(member_id)::uuid
+    -- Locked and re-checked, so a share racing the holder's mark-done or
+    -- abandon either sees the quest still held or writes nothing.
+    FOR UPDATE OF q
+), target AS (
+    SELECT m.id
+    FROM family_members m
+    WHERE m.household_id = sqlc.arg(household_id) AND m.id = sqlc.arg(target_member_id)::uuid
+      AND m.id <> sqlc.arg(member_id)::uuid
+      AND NOT EXISTS (
+          SELECT 1 FROM household_quest_participants p
+          WHERE p.household_id = sqlc.arg(household_id) AND p.quest_id = sqlc.arg(id)
+            AND p.member_id = m.id
+      )
+)
+INSERT INTO household_quest_participants (household_id, quest_id, member_id, joined_at)
+SELECT q.household_id, q.id, v.member_id, v.joined_at
+FROM quest q
+CROSS JOIN target t
+CROSS JOIN LATERAL (VALUES
+    (sqlc.arg(member_id)::uuid, COALESCE(q.claimed_at, NOW())),
+    (t.id, NOW())
+) AS v(member_id, joined_at)
+ON CONFLICT (quest_id, member_id) DO NOTHING
+RETURNING member_id;
+
+-- name: ListQuestParticipants :many
+-- The members on one quest, earliest first; none when it is not shared.
+SELECT member_id FROM household_quest_participants
+WHERE household_id = sqlc.arg(household_id) AND quest_id = sqlc.arg(quest_id)
+ORDER BY joined_at ASC, member_id ASC;
+
+-- name: LockMemberQuests :many
+-- Locks, in id order, every quest of the household that the member holds or
+-- is on, before ReleaseMemberQuests reads them. ReleaseMemberQuests counts
+-- the members left on each quest; it runs as a statement of its own after
+-- this lock, so its snapshot already holds every share, abandon or mark-done
+-- that committed while the lock waited (each takes the quest row lock), and
+-- none can commit under it.
+SELECT q.id
+FROM household_quests q
+WHERE q.household_id = sqlc.arg(household_id)
+  AND (q.claimed_by = sqlc.arg(member_id)::uuid OR EXISTS (
+      SELECT 1 FROM household_quest_participants p
+      WHERE p.household_id = q.household_id AND p.quest_id = q.id
+        AND p.member_id = sqlc.arg(member_id)::uuid
+  ))
+ORDER BY q.id
+FOR UPDATE OF q;
 
 -- name: ReleaseMemberQuests :exec
--- Returns every quest the member holds to the pool. done_at is cleared with
--- the holder, so the done_at-needs-a-holder CHECK holds. No points move.
-UPDATE household_quests
-SET claimed_by = NULL, claimed_at = NULL, done_at = NULL, updated_at = NOW()
-WHERE household_id = sqlc.arg(household_id) AND claimed_by = sqlc.arg(member_id);
+-- Takes a member who is leaving the household off every quest they are on.
+-- The caller has locked those quests first (LockMemberQuests), so the
+-- members counted here are the ones committed on each quest.
+-- Their participant rows go. On a quest they hold, the holder of record
+-- moves to the earliest remaining participant (joined_at, then member_id),
+-- who keeps their joined_at as claimed_at; a quest with no participant left
+-- is returned to the pool, done_at cleared with the holder so the
+-- done_at-needs-a-holder CHECK holds. A quest left with one member is no
+-- longer shared, so that member's participant row goes too. The quests are
+-- locked after the caller's lock on the member row (member first). No
+-- points move.
+WITH mine AS (
+    SELECT q.household_id, q.id,
+           q.claimed_by IS NOT DISTINCT FROM sqlc.arg(member_id)::uuid AS holder,
+           nxt.member_id AS next_member, nxt.joined_at AS next_joined_at,
+           (SELECT count(*) FROM household_quest_participants r
+            WHERE r.household_id = q.household_id AND r.quest_id = q.id
+              AND r.member_id <> sqlc.arg(member_id)::uuid) AS remaining
+    FROM household_quests q
+    LEFT JOIN LATERAL (
+        SELECT p.member_id, p.joined_at FROM household_quest_participants p
+        WHERE p.household_id = q.household_id AND p.quest_id = q.id
+          AND p.member_id <> sqlc.arg(member_id)::uuid
+        ORDER BY p.joined_at ASC, p.member_id ASC
+        LIMIT 1
+    ) nxt ON true
+    WHERE q.household_id = sqlc.arg(household_id)
+      AND (q.claimed_by = sqlc.arg(member_id)::uuid OR EXISTS (
+          SELECT 1 FROM household_quest_participants p
+          WHERE p.household_id = q.household_id AND p.quest_id = q.id
+            AND p.member_id = sqlc.arg(member_id)::uuid
+      ))
+    FOR UPDATE OF q
+), left_quests AS (
+    DELETE FROM household_quest_participants p
+    USING mine m
+    WHERE p.household_id = m.household_id AND p.quest_id = m.id
+      AND (p.member_id = sqlc.arg(member_id)::uuid OR m.remaining <= 1)
+    RETURNING p.quest_id
+)
+UPDATE household_quests q
+SET claimed_by = m.next_member,
+    claimed_at = CASE WHEN m.next_member IS NULL THEN NULL ELSE m.next_joined_at END,
+    done_at = CASE WHEN m.next_member IS NULL THEN NULL ELSE q.done_at END,
+    updated_at = NOW()
+FROM mine m
+WHERE q.household_id = m.household_id AND q.id = m.id AND m.holder;
+
+-- name: LockMemberPendingCompletions :many
+-- Locks, in id order, every pending completion of the household that the
+-- member marked done or is recorded on, before CancelMemberPendingCompletions
+-- reads them, so its earliest remaining member is read after any concurrent
+-- removal of another member on the same completion has committed.
+SELECT c.id
+FROM quest_completions c
+WHERE c.household_id = sqlc.arg(household_id) AND c.status = 'pending'
+  AND (c.member_id = sqlc.arg(member_id)::uuid OR EXISTS (
+      SELECT 1 FROM quest_completion_members cm
+      WHERE cm.household_id = c.household_id AND cm.completion_id = c.id
+        AND cm.member_id = sqlc.arg(member_id)::uuid
+  ))
+ORDER BY c.id
+FOR UPDATE OF c;
 
 -- name: CancelMemberPendingCompletions :exec
--- Cancels every completion of the member still waiting for approval. No
--- points move. As on reject, a quest whose running cooldown one of those
--- completions started (the quest's completed_at is its done_at, available_at
+-- Takes a member who is leaving the household off every completion still
+-- waiting for approval. Their quest_completion_members row goes. Where they
+-- marked it done, the marker moves first to the earliest remaining recorded
+-- member (added_at, then member_id), so the item stays listed and
+-- approvable and the marker key is never nulled under it; the rest are paid
+-- as the remaining n at approval. A completion with no recorded member left
+-- (a lone member's, or one recorded before quest sharing) is cancelled. No
+-- points move. As on reject, a quest whose running cooldown a cancelled
+-- completion started (the quest's completed_at is its done_at, available_at
 -- still ahead) is available again right away: the chore was never approved,
--- so it does not sit resting. Cooldowns started by anyone else stay.
-WITH cancelled AS (
+-- so it does not sit resting. Cooldowns started by anyone else stay. The
+-- completions are locked after the caller's lock on the member row (member
+-- first, the order Approve uses).
+WITH mine AS (
+    SELECT c.id, c.household_id,
+           (c.member_id IS NULL OR c.member_id = sqlc.arg(member_id)::uuid) AS marker,
+           (SELECT cm.member_id FROM quest_completion_members cm
+            WHERE cm.household_id = c.household_id AND cm.completion_id = c.id
+              AND cm.member_id <> sqlc.arg(member_id)::uuid
+            ORDER BY cm.added_at ASC, cm.member_id ASC
+            LIMIT 1) AS next_member
+    FROM quest_completions c
+    WHERE c.household_id = sqlc.arg(household_id) AND c.status = 'pending'
+      AND (c.member_id = sqlc.arg(member_id)::uuid OR EXISTS (
+          SELECT 1 FROM quest_completion_members cm
+          WHERE cm.household_id = c.household_id AND cm.completion_id = c.id
+            AND cm.member_id = sqlc.arg(member_id)::uuid
+      ))
+    FOR UPDATE OF c
+), left_completions AS (
+    DELETE FROM quest_completion_members cm
+    USING mine m
+    WHERE cm.household_id = m.household_id AND cm.completion_id = m.id
+      AND cm.member_id = sqlc.arg(member_id)::uuid
+    RETURNING cm.completion_id
+), handed_over AS (
+    UPDATE quest_completions hc
+    SET member_id = m.next_member
+    FROM mine m
+    WHERE hc.id = m.id AND m.marker AND m.next_member IS NOT NULL
+    RETURNING hc.id
+), cancelled AS (
     UPDATE quest_completions cc
     SET status = 'cancelled'
-    WHERE cc.household_id = sqlc.arg(household_id) AND cc.member_id = sqlc.arg(member_id)
-      AND cc.status = 'pending'
+    FROM mine m
+    WHERE cc.id = m.id AND m.marker AND m.next_member IS NULL
     RETURNING cc.household_id, cc.quest_id, cc.done_at
 )
 UPDATE household_quests q
@@ -99,25 +328,39 @@ FROM cancelled c
 WHERE q.household_id = c.household_id AND q.id = c.quest_id
   AND q.completed_at = c.done_at AND q.available_at > NOW();
 
--- name: GetPendingCompletionMember :one
--- The member of a pending completion, read without a lock so Approve can
--- lock that member's row before it locks the completion (the order
--- FamilyService.Remove uses).
-SELECT member_id FROM quest_completions
-WHERE household_id = sqlc.arg(household_id) AND id = sqlc.arg(id)
-  AND status = 'pending' AND member_id IS NOT NULL;
+-- name: GetPendingCompletionMembers :one
+-- The marker of a pending completion and every member it covers (earliest
+-- recorded first), read without a lock so Approve can lock those members'
+-- rows before it locks the completion (the order FamilyService.Remove uses).
+-- A completion recorded before quest sharing has no member rows.
+SELECT c.member_id,
+       ARRAY(
+           SELECT cm.member_id FROM quest_completion_members cm
+           WHERE cm.household_id = c.household_id AND cm.completion_id = c.id
+           ORDER BY cm.added_at, cm.member_id
+       )::uuid[] AS member_ids
+FROM quest_completions c
+WHERE c.household_id = sqlc.arg(household_id) AND c.id = sqlc.arg(id)
+  AND c.status = 'pending' AND c.member_id IS NOT NULL;
 
 -- name: MarkQuestDone :one
--- The holder marks the quest done. In one statement the quest is released
--- and starts its cooldown from now (quest_next_available_at: local midnight
--- in the household's timezone, repeat_days days after today), and a pending
--- completion recording the member and the mark-done time is inserted for the
--- administrator. NOW() is one instant per transaction, so completed_at equals
--- the completion's done_at. A quest the member does not hold matches no row
--- and inserts nothing. No points move here.
+-- A member on the quest marks it done: its holder, or any participant when
+-- it is shared. In one statement the quest is released and starts its
+-- cooldown from now (quest_next_available_at: local midnight in the
+-- household's timezone, repeat_days days after today), one pending
+-- completion recording the marker and the mark-done time is inserted for the
+-- administrator, every member on the quest is recorded on that completion
+-- (the lone marker when it is not shared, so n is 1), and the quest's
+-- participants are cleared. Members keep their order: participants by
+-- joined_at, the lone marker at now. NOW() is one instant per transaction, so
+-- completed_at equals the completion's done_at. A quest the member is not on
+-- matches no row and writes nothing. No points move here. The caller holds
+-- the row locks of every member on the quest and then the quest's row lock
+-- (LockHouseholdQuest, a statement of its own), so the participants recorded
+-- and cleared here are the committed ones.
 --
 -- The same statement moves the member's streak for the quest (streaked):
--- count+1 when marked done by its expires_at, else 1, with a new expires_at
+-- the marker's count+1 when marked done by its expires_at, else 1, with a new expires_at
 -- of local midnight starting the day after 2 x repeat_days days from today.
 -- (prev_* still records the step it replaces; a reject no longer reads it
 -- but recomputes the streak: RecomputeMemberQuestStreak.) The completion
@@ -133,7 +376,12 @@ WITH done AS (
     FROM households h
     WHERE h.id = q.household_id
       AND q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id)
-      AND q.claimed_by = sqlc.arg(member_id)::uuid
+      AND q.claimed_by IS NOT NULL
+      AND (q.claimed_by = sqlc.arg(member_id)::uuid OR EXISTS (
+          SELECT 1 FROM household_quest_participants p
+          WHERE p.household_id = q.household_id AND p.quest_id = q.id
+            AND p.member_id = sqlc.arg(member_id)::uuid
+      ))
     RETURNING q.*, h.timezone
 ), streaked AS (
     INSERT INTO member_quest_streaks (
@@ -168,11 +416,34 @@ WITH done AS (
     SELECT sqlc.arg(completion_id)::uuid, d.household_id, d.id, sqlc.arg(member_id)::uuid, NOW(), 'pending', s.count
     FROM done d
     JOIN streaked s ON s.quest_id = d.id
-    RETURNING id
+    RETURNING id, household_id
+), on_quest AS (
+    SELECT p.member_id, p.joined_at
+    FROM done d
+    JOIN household_quest_participants p ON p.household_id = d.household_id AND p.quest_id = d.id
+    UNION ALL
+    SELECT sqlc.arg(member_id)::uuid, NOW()
+    FROM done d
+    WHERE NOT EXISTS (
+        SELECT 1 FROM household_quest_participants p
+        WHERE p.household_id = d.household_id AND p.quest_id = d.id
+          AND p.member_id = sqlc.arg(member_id)::uuid
+    )
+), recorded_members AS (
+    INSERT INTO quest_completion_members (household_id, completion_id, member_id, added_at)
+    SELECT r.household_id, r.id, o.member_id, o.joined_at
+    FROM recorded r
+    CROSS JOIN on_quest o
+    RETURNING member_id
+), cleared AS (
+    DELETE FROM household_quest_participants p
+    USING done d
+    WHERE p.household_id = d.household_id AND p.quest_id = d.id
+    RETURNING p.member_id
 )
 SELECT d.id, d.household_id, d.library_id, d.name, d.points, d.repeat_days, d.notes,
        d.claimed_by, d.claimed_at, d.done_at, d.completed_at, d.available_at,
-       d.created_at, d.updated_at, d.streak_bonus
+       d.created_at, d.updated_at, d.shareable, d.teamwork_bonus, d.streak_bonus
 FROM done d;
 
 -- name: GetMemberQuestStreak :one
@@ -183,9 +454,24 @@ WHERE household_id = sqlc.arg(household_id)
 
 -- name: ListPendingCompletions :many
 -- Completions waiting for approval, one row each, oldest mark-done first,
--- with the chore's name and points and the name of the member who did it.
-SELECT c.id, c.quest_id, q.name AS quest_name, q.points, c.member_id,
-       m.name AS member_name, c.done_at
+-- with the chore's name, current points and teamwork bonus, the member who
+-- marked it done, and every member it covers (member_ids and member_names,
+-- in the same order: earliest recorded first). A completion recorded before
+-- quest sharing has no member rows; the caller reads its marker alone.
+SELECT c.id, c.quest_id, q.name AS quest_name, q.points, q.teamwork_bonus, c.member_id,
+       m.name AS member_name, c.done_at,
+       ARRAY(
+           SELECT cm.member_id FROM quest_completion_members cm
+           JOIN family_members fm ON fm.household_id = cm.household_id AND fm.id = cm.member_id
+           WHERE cm.household_id = c.household_id AND cm.completion_id = c.id
+           ORDER BY cm.added_at, cm.member_id
+       )::uuid[] AS member_ids,
+       ARRAY(
+           SELECT fm.name FROM quest_completion_members cm
+           JOIN family_members fm ON fm.household_id = cm.household_id AND fm.id = cm.member_id
+           WHERE cm.household_id = c.household_id AND cm.completion_id = c.id
+           ORDER BY cm.added_at, cm.member_id
+       )::text[] AS member_names
 FROM quest_completions c
 JOIN household_quests q ON q.household_id = c.household_id AND q.id = c.quest_id
 JOIN family_members m ON m.household_id = c.household_id AND m.id = c.member_id
@@ -196,26 +482,48 @@ ORDER BY c.done_at ASC, c.id ASC;
 -- Approves one pending completion. The completion is locked first and its
 -- status re-read under the lock, so of two concurrent approvals exactly one
 -- gets a row. The quest is not touched: its cooldown already started at
--- mark-done. points is the chore's current points, to credit to member_id;
+-- mark-done. points and teamwork_bonus are the chore's as they stand now
+-- (the CHECK keeps the bonus 0 once shareable is off); member_ids are the
+-- members the completion covers, earliest recorded first, empty for a
+-- completion recorded before quest sharing (its marker alone). member_id
+-- must match the marker the caller already locked; the caller holds the
+-- locks of every recorded member, so the member set cannot change under it.
 -- quest_name is the chore's name, the reason in the points history.
 -- streak_bonus is the chore's current streak bonus and streak_count the
--- member's streak as fixed at this completion's mark-done (NULL for one
+-- marker's streak as fixed at this completion's mark-done (NULL for one
 -- marked done before streaks existed); neither is recomputed from NOW().
--- member_id must match the member the caller already locked.
 WITH pending AS (
-    SELECT pc.id, q.points, q.name, q.streak_bonus
+    SELECT pc.id, q.points, q.teamwork_bonus, q.name, q.streak_bonus
     FROM quest_completions pc
     JOIN household_quests q ON q.household_id = pc.household_id AND q.id = pc.quest_id
     WHERE pc.household_id = sqlc.arg(household_id) AND pc.id = sqlc.arg(id)
       AND pc.status = 'pending' AND pc.member_id = sqlc.arg(member_id)::uuid
     FOR UPDATE OF pc
+), approved AS (
+    UPDATE quest_completions c
+    SET status = 'approved', approved_at = NOW()
+    FROM pending p
+    WHERE c.id = p.id AND c.status = 'pending'
+    RETURNING c.id, c.household_id, c.quest_id, c.member_id, c.done_at, c.approved_at, p.points, p.teamwork_bonus,
+              p.name AS quest_name, p.streak_bonus, c.streak_count
 )
-UPDATE quest_completions c
-SET status = 'approved', approved_at = NOW()
-FROM pending p
-WHERE c.id = p.id AND c.status = 'pending'
-RETURNING c.id, c.quest_id, c.member_id, c.done_at, c.approved_at, p.points, p.name AS quest_name,
-          p.streak_bonus, c.streak_count;
+SELECT a.id, a.quest_id, a.member_id, a.done_at, a.approved_at, a.points, a.teamwork_bonus,
+       a.quest_name, a.streak_bonus, a.streak_count,
+       ARRAY(
+           SELECT cm.member_id FROM quest_completion_members cm
+           WHERE cm.household_id = a.household_id AND cm.completion_id = a.id
+           ORDER BY cm.added_at, cm.member_id
+       )::uuid[] AS member_ids
+FROM approved a;
+
+-- name: SetCompletionMemberAward :exec
+-- Records what an approval credited one member of a completion: their split
+-- plus any teamwork bonus. A completion recorded before quest sharing has no
+-- member row, and this writes nothing for it.
+UPDATE quest_completion_members
+SET points_awarded = sqlc.arg(points_awarded)
+WHERE household_id = sqlc.arg(household_id) AND completion_id = sqlc.arg(completion_id)
+  AND member_id = sqlc.arg(member_id);
 
 -- name: RejectCompletion :one
 -- Rejects one pending completion: no points. If it started the quest's

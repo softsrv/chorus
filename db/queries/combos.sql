@@ -66,11 +66,15 @@ FOR UPDATE OF c;
 -- The combos containing the quest that the member has just finished: the
 -- combo still has two or more chores, the member has not yet been paid it for
 -- this household-local day (one award per combo, member and day), and every
--- one of its chores has an approved completion by the member, not yet counted
--- toward this combo, whose done_at falls on the same household-local day
--- (households.timezone) as done_at. award_day is that day; chore_count is how
--- many completions paying it will claim. The caller holds the combo locks
--- (LockCombosForQuest), so the award check cannot race another payer.
+-- one of its chores has an approved completion covering the member, not yet
+-- counted toward this combo for the member, whose done_at falls on the same
+-- household-local day (households.timezone) as done_at. A completion covers
+-- the member who marked it done and every member recorded on it in
+-- quest_completion_members (a shared quest counts for each of them; one
+-- recorded before quest sharing has no member rows). award_day is that day;
+-- chore_count is how many completions paying it will claim. The caller holds
+-- the combo locks (LockCombosForQuest), so the award check cannot race
+-- another payer.
 WITH day AS (
     SELECT h.timezone,
            (sqlc.arg(done_at)::timestamptz AT TIME ZONE h.timezone)::date AS local_day
@@ -93,7 +97,7 @@ WHERE c.household_id = sqlc.arg(household_id)
   AND NOT EXISTS (
       SELECT 1 FROM combo_awards ca
       WHERE ca.household_id = c.household_id AND ca.combo_id = c.id
-        AND ca.member_id = sqlc.arg(member_id) AND ca.award_day = d.local_day
+        AND ca.member_id = sqlc.arg(member_id)::uuid AND ca.award_day = d.local_day
   )
   AND NOT EXISTS (
       SELECT 1 FROM combo_quests cq
@@ -102,12 +106,17 @@ WHERE c.household_id = sqlc.arg(household_id)
             SELECT 1 FROM quest_completions qc
             WHERE qc.household_id = c.household_id
               AND qc.quest_id = cq.quest_id
-              AND qc.member_id = sqlc.arg(member_id)
+              AND (qc.member_id = sqlc.arg(member_id)::uuid OR EXISTS (
+                  SELECT 1 FROM quest_completion_members cm
+                  WHERE cm.household_id = qc.household_id AND cm.completion_id = qc.id
+                    AND cm.member_id = sqlc.arg(member_id)::uuid
+              ))
               AND qc.status = 'approved'
               AND (qc.done_at AT TIME ZONE d.timezone)::date = d.local_day
               AND NOT EXISTS (
                   SELECT 1 FROM combo_award_completions cac
                   WHERE cac.combo_id = c.id AND cac.quest_completion_id = qc.id
+                    AND cac.member_id = sqlc.arg(member_id)::uuid
               )
         )
   )
@@ -122,23 +131,31 @@ RETURNING *;
 
 -- name: ClaimComboCompletions :execrows
 -- Counts one completion per chore of the combo toward the award: for each
--- chore, the member's earliest approved completion on award_day (household-local) not
--- yet counted toward this combo. No ON CONFLICT: a completion counted twice
--- toward one combo is a unique violation that rolls the approval back.
-INSERT INTO combo_award_completions (combo_award_id, combo_id, quest_completion_id)
-SELECT sqlc.arg(combo_award_id)::uuid, cq.combo_id, pick.id
+-- chore, the earliest approved completion on award_day (household-local)
+-- covering the member (marked by them, or with them recorded in
+-- quest_completion_members) not yet counted toward this combo for the
+-- member. A shared completion is counted once per member it covers. No ON
+-- CONFLICT: a completion counted twice toward one combo for one member is a
+-- unique violation that rolls the approval back.
+INSERT INTO combo_award_completions (combo_award_id, combo_id, quest_completion_id, member_id)
+SELECT sqlc.arg(combo_award_id)::uuid, cq.combo_id, pick.id, sqlc.arg(member_id)::uuid
 FROM combo_quests cq
 JOIN households h ON h.id = cq.household_id
 CROSS JOIN LATERAL (
     SELECT qc.id FROM quest_completions qc
     WHERE qc.household_id = cq.household_id
       AND qc.quest_id = cq.quest_id
-      AND qc.member_id = sqlc.arg(member_id)
+      AND (qc.member_id = sqlc.arg(member_id)::uuid OR EXISTS (
+          SELECT 1 FROM quest_completion_members cm
+          WHERE cm.household_id = qc.household_id AND cm.completion_id = qc.id
+            AND cm.member_id = sqlc.arg(member_id)::uuid
+      ))
       AND qc.status = 'approved'
       AND (qc.done_at AT TIME ZONE h.timezone)::date = sqlc.arg(award_day)::date
       AND NOT EXISTS (
           SELECT 1 FROM combo_award_completions cac
           WHERE cac.combo_id = cq.combo_id AND cac.quest_completion_id = qc.id
+            AND cac.member_id = sqlc.arg(member_id)::uuid
       )
     ORDER BY qc.done_at ASC, qc.id ASC
     LIMIT 1
