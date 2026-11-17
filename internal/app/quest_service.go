@@ -401,19 +401,15 @@ func (s *QuestService) Abandon(ctx context.Context, userID, householdID, questID
 // Share adds target to the acting member's shareable quest, so both hold it.
 // Both members prove themselves with their own PIN, as on accept: a wrong
 // PIN for the acting member is ErrWrongPIN, one for the target is
-// ErrWrongTargetPIN (also ErrWrongPIN). A quest that is not in this household, not
-// shareable or not held by the acting member, and a target that is not a
-// member of this household, are ErrNotFound. Sharing with oneself or with a
-// member already on the quest is ErrAlreadyParticipant. Nothing changes on
-// any error. The first share records the holder as a participant too.
+// ErrWrongTargetPIN (also ErrWrongPIN). The quest is checked before the
+// target's PIN so a wrong target PIN is only reported on a share that would
+// otherwise succeed. A quest that is not in this household, not shareable or
+// not held by the acting member, and a target that is not a member of this
+// household, are ErrNotFound. Sharing with oneself or with a member already
+// on the quest is ErrAlreadyParticipant. Nothing changes on any error. The
+// first share records the holder as a participant too.
 func (s *QuestService) Share(ctx context.Context, userID, householdID, questID uuid.UUID, act, target MemberAction) (QuestView, error) {
 	if err := s.verifyActingMember(ctx, userID, householdID, act); err != nil {
-		return QuestView{}, err
-	}
-	if _, err := VerifyMemberPin(ctx, s.q, householdID, target.MemberID, target.PIN); err != nil {
-		if errors.Is(err, ErrWrongPIN) {
-			return QuestView{}, ErrWrongTargetPIN
-		}
 		return QuestView{}, err
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -427,19 +423,27 @@ func (s *QuestService) Share(ctx context.Context, userID, householdID, questID u
 	// first), so neither a concurrent removal nor a crossed share deadlocks.
 	for _, id := range memberLockOrder(act.MemberID, target.MemberID) {
 		if _, err := notFoundIfNoRows(qtx.LockFamilyMember(ctx, db.LockFamilyMemberParams{HouseholdID: householdID, ID: id})); err != nil {
-			// A member was removed between the PIN check and the lock.
 			return QuestView{}, err
 		}
+	}
+	quest, err := notFoundIfNoRows(qtx.GetHouseholdQuest(ctx, db.GetHouseholdQuestParams{HouseholdID: householdID, ID: questID}))
+	if err != nil {
+		return QuestView{}, err
+	}
+	if !quest.Shareable || quest.ClaimedBy == nil || *quest.ClaimedBy != act.MemberID {
+		return QuestView{}, ErrNotFound
+	}
+	if _, err := VerifyMemberPin(ctx, qtx, householdID, target.MemberID, target.PIN); err != nil {
+		if errors.Is(err, ErrWrongPIN) {
+			return QuestView{}, ErrWrongTargetPIN
+		}
+		return QuestView{}, err
 	}
 	added, err := qtx.ShareQuest(ctx, db.ShareQuestParams{
 		HouseholdID: householdID, ID: questID, MemberID: act.MemberID, TargetMemberID: target.MemberID,
 	})
 	if err != nil {
 		return QuestView{}, fmt.Errorf("share quest: %w", err)
-	}
-	quest, err := notFoundIfNoRows(qtx.GetHouseholdQuest(ctx, db.GetHouseholdQuestParams{HouseholdID: householdID, ID: questID}))
-	if err != nil {
-		return QuestView{}, err
 	}
 	if len(added) == 0 {
 		// Nothing written: either the quest is not one the actor may share,

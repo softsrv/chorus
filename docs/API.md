@@ -111,7 +111,7 @@ Library quest: `id, name, points, repeat_days, notes`. The library is the same f
 | `POST /households/{id}/quests` | `name, points?, repeat_days?, notes?, shareable?, teamwork_bonus?` | admin; `X-Admin-PIN` header if set. `points` defaults to 0, `repeat_days` to 1, `shareable` to false, `teamwork_bonus` to 0. `201` quest |
 | `POST /households/{id}/quests/from-library` | `library_id` | admin; `X-Admin-PIN` header if set. Copies the library quest's name, points, days and notes; editing the copy never changes the library. `201` quest, `404` for an unknown `library_id` |
 | `GET /households/{id}/quests/{questId}` | none | Any member |
-| `PUT /households/{id}/quests/{questId}` | same as POST | admin; `X-Admin-PIN` header if set. Full replacement |
+| `PUT /households/{id}/quests/{questId}` | same as POST | admin; `X-Admin-PIN` header if set. Full replacement (omitted `shareable` is false, omitted `teamwork_bonus` is 0) |
 | `DELETE /households/{id}/quests/{questId}` | none | admin; `X-Admin-PIN` header if set. `204` |
 | `POST /households/{id}/quests/{questId}/accept` | `member_id, pin?` | The acting family member takes an available quest. `200` quest; `409 quest_taken` when another member holds it or it is waiting for its midnight |
 | `POST /households/{id}/quests/{questId}/abandon` | `member_id, pin?` | The holder abandons the quest, which returns it to the pool for everyone. On a shared quest any member on it can abandon: only they leave, and the quest stays with the others (see the lifecycle below). `200` quest; `404` when the member does not hold it |
