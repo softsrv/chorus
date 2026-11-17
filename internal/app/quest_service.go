@@ -343,15 +343,39 @@ func (s *QuestService) Accept(ctx context.Context, userID, householdID, questID 
 	return QuestView{}, ErrQuestTaken
 }
 
-// Abandon puts the acting member's quest back in the pool for everyone. Only
-// the quest's holder can abandon it; any other case is ErrNotFound and
-// changes nothing.
+// Abandon takes the acting member off a quest they hold or are on. A quest
+// that was theirs alone goes back in the pool for everyone. On a shared
+// quest only their part goes: the holder of record passes to the earliest
+// remaining participant, and once one member is left the quest is no longer
+// shared (approval then pays that member the full points and no bonus). A
+// member not on the quest, or a quest not in this household, is ErrNotFound
+// and changes nothing.
+//
+// Every member row on the quest is locked first, in id order, then the
+// quest (member first, the order FamilyService.Remove uses): handing the
+// quest to another member checks that member's row, which must not wait on
+// a concurrent removal that already waits on this quest.
 func (s *QuestService) Abandon(ctx context.Context, userID, householdID, questID uuid.UUID, act MemberAction) (QuestView, error) {
 	if err := s.verifyActingMember(ctx, userID, householdID, act); err != nil {
 		return QuestView{}, err
 	}
-	quest, err := s.q.AbandonQuest(ctx, db.AbandonQuestParams{HouseholdID: householdID, ID: questID, MemberID: &act.MemberID})
-	return s.viewOf(ctx, quest, err)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return QuestView{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	qtx := s.q.WithTx(tx)
+	if err := lockQuestMembers(ctx, qtx, householdID, questID, act.MemberID); err != nil {
+		return QuestView{}, err
+	}
+	quest, err := notFoundIfNoRows(qtx.AbandonQuest(ctx, db.AbandonQuestParams{HouseholdID: householdID, ID: questID, MemberID: act.MemberID}))
+	if err != nil {
+		return QuestView{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return QuestView{}, fmt.Errorf("commit: %w", err)
+	}
+	return s.view(ctx, quest)
 }
 
 // Share adds target to the acting member's shareable quest, so both hold it.
@@ -753,7 +777,7 @@ func payCombos(ctx context.Context, qtx *db.Queries, householdID, questID uuid.U
 			return db.FamilyMember{}, nil, fmt.Errorf("record combo award: %w", err)
 		}
 		claimed, err := qtx.ClaimComboCompletions(ctx, db.ClaimComboCompletionsParams{
-			ComboAwardID: awardID, MemberID: &member.ID, AwardDay: c.AwardDay, HouseholdID: householdID, ComboID: c.ID,
+			ComboAwardID: awardID, MemberID: member.ID, AwardDay: c.AwardDay, HouseholdID: householdID, ComboID: c.ID,
 		})
 		if err != nil {
 			return db.FamilyMember{}, nil, fmt.Errorf("claim combo completions: %w", err)

@@ -12,7 +12,15 @@ import (
 )
 
 type Querier interface {
-	// Puts a quest back in the pool. Only its current holder can abandon it.
+	// The acting member leaves a quest they hold or are on. Only their part goes:
+	// their participant row. If they held it, the holder of record moves to the
+	// earliest remaining participant (joined_at, then member_id), who keeps
+	// their joined_at as claimed_at; a quest with nobody left is back in the
+	// pool, done_at cleared with the holder so the done_at-needs-a-holder CHECK
+	// holds. A quest left with one member is no longer shared, so that member's
+	// participant row goes too. A member not on the quest, or a quest not in
+	// this household, matches no row and changes nothing. The quest is locked
+	// after the caller's member locks (member first).
 	AbandonQuest(ctx context.Context, arg AbandonQuestParams) (HouseholdQuest, error)
 	AddHouseholdMember(ctx context.Context, arg AddHouseholdMemberParams) error
 	AddMemberPoints(ctx context.Context, arg AddMemberPointsParams) (FamilyMember, error)
@@ -41,9 +49,12 @@ type Querier interface {
 	// first, the order Approve uses).
 	CancelMemberPendingCompletions(ctx context.Context, arg CancelMemberPendingCompletionsParams) error
 	// Counts one completion per chore of the combo toward the award: for each
-	// chore, the member's earliest approved completion on award_day (household-local) not
-	// yet counted toward this combo. No ON CONFLICT: a completion counted twice
-	// toward one combo is a unique violation that rolls the approval back.
+	// chore, the earliest approved completion on award_day (household-local)
+	// covering the member (marked by them, or with them recorded in
+	// quest_completion_members) not yet counted toward this combo for the
+	// member. A shared completion is counted once per member it covers. No ON
+	// CONFLICT: a completion counted twice toward one combo for one member is a
+	// unique violation that rolls the approval back.
 	ClaimComboCompletions(ctx context.Context, arg ClaimComboCompletionsParams) (int64, error)
 	ClaimHouseholdProvisioning(ctx context.Context, id uuid.UUID) (int64, error)
 	// Assigns an available quest to a family member. The availability check and
@@ -139,11 +150,15 @@ type Querier interface {
 	// The combos containing the quest that the member has just finished: the
 	// combo still has two or more chores, the member has not yet been paid it for
 	// this household-local day (one award per combo, member and day), and every
-	// one of its chores has an approved completion by the member, not yet counted
-	// toward this combo, whose done_at falls on the same household-local day
-	// (households.timezone) as done_at. award_day is that day; chore_count is how
-	// many completions paying it will claim. The caller holds the combo locks
-	// (LockCombosForQuest), so the award check cannot race another payer.
+	// one of its chores has an approved completion covering the member, not yet
+	// counted toward this combo for the member, whose done_at falls on the same
+	// household-local day (households.timezone) as done_at. A completion covers
+	// the member who marked it done and every member recorded on it in
+	// quest_completion_members (a shared quest counts for each of them; one
+	// recorded before quest sharing has no member rows). award_day is that day;
+	// chore_count is how many completions paying it will claim. The caller holds
+	// the combo locks (LockCombosForQuest), so the award check cannot race
+	// another payer.
 	ListCombosCompletedByMemberOnDay(ctx context.Context, arg ListCombosCompletedByMemberOnDayParams) ([]ListCombosCompletedByMemberOnDayRow, error)
 	// Events overlapping [range_start, range_end).
 	ListEventsInRange(ctx context.Context, arg ListEventsInRangeParams) ([]Event, error)

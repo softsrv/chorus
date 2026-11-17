@@ -82,12 +82,56 @@ WHERE household_id = sqlc.arg(household_id) AND id = sqlc.arg(id)
 RETURNING *;
 
 -- name: AbandonQuest :one
--- Puts a quest back in the pool. Only its current holder can abandon it.
-UPDATE household_quests
-SET claimed_by = NULL, claimed_at = NULL, updated_at = NOW()
-WHERE household_id = sqlc.arg(household_id) AND id = sqlc.arg(id)
-  AND claimed_by = sqlc.arg(member_id)
-RETURNING *;
+-- The acting member leaves a quest they hold or are on. Only their part goes:
+-- their participant row. If they held it, the holder of record moves to the
+-- earliest remaining participant (joined_at, then member_id), who keeps
+-- their joined_at as claimed_at; a quest with nobody left is back in the
+-- pool, done_at cleared with the holder so the done_at-needs-a-holder CHECK
+-- holds. A quest left with one member is no longer shared, so that member's
+-- participant row goes too. A member not on the quest, or a quest not in
+-- this household, matches no row and changes nothing. The quest is locked
+-- after the caller's member locks (member first).
+WITH mine AS (
+    SELECT q.household_id, q.id,
+           q.claimed_by IS NOT DISTINCT FROM sqlc.arg(member_id)::uuid AS holder,
+           nxt.member_id AS next_member, nxt.joined_at AS next_joined_at,
+           (SELECT count(*) FROM household_quest_participants r
+            WHERE r.household_id = q.household_id AND r.quest_id = q.id
+              AND r.member_id <> sqlc.arg(member_id)::uuid) AS remaining
+    FROM household_quests q
+    LEFT JOIN LATERAL (
+        SELECT p.member_id, p.joined_at FROM household_quest_participants p
+        WHERE p.household_id = q.household_id AND p.quest_id = q.id
+          AND p.member_id <> sqlc.arg(member_id)::uuid
+        ORDER BY p.joined_at ASC, p.member_id ASC
+        LIMIT 1
+    ) nxt ON true
+    WHERE q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id)
+      AND (q.claimed_by = sqlc.arg(member_id)::uuid OR EXISTS (
+          SELECT 1 FROM household_quest_participants p
+          WHERE p.household_id = q.household_id AND p.quest_id = q.id
+            AND p.member_id = sqlc.arg(member_id)::uuid
+      ))
+    FOR UPDATE OF q
+), left_quest AS (
+    DELETE FROM household_quest_participants p
+    USING mine m
+    WHERE p.household_id = m.household_id AND p.quest_id = m.id
+      AND (p.member_id = sqlc.arg(member_id)::uuid OR m.remaining <= 1)
+    RETURNING p.quest_id
+)
+UPDATE household_quests q
+SET claimed_by = CASE WHEN m.holder THEN m.next_member ELSE q.claimed_by END,
+    claimed_at = CASE WHEN NOT m.holder THEN q.claimed_at
+                      WHEN m.next_member IS NULL THEN NULL
+                      ELSE m.next_joined_at END,
+    done_at = CASE WHEN m.holder AND m.next_member IS NULL THEN NULL ELSE q.done_at END,
+    updated_at = NOW()
+FROM mine m
+WHERE q.household_id = m.household_id AND q.id = m.id
+RETURNING q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes,
+          q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at,
+          q.created_at, q.updated_at, q.shareable, q.teamwork_bonus;
 
 -- name: ShareQuest :many
 -- The holder of a shareable quest adds another member of the household to

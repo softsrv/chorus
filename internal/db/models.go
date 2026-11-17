@@ -49,6 +49,7 @@ type ComboAwardCompletion struct {
 	ComboAwardID      uuid.UUID `json:"combo_award_id"`
 	ComboID           uuid.UUID `json:"combo_id"`
 	QuestCompletionID uuid.UUID `json:"quest_completion_id"`
+	MemberID          uuid.UUID `json:"member_id"`
 }
 
 type ComboQuest struct {

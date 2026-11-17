@@ -56,3 +56,17 @@ CREATE TABLE quest_completion_members (
 
 CREATE INDEX idx_quest_completion_members_member
     ON quest_completion_members (household_id, member_id);
+
+-- 4. A shared completion counts toward each of its members' combos, so a
+--    completion is counted once per combo and member, not once per combo.
+--    member_id is the award's member; existing rows take it from their award.
+ALTER TABLE combo_award_completions ADD COLUMN member_id UUID;
+UPDATE combo_award_completions cac
+SET member_id = ca.member_id
+FROM combo_awards ca
+WHERE ca.id = cac.combo_award_id;
+ALTER TABLE combo_award_completions ALTER COLUMN member_id SET NOT NULL;
+ALTER TABLE combo_award_completions
+    DROP CONSTRAINT uq_combo_award_completions_combo_completion,
+    ADD CONSTRAINT uq_combo_award_completions_combo_completion_member
+        UNIQUE (combo_id, quest_completion_id, member_id);

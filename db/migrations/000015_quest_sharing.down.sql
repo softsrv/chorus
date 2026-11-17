@@ -25,6 +25,21 @@ BEGIN
 END
 $$;
 
+-- A completion shared by several members may count toward the same combo
+-- once per member. The old schema counts it once per combo, so only the
+-- earliest award's row is kept. No award or balance changes, and nobody can
+-- be paid again: the award row still holds that member's combo for that day.
+DELETE FROM combo_award_completions cac
+USING combo_award_completions keep, combo_awards ka, combo_awards ca
+WHERE keep.combo_id = cac.combo_id AND keep.quest_completion_id = cac.quest_completion_id
+  AND ka.id = keep.combo_award_id AND ca.id = cac.combo_award_id
+  AND (ka.awarded_at, ka.id) < (ca.awarded_at, ca.id);
+ALTER TABLE combo_award_completions
+    DROP CONSTRAINT uq_combo_award_completions_combo_completion_member,
+    ADD CONSTRAINT uq_combo_award_completions_combo_completion
+        UNIQUE (combo_id, quest_completion_id);
+ALTER TABLE combo_award_completions DROP COLUMN member_id;
+
 DROP TABLE quest_completion_members;
 
 ALTER TABLE quest_completions
