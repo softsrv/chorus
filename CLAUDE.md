@@ -12,12 +12,13 @@ make app              # Just the app container, foreground, hot reload (Ctrl-C s
 make run              # One-off app container without hot reload
 make test             # Unit tests (-race)
 make test-js          # Web client unit tests (node --test web/jstest/quests.test.mjs; needs Node 22+)
-make test-integration # Migrates chorus_test, then runs integration tests against it
+make test-integration # Migrates chorus_test, runs round-trip test, then runs integration tests
 make check            # vet + unit + web JS unit + integration + govulncheck (what CI runs)
 make vet / fmt / lint
 
 # Database
 make migrate-up | migrate-down | migrate-status
+make migrate-roundtrip-test       # Round-trip (down -all then up) on chorus_test; every new migration needs a working .down.sql
 make migrate-create NAME=<name>
 make sqlc-generate                # Regenerate internal/db/ from db/queries/
 make services-reset               # Wipe the local DB volume
