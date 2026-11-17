@@ -187,6 +187,14 @@ func TestIntegration_QuestCopyFromLibrary(t *testing.T) {
 		copied.Points != 40 || copied.RepeatDays != 30 || copied.Notes != washCar.Notes {
 		t.Fatalf("copy %+v does not match library %+v", copied, washCar)
 	}
+	// CLM-15: a library copy is not shareable and has no teamwork bonus,
+	// as stored, not only as returned.
+	if copied.Shareable || copied.TeamworkBonus != 0 {
+		t.Fatalf("copy shareable=%v teamwork_bonus=%d, want false and 0", copied.Shareable, copied.TeamworkBonus)
+	}
+	if stored, err := quests.Get(ctx, alice, h.ID, copied.ID); err != nil || stored.Shareable || stored.TeamworkBonus != 0 {
+		t.Fatalf("stored copy shareable=%v teamwork_bonus=%d (err %v), want false and 0", stored.Shareable, stored.TeamworkBonus, err)
+	}
 
 	// CLM-3: CopyFromLibrary-edit path invalid inputs are rejected and leave row unchanged
 	var ve *app.ValidationError
