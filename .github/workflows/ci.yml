@@ -30,9 +30,13 @@ jobs:
       TEST_DATABASE_URL: postgres://chorus:chorus@localhost:5432/chorus_test?sslmode=disable
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      - name: Secret scan
+        run: make secret-scan
       - name: Verify sqlc output is up to date
         run: |
           go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1 generate -f db/sqlc.yaml

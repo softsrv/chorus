@@ -13,7 +13,8 @@ make run              # One-off app container without hot reload
 make test             # Unit tests (-race)
 make test-js          # Web client unit tests (node --test web/jstest/quests.test.mjs; needs Node 22+)
 make test-integration # Migrates chorus_test, then runs integration tests against it
-make check            # vet + unit + web JS unit + integration + govulncheck (what CI runs)
+make secret-scan      # Pinned gitleaks full-history scan (--redact) against .gitleaks.toml
+make check            # vet + unit + web JS unit + integration + govulncheck + secret-scan (what CI runs)
 make vet / fmt / lint
 
 # Database
@@ -25,6 +26,8 @@ make services-reset               # Wipe the local DB volume
 # Docker
 make prod             # Multi-stage, distroless, non-root image
 ```
+
+Test fixtures and configuration must use obviously fake values or be allowlisted in `.gitleaks.toml` on purpose.
 
 Single test: `go test -tags integration -run TestAPI_EndToEnd ./internal/http/` (needs `TEST_DATABASE_URL`; `set -a; . ./.env; set +a` loads it).
 
