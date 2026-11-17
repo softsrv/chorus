@@ -656,6 +656,7 @@ const questMeta = (q) => `${q.points} points · resets at midnight after ${q.rep
 
 async function questsTab(h, $root, notice = null) {
   const rerender = (next = null) => { $root.replaceChildren(); questsTab(h, $root, next).catch((err) => showError($root, err)); };
+  const member = activeMember; // the view this render is for; a later pick makes it stale
 
   const [page, library, family] = await Promise.all([
     api('GET', `/households/${h.id}/quests?limit=100`),
@@ -669,13 +670,14 @@ async function questsTab(h, $root, notice = null) {
 
   const cards = [
     notice && alertBox('warning', notice),
-    activeMember ? await takeCard(h, quests, nameOf, rerender) : card(null,
+    member ? await takeCard(h, quests, nameOf, rerender, member) : card(null,
       el('h3', { class: 'font-semibold', text: 'Quests' }),
       el('p', { class: 'text-sm opacity-70', text: 'Choose a family member to take quests.' })),
-    !activeMember && await approvalsCard(h, members, rerender),
+    !member && await approvalsCard(h, members, rerender),
     managementVisible() && manageQuestsCard(h, quests, library, page, rerender),
     combosData && manageCombosCard(h, combosData, rerender),
   ].filter(Boolean);
+  if (activeMember !== member) return; // a newer pick renders its own view; never overwrite it with this one
   $root.replaceChildren(el('div', { class: 'space-y-4' }, cards));
 }
 
@@ -709,35 +711,47 @@ async function loadCombosData(h, firstPage) {
 // it now: a chore re-taken after its cooldown keeps showing the earlier
 // completion that waits, and Mark done stays, since each marking is its own
 // completion.
-async function takeCard(h, quests, nameOf, rerender) {
+async function takeCard(h, quests, nameOf, rerender, member = activeMember) {
   const $err = el('div');
   const $detail = el('div');
-  const parts = partitionQuests(quests, activeMember.id);
+  // Everything this card shows and sends belongs to `member`, the member it
+  // was started for: the lists, the title, the history and the actions. A
+  // different member picked (or the selection cleared) while the history
+  // read is in flight makes this card stale, and it renders nothing.
+  const parts = partitionQuests(quests, member.id);
   // The points history is this card's own read, made once per member
   // selection (memberHistory is keyed on the activeMember object, which each
-  // pick replaces), never on the rerender after an accept, done or abandon:
-  // those actions award no points, and the read has a PIN-limited budget of
-  // its own. Its failure (a 429, a 5xx, a network error) shows inside the
-  // history section until the member is picked again or the page reloads,
-  // and the quest lists still render. A 403 wrong_pin goes to the same
-  // handler member actions use, which returns to the picker.
-  if (memberHistory?.member !== activeMember) {
-    const member = activeMember;
-    try {
-      const historyRes = await api('GET', `/households/${h.id}/family-members/${member.id}/points-history`, undefined, {
-        headers: { 'X-Member-PIN': member.pin ?? '' },
+  // pick replaces, and holds the one in-flight read for it), never on the
+  // rerender after an accept, done or abandon: those actions award no
+  // points, and the read has a PIN-limited budget of its own. Its failure (a
+  // 429, a 5xx, a network error) shows inside the history section until the
+  // member is picked again or the page reloads, and the quest lists still
+  // render. A 403 wrong_pin goes to the same handler member actions use,
+  // which returns to the picker; a stale read's wrong_pin is dropped.
+  if (memberHistory?.member !== member) {
+    const ready = api('GET', `/households/${h.id}/family-members/${member.id}/points-history`, undefined, {
+      headers: { 'X-Member-PIN': member.pin ?? '' },
+    }).then(
+      (res) => ({ items: res?.items || [], error: null, failure: null }),
+      (err) => {
+        if (err instanceof ApiError && err.code === 'wrong_pin') return { items: [], error: null, failure: err };
+        console.error('points history', err);
+        return { items: [], error: 'Could not load points history. Reload to try again.', failure: null };
       });
-      memberHistory = { member, items: historyRes?.items || [], error: null };
-    } catch (err) {
-      if (memberActionFailed(err)) return null;
-      console.error('points history', err);
-      memberHistory = { member, items: [], error: 'Could not load points history. Reload to try again.' };
-    }
+    memberHistory = { member, ready };
   }
-  const history = memberHistory.items;
-  const historyError = memberHistory.error;
+  const result = await memberHistory.ready;
+  if (activeMember !== member) return null; // another member was picked meanwhile
+  if (result.failure) {
+    memberHistory = null;
+    memberActionFailed(result.failure);
+    return null;
+  }
+  const history = result.items;
+  const historyError = result.error;
 
   const act = (verb, q) => action(async () => {
+    if (activeMember !== member) return; // this card is stale: never send another member's identity for its quests
     const body = activeMemberAction();
     if (!body) return;
     try {
@@ -770,7 +784,7 @@ async function takeCard(h, quests, nameOf, rerender) {
     items.length ? el('ul', {}, items.map(render)) : el('p', { class: 'text-xs opacity-60', text: empty }));
 
   return card(null,
-    el('h3', { class: 'font-semibold', text: `Quests for ${activeMember.name}` }),
+    el('h3', { class: 'font-semibold', text: `Quests for ${member.name}` }),
     $err,
     section('Available', parts.available,
       (q) => row(q,

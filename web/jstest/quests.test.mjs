@@ -526,6 +526,77 @@ test('the points history is read once per member selection, not again on the rer
   assert.equal(historyReads().length, 2, 'picking the member again reads it afresh');
 });
 
+test('switching members while the first member\'s history read is pending never shows or acts on the first member\'s view under the second', async () => {
+  srv.quests = [
+    quest({ id: 'qa', name: 'Ann chore', available: false, claimed_by: 'm-a' }),
+    quest({ id: 'qb', name: 'Ben chore', available: false, claimed_by: 'm-b' }),
+  ];
+  srv.pointsHistory = (r) => [200, { items: r.path.includes('/m-a/')
+    ? [{ id: 'a1', points: 7, reason: 'Ann award', earned_at: '2025-01-01T12:00:00Z' }]
+    : [{ id: 'b1', points: 9, reason: 'Ben award', earned_at: '2025-01-02T12:00:00Z' }] }];
+  const posted = [];
+  srv.extra[`POST ${HP}/quests/qa/done`] = (r) => { posted.push(['qa', r.body]); return [200, srv.quests[0]]; };
+  srv.extra[`POST ${HP}/quests/qb/done`] = (r) => { posted.push(['qb', r.body]); return [200, srv.quests[1]]; };
+  await loadApp();
+
+  // Hold Ann's points-history response until Ben's view has rendered.
+  const realFetch = globalThis.fetch;
+  let releaseAnn;
+  const annHeld = new Promise((r) => { releaseAnn = r; });
+  globalThis.fetch = async (url, init) => {
+    const res = realFetch(url, init);
+    if (url.includes('/family-members/m-a/points-history')) await annHeld;
+    return res;
+  };
+
+  await becomeAnn();
+  assert.doesNotMatch(text(), /Quests for/, 'Ann\'s view waits for her history');
+  await becomeBen();
+  assert.match(text(), /Quests for Ben/);
+  releaseAnn();
+  await settle();
+
+  // Ben's view stands: his title, his list, his history; nothing of Ann's.
+  assert.match(text(), /Quests for Ben/);
+  assert.doesNotMatch(text(), /Quests for Ann/);
+  assert.match(section(env.$app, 'Mine'), /Ben chore/);
+  assert.doesNotMatch(section(env.$app, 'Mine'), /Ann chore/);
+  const historyNode = sectionNode(env.$app, 'Points history');
+  assert.match(historyNode.textContent, /Ben award/);
+  assert.doesNotMatch(historyNode.textContent, /Ann award/);
+
+  // Mark done from the view on screen posts Ben's quest with Ben's identity.
+  assert.equal(buttons(env.$app, 'Mark done').length, 1);
+  await click(buttons(env.$app, 'Mark done')[0]);
+  assert.deepEqual(posted, [['qb', { member_id: 'm-b', pin: '1234' }]]);
+  // Ann's late answer never displaced Ben's history: the rerender after the
+  // action reads nothing again, and Ben's history still shows.
+  const benReads = calls.filter((c) => c.method === 'GET' && c.path === `${HP}/family-members/m-b/points-history`);
+  assert.equal(benReads.length, 1, 'one history read for Ben, none duplicated by the stale answer');
+  assert.match(sectionNode(env.$app, 'Points history').textContent, /Ben award/);
+  globalThis.fetch = realFetch;
+});
+
+test('a wrong_pin answering a superseded member\'s history read does not throw out the member picked since', async () => {
+  srv.pointsHistory = (r) => (r.path.includes('/m-a/') ? err(403, 'wrong_pin', 'Wrong PIN.') : [200, { items: [] }]);
+  await loadApp();
+  const realFetch = globalThis.fetch;
+  let releaseAnn;
+  const annHeld = new Promise((r) => { releaseAnn = r; });
+  globalThis.fetch = async (url, init) => {
+    const res = realFetch(url, init);
+    if (url.includes('/family-members/m-a/points-history')) await annHeld;
+    return res;
+  };
+  await becomeAnn();
+  await becomeBen();
+  releaseAnn();
+  await settle();
+  assert.match(text(), /Viewing as: Ben/);
+  assert.match(text(), /Quests for Ben/);
+  globalThis.fetch = realFetch;
+});
+
 test('CLM-11: empty points-history renders empty message and no table', async () => {
   srv.history = [];
   await loadApp();
