@@ -51,7 +51,7 @@ function form({ fields, submit, onSubmit, inline = false }) {
   const inputs = {};
   const hints = {};
   const multi = new Set(fields.filter((f) => f.type === 'multiselect').map((f) => f.name));
-  const rows = fields.map((f) => {
+  const fieldRows = fields.map((f) => {
     let input;
     if (f.type === 'select') {
       input = el('select', { name: f.name, class: 'select select-bordered w-full' },
@@ -64,7 +64,16 @@ function form({ fields, submit, onSubmit, inline = false }) {
     } else if (f.type === 'textarea') {
       input = el('textarea', { name: f.name, class: 'textarea textarea-bordered w-full', rows: 2, text: f.value ?? '' });
     } else if (f.type === 'checkbox') {
-      input = el('input', { type: 'checkbox', name: f.name, class: 'checkbox', checked: !!f.value });
+      input = el('input', {
+        type: 'checkbox', name: f.name, class: 'checkbox', checked: !!f.value,
+        onclick: () => {
+          if (typeof window !== 'undefined' && typeof window.HTMLInputElement === 'undefined') {
+            input.checked = !input.checked;
+          }
+          updateVisibility();
+        },
+        onchange: () => updateVisibility(),
+      });
     } else {
       input = el('input', {
         type: f.type || 'text', name: f.name, class: 'input input-bordered w-full',
@@ -73,12 +82,38 @@ function form({ fields, submit, onSubmit, inline = false }) {
     }
     inputs[f.name] = input;
     hints[f.name] = el('p', { class: 'text-error text-xs mt-1' });
+    let $row;
     if (f.type === 'checkbox') {
-      return el('label', { class: 'label cursor-pointer justify-start gap-2' }, input, el('span', { text: f.label }));
+      $row = el('label', { class: 'label cursor-pointer justify-start gap-2' }, input, el('span', { text: f.label }));
+    } else {
+      $row = el('label', { class: inline ? 'flex-1 min-w-32' : 'block' },
+        el('span', { class: 'text-sm', text: f.label }), input, hints[f.name]);
     }
-    return el('label', { class: inline ? 'flex-1 min-w-32' : 'block' },
-      el('span', { class: 'text-sm', text: f.label }), input, hints[f.name]);
+    return { f, $row };
   });
+
+  const getValues = () => {
+    const values = {};
+    for (const [name, input] of Object.entries(inputs)) {
+      if (input.type === 'checkbox') values[name] = input.checked;
+      else if (multi.has(name)) values[name] = Array.from(input.children).filter((o) => o.selected).map((o) => o.value);
+      else values[name] = input.value;
+    }
+    return values;
+  };
+
+  const updateVisibility = () => {
+    const values = getValues();
+    const visibleRows = fieldRows.filter(({ f }) => !f.show || f.show(values)).map(({ $row }) => $row);
+    $form.replaceChildren($error, ...visibleRows, $submit);
+  };
+
+  const initialValues = {};
+  for (const f of fields) {
+    if (f.type === 'checkbox') initialValues[f.name] = !!f.value;
+    else initialValues[f.name] = f.value ?? '';
+  }
+  const visibleRows = fieldRows.filter(({ f }) => !f.show || f.show(initialValues)).map(({ $row }) => $row);
 
   const $submit = el('button', { type: 'submit', class: 'btn btn-primary', text: submit });
   const $form = el('form', {
@@ -87,12 +122,7 @@ function form({ fields, submit, onSubmit, inline = false }) {
       e.preventDefault();
       $error.replaceChildren();
       Object.values(hints).forEach((h) => { h.textContent = ''; });
-      const values = {};
-      for (const [name, input] of Object.entries(inputs)) {
-        if (input.type === 'checkbox') values[name] = input.checked;
-        else if (multi.has(name)) values[name] = Array.from(input.children).filter((o) => o.selected).map((o) => o.value);
-        else values[name] = input.value;
-      }
+      const values = getValues();
       $submit.disabled = true;
       try {
         await onSubmit(values, $form);
@@ -102,7 +132,7 @@ function form({ fields, submit, onSubmit, inline = false }) {
         $submit.disabled = false;
       }
     },
-  }, $error, rows, $submit);
+  }, $error, ...visibleRows, $submit);
   return $form;
 }
 
