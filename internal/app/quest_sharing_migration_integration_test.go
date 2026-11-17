@@ -138,7 +138,7 @@ func TestIntegration_QuestSharingMigration(t *testing.T) {
 	// cooldown; nobody's points move.
 	orphanDoneAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
 	if _, err := tx.Exec(ctx, `INSERT INTO household_quests (id, household_id, name, points, repeat_days, completed_at, available_at)
-		VALUES ($1, $2, 'Orphaned', 10, 7, $3, $3 + interval '7 days')`, orphanQuestID, hhID, orphanDoneAt); err != nil {
+		VALUES ($1, $2, 'Orphaned', 10, 7, $3::timestamptz, $3::timestamptz + interval '7 days')`, orphanQuestID, hhID, orphanDoneAt); err != nil {
 		t.Fatalf("insert orphan quest: %v", err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO quest_completions (id, household_id, quest_id, member_id, done_at, status)
