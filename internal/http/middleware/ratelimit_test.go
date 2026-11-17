@@ -122,4 +122,97 @@ func TestRateLimiter(t *testing.T) {
 			t.Errorf("read past budget: got %d, want 429", got)
 		}
 	})
+
+	t.Run("concurrent requests at expired window reset atomically without overshooting limit", func(t *testing.T) {
+		t.Parallel()
+
+		const limit = 5
+		const window = 50 * time.Millisecond
+		rl := middleware.NewRateLimiter(context.Background(), limit, window, middleware.IPKeyFunc(0))
+
+		// Prime the entry so that an expired entry exists in rl.store.
+		primeReq := httptest.NewRequest(http.MethodGet, "/", nil)
+		primeReq.RemoteAddr = "192.168.1.1:1234"
+		rr := httptest.NewRecorder()
+		rl.Middleware(alwaysOK).ServeHTTP(rr, primeReq)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("prime request failed: got %d, want 200", rr.Code)
+		}
+
+		// Wait until the window expires.
+		time.Sleep(60 * time.Millisecond)
+
+		// Set up Middleware and FailuresOnly handlers.
+		// FailuresOnly with a 403 handler charges a slot without refunding.
+		middlewareHandler := rl.Middleware(alwaysOK)
+		failuresOnlyHandler := rl.FailuresOnly(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+		}))
+
+		const numGoroutines = 50
+		var (
+			wg        sync.WaitGroup
+			start     = make(chan struct{})
+			admitted  sync.Map
+			overLimit sync.Map
+		)
+
+		var (
+			admittedCount  int64
+			overLimitCount int64
+		)
+		_ = admitted
+		_ = overLimit
+
+		var (
+			admittedAtomic  atomic.Int64
+			overLimitAtomic atomic.Int64
+		)
+
+		for i := 0; i < numGoroutines; i++ {
+			wg.Add(1)
+			isFailuresOnly := (i%2 == 1)
+			go func() {
+				defer wg.Done()
+				<-start
+
+				req := httptest.NewRequest(http.MethodGet, "/", nil)
+				req.RemoteAddr = "192.168.1.1:1234"
+				rec := httptest.NewRecorder()
+
+				if isFailuresOnly {
+					failuresOnlyHandler.ServeHTTP(rec, req)
+					if rec.Code == http.StatusForbidden {
+						admittedAtomic.Add(1)
+					} else if rec.Code == http.StatusTooManyRequests {
+						overLimitAtomic.Add(1)
+					} else {
+						t.Errorf("unexpected status from FailuresOnly: %d", rec.Code)
+					}
+				} else {
+					middlewareHandler.ServeHTTP(rec, req)
+					if rec.Code == http.StatusOK {
+						admittedAtomic.Add(1)
+					} else if rec.Code == http.StatusTooManyRequests {
+						overLimitAtomic.Add(1)
+					} else {
+						t.Errorf("unexpected status from Middleware: %d", rec.Code)
+					}
+				}
+			}()
+		}
+
+		close(start)
+		wg.Wait()
+
+		admittedCount = admittedAtomic.Load()
+		overLimitCount = overLimitAtomic.Load()
+
+		if admittedCount > limit {
+			t.Errorf("admitted %d requests in window, want at most %d", admittedCount, limit)
+		}
+		if admittedCount+overLimitCount != numGoroutines {
+			t.Errorf("total responses (%d) != launched goroutines (%d)", admittedCount+overLimitCount, numGoroutines)
+		}
+	})
 }

@@ -75,32 +75,43 @@ func (rl *RateLimiter) FailuresOnly(next http.Handler) http.Handler {
 // returns the entry it charged so the caller can refund it.
 func (rl *RateLimiter) take(w http.ResponseWriter, r *http.Request) (*entry, bool) {
 	key := rl.keyFunc(r)
-	now := time.Now()
 
-	val, _ := rl.store.LoadOrStore(key, &entry{expiresAt: now.Add(rl.window)})
-	e := val.(*entry)
+	for {
+		now := time.Now()
+		val, loaded := rl.store.Load(key)
+		if !loaded {
+			newEntry := &entry{expiresAt: now.Add(rl.window)}
+			actual, loaded := rl.store.LoadOrStore(key, newEntry)
+			if !loaded {
+				val = newEntry
+			} else {
+				val = actual
+			}
+		}
 
-	// If the window has expired, reset the entry.
-	if now.After(e.expiresAt) {
-		newEntry := &entry{expiresAt: now.Add(rl.window)}
-		newEntry.count.Store(1)
-		rl.store.Store(key, newEntry)
-		return newEntry, true
+		e := val.(*entry)
+		if now.After(e.expiresAt) {
+			newEntry := &entry{expiresAt: now.Add(rl.window)}
+			if !rl.store.CompareAndSwap(key, e, newEntry) {
+				continue
+			}
+			e = newEntry
+		}
+
+		count := e.count.Add(1)
+		if count > rl.limit {
+			retryAfter := int(time.Until(e.expiresAt).Seconds()) + 1
+			slog.WarnContext(r.Context(), "rate limit exceeded",
+				"key", key,
+				"path", r.URL.Path,
+				"request_id", GetRequestID(r.Context()),
+			)
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+			respond.Error(w, http.StatusTooManyRequests, "rate_limited", "Too many requests. Try again later.")
+			return nil, false
+		}
+		return e, true
 	}
-
-	count := e.count.Add(1)
-	if count > rl.limit {
-		retryAfter := int(time.Until(e.expiresAt).Seconds()) + 1
-		slog.WarnContext(r.Context(), "rate limit exceeded",
-			"key", key,
-			"path", r.URL.Path,
-			"request_id", GetRequestID(r.Context()),
-		)
-		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
-		respond.Error(w, http.StatusTooManyRequests, "rate_limited", "Too many requests. Try again later.")
-		return nil, false
-	}
-	return e, true
 }
 
 // sweep periodically removes expired entries to prevent unbounded memory growth.
