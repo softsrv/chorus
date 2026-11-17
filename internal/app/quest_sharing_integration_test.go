@@ -264,6 +264,7 @@ func TestIntegration_QuestSharing(t *testing.T) {
 		viaOtherHouse bool
 	}{
 		{"wrong target pin", shared.ID, annAct, app.MemberAction{MemberID: ben, PIN: "9999"}, app.ErrWrongPIN, false},
+		{"not held, wrong target pin", shared.ID, benAct, app.MemberAction{MemberID: ann, PIN: "9999"}, app.ErrNotFound, false},
 		{"missing target pin", shared.ID, annAct, app.MemberAction{MemberID: ben}, app.ErrWrongPIN, false},
 		{"wrong sharer pin", shared.ID, app.MemberAction{MemberID: ann, PIN: "0000"}, benAct, app.ErrWrongPIN, false},
 		{"not shareable", plain.ID, annAct, benAct, app.ErrNotFound, false},
