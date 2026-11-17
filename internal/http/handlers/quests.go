@@ -46,8 +46,8 @@ func NewQuestHandler(svc questServicer) *QuestHandler {
 }
 
 // questRequest is the body for create and update. Update is a full
-// replacement (PUT). points, repeat_days and teamwork_bonus stay raw so a
-// wrong-typed value is reported as its own field error alongside the others.
+// replacement (PUT). points, repeat_days, teamwork_bonus and streak_bonus stay
+// raw so a wrong-typed value is reported as its own field error alongside the others.
 // An absent shareable is false.
 type questRequest struct {
 	Name          string          `json:"name"`
@@ -56,6 +56,7 @@ type questRequest struct {
 	Notes         string          `json:"notes"`
 	Shareable     *bool           `json:"shareable"`
 	TeamworkBonus json.RawMessage `json:"teamwork_bonus"`
+	StreakBonus   json.RawMessage `json:"streak_bonus"`
 }
 
 func (req questRequest) toInput() app.QuestInput {
@@ -66,6 +67,7 @@ func (req questRequest) toInput() app.QuestInput {
 		Notes:         req.Notes,
 		Shareable:     req.Shareable != nil && *req.Shareable,
 		TeamworkBonus: numberField(req.TeamworkBonus),
+		StreakBonus:   numberField(req.StreakBonus),
 	}
 }
 
@@ -380,11 +382,16 @@ func decodeEmptyBody(w http.ResponseWriter, r *http.Request) bool {
 // approveResponse is the approved completion, the member who marked it done
 // with their new point total (bonuses included), every combo bonus the
 // approval paid that member (combo_bonuses is [] when none), and every member
-// it credited (members; one entry when it was not shared).
+// it credited (members; one entry when it was not shared). streak_bonus is
+// the streak bonus paid to the member who marked it done (0 when none) and
+// streak_count their streak for the quest as fixed at mark-done (0 for a
+// completion from before streaks).
 type approveResponse struct {
 	Completion   completionJSON       `json:"completion"`
 	Member       familyMemberJSON     `json:"member"`
 	ComboBonuses []comboAwardJSON     `json:"combo_bonuses"`
+	StreakBonus  int32                `json:"streak_bonus"`
+	StreakCount  int32                `json:"streak_count"`
 	Members      []approvedMemberJSON `json:"members"`
 }
 
@@ -408,7 +415,8 @@ type completionResponse struct {
 
 // Approve approves a pending completion and credits every member it covers
 // their split of the chore's points (plus the teamwork bonus when shared) and
-// any combo bonuses it finishes for them.
+// any combo bonuses it finishes for them, and the streak bonus to the member
+// who marked it done.
 // The admin PIN travels in X-Admin-PIN; the body is empty or {}.
 func (h *QuestHandler) Approve(w http.ResponseWriter, r *http.Request) {
 	hid, cid, ok := parseCompletionIDs(w, r)
@@ -416,6 +424,12 @@ func (h *QuestHandler) Approve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	completion, member, bonuses, members, err := h.svc.Approve(r.Context(), currentUser(r), hid, cid, r.Header.Get("X-Admin-PIN"))
+	var streak app.StreakBonus
+	for _, am := range members {
+		if am.Member.ID == member.ID {
+			streak = am.Streak
+		}
+	}
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -424,6 +438,8 @@ func (h *QuestHandler) Approve(w http.ResponseWriter, r *http.Request) {
 		Completion:   toCompletion(completion),
 		Member:       toFamilyMember(member),
 		ComboBonuses: mapSlice(bonuses, toComboAward),
+		StreakBonus:  streak.Points,
+		StreakCount:  streak.Count,
 		Members:      mapSlice(members, toApprovedMember),
 	})
 }

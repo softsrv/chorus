@@ -36,6 +36,10 @@ type Querier interface {
 	// completion recorded before quest sharing (its marker alone). member_id
 	// must match the marker the caller already locked; the caller holds the
 	// locks of every recorded member, so the member set cannot change under it.
+	// quest_name is the chore's name, the reason in the points history.
+	// streak_bonus is the chore's current streak bonus and streak_count the
+	// marker's streak as fixed at this completion's mark-done (NULL for one
+	// marked done before streaks existed); neither is recomputed from NOW().
 	ApproveCompletion(ctx context.Context, arg ApproveCompletionParams) (ApproveCompletionRow, error)
 	// Takes a member who is leaving the household off every completion still
 	// waiting for approval. Their quest_completion_members row goes. Where they
@@ -119,6 +123,7 @@ type Querier interface {
 	// reads it.
 	GetHouseholdQuestView(ctx context.Context, arg GetHouseholdQuestViewParams) (GetHouseholdQuestViewRow, error)
 	GetHouseholdReward(ctx context.Context, arg GetHouseholdRewardParams) (HouseholdReward, error)
+	GetMemberQuestStreak(ctx context.Context, arg GetMemberQuestStreakParams) (MemberQuestStreak, error)
 	GetOldestRecentVerificationCode(ctx context.Context, userID uuid.UUID) (pgtype.Timestamptz, error)
 	GetPasswordResetTokenByHash(ctx context.Context, tokenHash string) (PasswordResetToken, error)
 	// The marker of a pending completion and every member it covers (earliest
@@ -146,6 +151,11 @@ type Querier interface {
 	InsertEmailVerificationCode(ctx context.Context, arg InsertEmailVerificationCodeParams) (EmailVerificationCode, error)
 	InsertOAuthState(ctx context.Context, arg InsertOAuthStateParams) (OauthState, error)
 	InsertPasswordResetToken(ctx context.Context, arg InsertPasswordResetTokenParams) (PasswordResetToken, error)
+	// Points awards are the history of every points credit. Each row is written
+	// by the service layer's creditPoints in the same transaction as the
+	// family_members.points update it explains. Every query is scoped by
+	// household_id; the service checks membership first.
+	InsertPointsAward(ctx context.Context, arg InsertPointsAwardParams) (PointsAward, error)
 	InsertRefreshToken(ctx context.Context, arg InsertRefreshTokenParams) (RefreshToken, error)
 	InsertSignInHandoff(ctx context.Context, arg InsertSignInHandoffParams) (GoogleSignInHandoff, error)
 	ListActiveRefreshTokensByUserID(ctx context.Context, userID uuid.UUID) ([]RefreshToken, error)
@@ -180,6 +190,7 @@ type Querier interface {
 	ListHouseholdQuests(ctx context.Context, arg ListHouseholdQuestsParams) ([]ListHouseholdQuestsRow, error)
 	ListHouseholdRewards(ctx context.Context, householdID uuid.UUID) ([]HouseholdReward, error)
 	ListHouseholdsForUser(ctx context.Context, userID uuid.UUID) ([]ListHouseholdsForUserRow, error)
+	ListMemberPointsAwards(ctx context.Context, arg ListMemberPointsAwardsParams) ([]PointsAward, error)
 	// Completions waiting for approval, one row each, oldest mark-done first,
 	// with the chore's name, current points and teamwork bonus, the member who
 	// marked it done, and every member it covers (member_ids and member_names,
@@ -246,11 +257,34 @@ type Querier interface {
 	// the row locks of every member on the quest and then the quest's row lock
 	// (LockHouseholdQuest, a statement of its own), so the participants recorded
 	// and cleared here are the committed ones.
+	//
+	// The same statement moves the member's streak for the quest (streaked):
+	// the marker's count+1 when marked done by its expires_at, else 1, with a new expires_at
+	// of local midnight starting the day after 2 x repeat_days days from today.
+	// (prev_* still records the step it replaces; a reject no longer reads it
+	// but recomputes the streak: RecomputeMemberQuestStreak.) The completion
+	// stores the resulting count (streak_count), so its approval,
+	// however late, pays the streak as of this mark-done. The streak write
+	// touches only member_quest_streaks: never available_at or the cooldown.
 	MarkQuestDone(ctx context.Context, arg MarkQuestDoneParams) (MarkQuestDoneRow, error)
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
 	MarkVerificationCodeUsed(ctx context.Context, id uuid.UUID) (int64, error)
 	// Whether the quest has a completion waiting for the administrator.
 	QuestHasPendingCompletion(ctx context.Context, arg QuestHasPendingCompletionParams) (bool, error)
+	// Rebuilds the member's streak for the quest from the completions that still
+	// count: theirs, pending or approved, marked done since streaks existed
+	// (streak_count set), in done_at order. It replaces undoing one stored step,
+	// so a reject undoes its completion's step even when a later mark-done came
+	// after it. The mark-done rule is replayed: a completion continues the
+	// streak (count+1) when marked done by the previous one's expires_at, else
+	// starts it again at 1; each expires_at is quest_streak_expires_at(done_at,
+	// household timezone, repeat_days). member_quest_streaks gets the last
+	// completion's count, done_at and expiry, or the row is deleted when no
+	// completion counts. Pending completions get their replayed streak_count;
+	// approved ones keep theirs, so bonuses already paid stay paid. Writes only
+	// member_quest_streaks and quest_completions.streak_count: never the quest
+	// or its cooldown. The caller holds the member row's lock.
+	RecomputeMemberQuestStreak(ctx context.Context, arg RecomputeMemberQuestStreakParams) error
 	// Single use: conditional on used_at IS NULL and unexpired, so two concurrent
 	// redemptions can't both succeed.
 	RedeemSignInHandoff(ctx context.Context, codeHash string) (uuid.UUID, error)

@@ -135,6 +135,7 @@ type questJSON struct {
 	Points           int32       `json:"points"`
 	RepeatDays       int32       `json:"repeat_days"`
 	Notes            string      `json:"notes"`
+	StreakBonus      int32       `json:"streak_bonus"`
 	Available        bool        `json:"available"`
 	ClaimedBy        *uuid.UUID  `json:"claimed_by"`
 	ClaimedAt        *time.Time  `json:"claimed_at"`
@@ -165,6 +166,7 @@ func toQuest(v app.QuestView) questJSON {
 		Points:           q.Points,
 		RepeatDays:       q.RepeatDays,
 		Notes:            q.Notes,
+		StreakBonus:      q.StreakBonus,
 		Available:        app.QuestAvailable(q, time.Now()),
 		ClaimedBy:        q.ClaimedBy,
 		ClaimedAt:        timePtr(q.ClaimedAt),
@@ -249,17 +251,37 @@ func toPendingCompletion(p app.PendingCompletion) pendingCompletionJSON {
 	}
 }
 
-// libraryQuestJSON is a quest of the global, read-only library.
+// libraryQuestJSON is a quest of the global, read-only library. streak_bonus
+// is the default a household copy starts with.
 type libraryQuestJSON struct {
-	ID         uuid.UUID `json:"id"`
-	Name       string    `json:"name"`
-	Points     int32     `json:"points"`
-	RepeatDays int32     `json:"repeat_days"`
-	Notes      string    `json:"notes"`
+	ID          uuid.UUID `json:"id"`
+	Name        string    `json:"name"`
+	Points      int32     `json:"points"`
+	RepeatDays  int32     `json:"repeat_days"`
+	Notes       string    `json:"notes"`
+	StreakBonus int32     `json:"streak_bonus"`
 }
 
 func toLibraryQuest(q db.QuestLibrary) libraryQuestJSON {
-	return libraryQuestJSON{ID: q.ID, Name: q.Name, Points: q.Points, RepeatDays: q.RepeatDays, Notes: q.Notes}
+	return libraryQuestJSON{ID: q.ID, Name: q.Name, Points: q.Points, RepeatDays: q.RepeatDays, Notes: q.Notes, StreakBonus: q.StreakBonus}
+}
+
+type pointsAwardJSON struct {
+	ID       uuid.UUID `json:"id"`
+	Kind     string    `json:"kind"`
+	Reason   string    `json:"reason"`
+	Points   int32     `json:"points"`
+	EarnedAt time.Time `json:"earned_at"`
+}
+
+func toPointsAward(a app.PointsAward) pointsAwardJSON {
+	return pointsAwardJSON{
+		ID:       a.ID,
+		Kind:     a.Kind,
+		Reason:   a.Reason,
+		Points:   a.Points,
+		EarnedAt: a.EarnedAt,
+	}
 }
 
 // rewardJSON is a household reward. library_id is set when it was adopted

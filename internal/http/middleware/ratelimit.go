@@ -43,19 +43,59 @@ func NewRateLimiter(ctx context.Context, limit int, window time.Duration, keyFun
 // Middleware returns an http.Handler middleware that enforces the rate limit.
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		key := rl.keyFunc(r)
+		if _, ok := rl.take(w, r); ok {
+			next.ServeHTTP(w, r)
+		}
+	})
+}
+
+// FailuresOnly returns a middleware that charges this limiter only for
+// requests that end in 403 Forbidden (a wrong or missing PIN). Each request
+// reserves a slot before it runs, so once the budget is spent every request
+// is refused with 429 and concurrent guesses can never overshoot it; a
+// request that does not end in 403 gives its slot back. Wrap a PIN-checking
+// read with it so wrong guesses share the PIN budget while correct reads
+// leave it untouched.
+func (rl *RateLimiter) FailuresOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		e, ok := rl.take(w, r)
+		if !ok {
+			return
+		}
+		sw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		if sw.status != http.StatusForbidden {
+			e.count.Add(-1)
+		}
+	})
+}
+
+// take charges one request against the caller's budget. It reports false,
+// having already answered 429, when the budget is spent; otherwise it
+// returns the entry it charged so the caller can refund it.
+func (rl *RateLimiter) take(w http.ResponseWriter, r *http.Request) (*entry, bool) {
+	key := rl.keyFunc(r)
+
+	for {
 		now := time.Now()
+		val, loaded := rl.store.Load(key)
+		if !loaded {
+			newEntry := &entry{expiresAt: now.Add(rl.window)}
+			actual, loaded := rl.store.LoadOrStore(key, newEntry)
+			if !loaded {
+				val = newEntry
+			} else {
+				val = actual
+			}
+		}
 
-		val, _ := rl.store.LoadOrStore(key, &entry{expiresAt: now.Add(rl.window)})
 		e := val.(*entry)
-
-		// If the window has expired, reset the entry.
 		if now.After(e.expiresAt) {
 			newEntry := &entry{expiresAt: now.Add(rl.window)}
-			newEntry.count.Store(1)
-			rl.store.Store(key, newEntry)
-			next.ServeHTTP(w, r)
-			return
+			if !rl.store.CompareAndSwap(key, e, newEntry) {
+				continue
+			}
+			e = newEntry
 		}
 
 		count := e.count.Add(1)
@@ -68,11 +108,10 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 			)
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 			respond.Error(w, http.StatusTooManyRequests, "rate_limited", "Too many requests. Try again later.")
-			return
+			return nil, false
 		}
-
-		next.ServeHTTP(w, r)
-	})
+		return e, true
+	}
 }
 
 // sweep periodically removes expired entries to prevent unbounded memory growth.

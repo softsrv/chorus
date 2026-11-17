@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/softsrv/chorus/internal/app"
@@ -193,8 +195,22 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get alice member before outsider attempts: %v", err)
 	}
+	var aliceStreakCountBefore, aliceStreakRowsBefore int
+	if err := pool.QueryRow(ctx, `SELECT count(*), COALESCE(MAX(count), 0) FROM member_quest_streaks WHERE household_id = $1 AND member_id = $2 AND quest_id = $3`, h.ID, aliceMember.ID, alicePending.ID).Scan(&aliceStreakRowsBefore, &aliceStreakCountBefore); err != nil {
+		t.Fatalf("get alice streak before outsider attempts: %v", err)
+	}
+	// Alice's own mark-done above started her streak, so the after-check below
+	// compares against a real row and fails if an outsider moves it.
+	if aliceStreakRowsBefore != 1 || aliceStreakCountBefore < 1 {
+		t.Fatalf("alice streak before outsider attempts = %d rows, count %d; want 1 row with count >= 1", aliceStreakRowsBefore, aliceStreakCountBefore)
+	}
+	var malloryStreakRowsBefore int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM member_quest_streaks WHERE household_id = $1`, mh.ID).Scan(&malloryStreakRowsBefore); err != nil || malloryStreakRowsBefore != 0 {
+		t.Fatalf("mallory streak rows before outsider attempts = %d, want 0: %v", malloryStreakRowsBefore, err)
+	}
 	_, checks["abandon quest"] = quests.Abandon(ctx, mallory, h.ID, alicePending.ID, asAlice)
 	_, checks["mark quest done"] = quests.MarkDone(ctx, mallory, h.ID, alicePending.ID, asAlice)
+	_, checks["mark quest done as own member"] = quests.MarkDone(ctx, mallory, h.ID, alicePending.ID, app.MemberAction{MemberID: malloryMember.ID})
 	_, checks["list pending quests"] = quests.ListPending(ctx, mallory, h.ID, "")
 	_, _, _, _, checks["approve quest"] = quests.Approve(ctx, mallory, h.ID, aliceCompletionID, "")
 	_, checks["reject quest"] = quests.Reject(ctx, mallory, h.ID, aliceCompletionID, "")
@@ -258,6 +274,32 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	if rows, err := quests.ListPending(ctx, mallory, mh.ID, ""); err != nil || len(rows) != 0 {
 		t.Errorf("mallory's own pending list shows other households' quests: %+v, %v", rows, err)
 	}
+	// CLM-14: no outsider MarkDone, Approve or Reject moved Alice's streak,
+	// and no streak row landed in (or crossed into) Mallory's household.
+	var aliceStreakRowsAfter, aliceStreakCountAfter int
+	if err := pool.QueryRow(ctx, `SELECT count(*), COALESCE(MAX(count), 0) FROM member_quest_streaks WHERE household_id = $1 AND member_id = $2 AND quest_id = $3`, h.ID, aliceMember.ID, alicePending.ID).Scan(&aliceStreakRowsAfter, &aliceStreakCountAfter); err != nil {
+		t.Fatalf("get alice streak after outsider attempts: %v", err)
+	}
+	if aliceStreakRowsAfter != aliceStreakRowsBefore {
+		t.Errorf("alice streak rows after outsider attempts = %d, want %d (unchanged)", aliceStreakRowsAfter, aliceStreakRowsBefore)
+	}
+	if aliceStreakCountAfter != aliceStreakCountBefore {
+		t.Errorf("alice streak count after outsider attempts = %d, want %d (unchanged)", aliceStreakCountAfter, aliceStreakCountBefore)
+	}
+	var malloryStreakRowsAfter int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM member_quest_streaks WHERE household_id = $1`, mh.ID).Scan(&malloryStreakRowsAfter); err != nil {
+		t.Fatalf("get mallory streak rows after outsider attempts: %v", err)
+	}
+	if malloryStreakRowsAfter != 0 {
+		t.Errorf("mallory household streak rows after outsider attempts = %d, want 0", malloryStreakRowsAfter)
+	}
+	var crossedStreakRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM member_quest_streaks WHERE household_id <> $1 AND (member_id = $2 OR quest_id = $3)`, h.ID, aliceMember.ID, alicePending.ID).Scan(&crossedStreakRows); err != nil {
+		t.Fatalf("get cross-household streak rows: %v", err)
+	}
+	if crossedStreakRows != 0 {
+		t.Errorf("streak rows for alice's member or quest outside her household = %d, want 0", crossedStreakRows)
+	}
 	// Family member and admin-pin isolation checks
 	_, checks["list family members"] = familySvc.List(ctx, mallory, h.ID)
 	_, checks["get family member"] = familySvc.Get(ctx, mallory, h.ID, aliceMember.ID)
@@ -274,6 +316,11 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	// Cross-household ID smuggling with family members:
 	_, checks["get family member via own household"] = familySvc.Get(ctx, mallory, mh.ID, aliceMember.ID)
 	checks["remove family member via own household"] = familySvc.Remove(ctx, mallory, mh.ID, aliceMember.ID, "")
+	// Points history isolation checks:
+	_, checks["points history outsider user"] = familySvc.PointsHistory(ctx, mallory, h.ID, aliceMember.ID, "1234", "", 10, 0)
+	_, checks["points history own household foreign member"] = familySvc.PointsHistory(ctx, alice, h.ID, malloryMember.ID, "", "", 10, 0)
+	_, checks["points history foreign household own member"] = familySvc.PointsHistory(ctx, alice, mh.ID, aliceMember.ID, "1234", "", 10, 0)
+	_, checks["points history nonexistent member"] = familySvc.PointsHistory(ctx, alice, h.ID, uuid.New(), "1234", "", 10, 0)
 	// Reward isolation: every reward operation by an outsider is ErrNotFound,
 	// and Alice's reward id smuggled under Mallory's own household fails too.
 	rewardLibrary, err := rewards.ListLibrary(ctx)
@@ -506,6 +553,133 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		t.Fatalf("Create bob reward: %v", err)
 	}
 
+	// Points history isolation and PIN checks:
+	// Insert awards for Alice (Household A) and Bob (Household B).
+	aliceAwardID := uuid.New()
+	_, err = q.InsertPointsAward(ctx, db.InsertPointsAwardParams{
+		ID:          aliceAwardID,
+		HouseholdID: h.ID,
+		MemberID:    aliceMember.ID,
+		Kind:        "quest",
+		Reason:      "Alice quest",
+		Points:      10,
+		EarnedAt:    pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("InsertPointsAward for alice: %v", err)
+	}
+
+	bobAwardID := uuid.New()
+	_, err = q.InsertPointsAward(ctx, db.InsertPointsAwardParams{
+		ID:          bobAwardID,
+		HouseholdID: bh.ID,
+		MemberID:    bobMember.ID,
+		Kind:        "quest",
+		Reason:      "Bob quest",
+		Points:      25,
+		EarnedAt:    pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("InsertPointsAward for bob: %v", err)
+	}
+
+	// Right member PIN reads history; Bob's award is not in Alice's history.
+	aliceHist, err := familySvc.PointsHistory(ctx, alice, h.ID, aliceMember.ID, "1234", "", 50, 0)
+	if err != nil {
+		t.Fatalf("PointsHistory with member PIN: %v", err)
+	}
+	if len(aliceHist) != 1 || aliceHist[0].ID != aliceAwardID {
+		t.Errorf("alice points history mismatch: got %+v, want award %v", aliceHist, aliceAwardID)
+	}
+
+	// Admin PIN reads history (SetAdminPin first).
+	if err := familySvc.SetAdminPin(ctx, alice, h.ID, "5555", ""); err != nil {
+		t.Fatalf("SetAdminPin for alice: %v", err)
+	}
+	aliceHistAdmin, err := familySvc.PointsHistory(ctx, alice, h.ID, aliceMember.ID, "", "5555", 50, 0)
+	if err != nil {
+		t.Fatalf("PointsHistory with admin PIN: %v", err)
+	}
+	if len(aliceHistAdmin) != 1 || aliceHistAdmin[0].ID != aliceAwardID {
+		t.Errorf("alice admin PIN points history mismatch: got %+v, want award %v", aliceHistAdmin, aliceAwardID)
+	}
+	if err := familySvc.ClearAdminPin(ctx, alice, h.ID, "5555"); err != nil {
+		t.Fatalf("ClearAdminPin for alice: %v", err)
+	}
+
+	// Wrong PIN -> ErrWrongPIN and no rows returned.
+	wrongHist, err := familySvc.PointsHistory(ctx, alice, h.ID, aliceMember.ID, "0000", "", 50, 0)
+	if !errors.Is(err, app.ErrWrongPIN) {
+		t.Errorf("wrong member PIN points history: expected ErrWrongPIN, got %v", err)
+	}
+	if len(wrongHist) != 0 {
+		t.Errorf("wrong member PIN points history returned rows: %+v", wrongHist)
+	}
+	wrongHist2, err := familySvc.PointsHistory(ctx, alice, h.ID, aliceMember.ID, "0000", "0000", 50, 0)
+	if !errors.Is(err, app.ErrWrongPIN) {
+		t.Errorf("wrong member and admin PIN points history: expected ErrWrongPIN, got %v", err)
+	}
+	if len(wrongHist2) != 0 {
+		t.Errorf("wrong member and admin PIN points history returned rows: %+v", wrongHist2)
+	}
+
+	// A DB fault inside PIN verification (after getHousehold and the member
+	// lookup succeed) is returned wrapped, not reported as ErrWrongPIN.
+	// (a) Member path: PointsHistory reads GetFamilyMember once for the
+	// existence check; the 2nd read is VerifyMemberPin's pin_hash read.
+	memberFault := &faultDBTX{inner: pool, query: "GetFamilyMember", failOnCall: 2}
+	memberFaultSvc := app.NewFamilyService(db.New(memberFault), pool, 10)
+	nonPinHist, err := memberFaultSvc.PointsHistory(ctx, alice, h.ID, aliceMember.ID, "1234", "", 50, 0)
+	if memberFault.calls < 2 {
+		t.Fatalf("member-path fault never reached VerifyMemberPin: %d GetFamilyMember calls, err %v", memberFault.calls, err)
+	}
+	if err == nil {
+		t.Errorf("PointsHistory with member verify fault: expected error, got nil")
+	} else if errors.Is(err, app.ErrWrongPIN) {
+		t.Errorf("PointsHistory with member verify fault returned ErrWrongPIN: %v", err)
+	}
+	if !errors.Is(err, errInjected) {
+		t.Errorf("PointsHistory with member verify fault: want wrapped injected error, got %v", err)
+	}
+	if len(nonPinHist) != 0 {
+		t.Errorf("PointsHistory with member verify fault returned rows: %+v", nonPinHist)
+	}
+
+	// (b) Admin path: wrong member PIN, then the admin PIN check hits a fault
+	// reading the household's admin PIN.
+	if err := familySvc.SetAdminPin(ctx, alice, h.ID, "5555", ""); err != nil {
+		t.Fatalf("SetAdminPin for admin-path fault: %v", err)
+	}
+	adminFault := &faultDBTX{inner: pool, query: "GetAdminPin", failOnCall: 1}
+	adminFaultSvc := app.NewFamilyService(db.New(adminFault), pool, 10)
+	nonPinAdminHist, err := adminFaultSvc.PointsHistory(ctx, alice, h.ID, aliceMember.ID, "0000", "5555", 50, 0)
+	if adminFault.calls < 1 {
+		t.Fatalf("admin-path fault never reached VerifyAdminPin: err %v", err)
+	}
+	if err == nil {
+		t.Errorf("PointsHistory with admin verify fault: expected error, got nil")
+	} else if errors.Is(err, app.ErrWrongPIN) {
+		t.Errorf("PointsHistory with admin verify fault returned ErrWrongPIN: %v", err)
+	}
+	if !errors.Is(err, errInjected) {
+		t.Errorf("PointsHistory with admin verify fault: want wrapped injected error, got %v", err)
+	}
+	if len(nonPinAdminHist) != 0 {
+		t.Errorf("PointsHistory with admin verify fault returned rows: %+v", nonPinAdminHist)
+	}
+	if err := familySvc.ClearAdminPin(ctx, alice, h.ID, "5555"); err != nil {
+		t.Fatalf("ClearAdminPin after admin-path fault: %v", err)
+	}
+
+	// Bob's history in household B is separate.
+	bobHist, err := familySvc.PointsHistory(ctx, bob, bh.ID, bobMember.ID, "4321", "", 50, 0)
+	if err != nil {
+		t.Fatalf("bob PointsHistory with member PIN: %v", err)
+	}
+	if len(bobHist) != 1 || bobHist[0].ID != bobAwardID {
+		t.Errorf("bob points history mismatch: got %+v, want award %v", bobHist, bobAwardID)
+	}
+
 	// CLM-4: Cross-household combo isolation. Look-alike chores done the same
 	// day in another household never trigger or pay a household's combo.
 	bobDishes, err := quests.Create(ctx, bob, bh.ID, app.QuestInput{
@@ -669,6 +843,22 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	}
 	_ = aliceDelTx.Rollback(ctx)
 
+	// Capture Bob's PointsHistory right before Alice deletes household A.
+	bobHistBefore, err := familySvc.PointsHistory(ctx, bob, bh.ID, bobMember.ID, "4321", "", 50, 0)
+	if err != nil {
+		t.Fatalf("bob PointsHistory before alice delete: %v", err)
+	}
+	var foundBobAward bool
+	for _, a := range bobHistBefore {
+		if a.ID == bobAwardID {
+			foundBobAward = true
+			break
+		}
+	}
+	if !foundBobAward {
+		t.Fatalf("bob points history before alice delete missing award %v: %+v", bobAwardID, bobHistBefore)
+	}
+
 	// Alice deletes household A via HouseholdService.Delete
 	if err := households.Delete(ctx, alice, h.ID); err != nil {
 		t.Fatalf("alice Delete household A: %v", err)
@@ -687,6 +877,9 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	}
 	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM household_rewards WHERE household_id = $1", h.ID).Scan(&count); err != nil || count != 0 {
 		t.Errorf("household A household_rewards count = %d, want 0", count)
+	}
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM points_awards WHERE household_id = $1", h.ID).Scan(&count); err != nil || count != 0 {
+		t.Errorf("household A points_awards count = %d, want 0", count)
 	}
 
 	// Assert B's household, members, quests (including claimed and pending states), rewards and points are unchanged.
@@ -709,6 +902,18 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	gotBobReward, err := rewards.Get(ctx, bob, bh.ID, bobReward.ID)
 	if err != nil || gotBobReward.ID != bobReward.ID || gotBobReward.Description != "Ice cream" || gotBobReward.Cost != 100 {
 		t.Errorf("bob reward changed: %+v, %v", gotBobReward, err)
+	}
+	gotBobHist, err := familySvc.PointsHistory(ctx, bob, bh.ID, bobMember.ID, "4321", "", 50, 0)
+	if err != nil {
+		t.Errorf("bob points history changed or missing after alice delete: %v", err)
+	} else if len(gotBobHist) != len(bobHistBefore) {
+		t.Errorf("bob points history length changed after alice delete: got %d, want %d", len(gotBobHist), len(bobHistBefore))
+	} else {
+		for i := range bobHistBefore {
+			if gotBobHist[i].ID != bobHistBefore[i].ID {
+				t.Errorf("bob points history award %d id changed: got %v, want %v", i, gotBobHist[i].ID, bobHistBefore[i].ID)
+			}
+		}
 	}
 
 	// Assert Bob's household_provisioned_at is unchanged.
@@ -801,3 +1006,50 @@ func TestIntegration_DeleteAccountDeletesHousehold(t *testing.T) {
 		t.Errorf("user still exists: count = %d, want 0", userCount)
 	}
 }
+
+// errInjected is the fault faultDBTX returns for its targeted query.
+var errInjected = errors.New("injected db fault")
+
+// faultDBTX delegates every call to the real pool, except the failOnCall-th
+// run of the sqlc query named query, which fails with errInjected. It injects
+// a DB fault at one point; it mocks nothing about the service under test.
+type faultDBTX struct {
+	inner      db.DBTX
+	query      string // sqlc query name, e.g. "GetAdminPin"
+	failOnCall int
+	calls      int
+}
+
+func (f *faultDBTX) hit(sql string) bool {
+	if !strings.HasPrefix(sql, "-- name: "+f.query+" :") {
+		return false
+	}
+	f.calls++
+	return f.calls == f.failOnCall
+}
+
+func (f *faultDBTX) Exec(ctx context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error) {
+	if f.hit(sql) {
+		return pgconn.CommandTag{}, errInjected
+	}
+	return f.inner.Exec(ctx, sql, args...)
+}
+
+func (f *faultDBTX) Query(ctx context.Context, sql string, args ...interface{}) (pgx.Rows, error) {
+	if f.hit(sql) {
+		return nil, errInjected
+	}
+	return f.inner.Query(ctx, sql, args...)
+}
+
+func (f *faultDBTX) QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row {
+	if f.hit(sql) {
+		return errRow{}
+	}
+	return f.inner.QueryRow(ctx, sql, args...)
+}
+
+// errRow is a pgx.Row whose Scan fails with errInjected.
+type errRow struct{}
+
+func (errRow) Scan(...any) error { return errInjected }
