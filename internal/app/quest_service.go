@@ -593,8 +593,9 @@ func payCombos(ctx context.Context, qtx *db.Queries, householdID, questID uuid.U
 // Reject rejects one pending completion: no points are added. If that
 // completion started the quest's running cooldown and the cooldown has not
 // ended, the cooldown is cancelled and the chore is available again right
-// away. Other completions and the quest's holder are untouched. The streak
-// step the completion made at mark-done is undone in the same transaction,
+// away. The quest's holder and the member's approved completions are
+// untouched. The streak step the completion made at mark-done is undone in
+// the same transaction,
 // even when a later mark-done of the quest came after it: the member's
 // streak for the quest is recomputed from their remaining pending and
 // approved completions (RecomputeMemberQuestStreak), which also renumbers

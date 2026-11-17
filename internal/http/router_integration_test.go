@@ -1602,6 +1602,77 @@ func TestAPI_QuestPINRateLimit(t *testing.T) {
 	}
 }
 
+// TestAPI_PointsHistoryHasItsOwnPINBudget proves the points-history read is
+// rate limited on a budget of its own: reading it never spends the PIN
+// budget member actions need, and it is still limited itself.
+func TestAPI_PointsHistoryHasItsOwnPINBudget(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set; skipping integration test")
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	q := db.New(pool)
+	mail := &mailbox{text: map[string]string{}}
+	authSvc := app.NewAuthService(q, pool, mail, app.AuthServiceConfig{
+		JWTSecret: secret, AccessExpiry: 15 * time.Minute, RefreshExpiry: 24 * time.Hour,
+		BCryptCost: 10, PasswordMinLen: 8, AppBaseURL: "http://chorus.test", AppName: "Chorus",
+	})
+	t.Cleanup(authSvc.Shutdown)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	// PIN budget: member create + quest create + one accept.
+	const pinLimit = 3
+	handler := internalhttp.NewRouter(ctx, internalhttp.RouterConfig{
+		Queries: q, Pool: pool, AuthSvc: authSvc,
+		UserSvc:      app.NewUserService(q),
+		HouseholdSvc: app.NewHouseholdService(q, pool),
+		FamilySvc:    app.NewFamilyService(q, pool, 10),
+		QuestSvc:     app.NewQuestService(q, pool),
+		JWTSecret:    secret,
+		PINRateLimit: pinLimit,
+	})
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	ts := &testServer{t: t, srv: srv, mail: mail, pool: pool}
+
+	u := ts.signUp("histrluser")
+	var h struct{ ID uuid.UUID }
+	ts.expect(http.StatusCreated, "POST", "/api/v1/households", u.AccessToken,
+		map[string]string{"name": "History RL Home", "timezone": "UTC"}, &h)
+	hp := "/api/v1/households/" + h.ID.String()
+
+	var m struct{ ID uuid.UUID }
+	ts.expect(http.StatusCreated, "POST", hp+"/family-members", u.AccessToken,
+		map[string]string{"name": "Kid", "pin": "1234"}, &m)
+	var quest struct{ ID uuid.UUID }
+	ts.expect(http.StatusCreated, "POST", hp+"/quests", u.AccessToken,
+		map[string]string{"name": "Mow Lawn"}, &quest)
+
+	histPath := hp + "/family-members/" + m.ID.String() + "/points-history"
+	pinHdr := map[string]string{"X-Member-PIN": "1234"}
+	for i := 0; i < pinLimit; i++ {
+		ts.expectWithHeaders(http.StatusOK, "GET", histPath, u.AccessToken, pinHdr, nil, nil)
+	}
+
+	// The history reads spent none of the action budget: accept still runs.
+	ts.expect(http.StatusOK, "POST", hp+"/quests/"+quest.ID.String()+"/accept", u.AccessToken,
+		map[string]any{"member_id": m.ID, "pin": "1234"}, nil)
+
+	// The history read is still limited on its own budget.
+	var rlErr apiError
+	ts.expectWithHeaders(http.StatusTooManyRequests, "GET", histPath, u.AccessToken, pinHdr, nil, &rlErr)
+	if rlErr.Error.Code != "rate_limited" {
+		t.Errorf("expected rate_limited, got %q", rlErr.Error.Code)
+	}
+}
+
 func TestAPI_RemovedInviteAndMemberRoutes404(t *testing.T) {
 	s := newTestServer(t)
 	u := s.signUp("removedroutes")

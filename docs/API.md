@@ -91,7 +91,7 @@ Each household has exactly one login account (its administrator); invites and lo
 | `PUT /households/{id}/family-members/{memberId}/pin` | `pin` | admin; 4-digit PIN; optional `X-Admin-PIN` header if set |
 | `DELETE /households/{id}/family-members/{memberId}/pin` | none | admin; optional `X-Admin-PIN` header if set |
 | `POST /households/{id}/family-members/{memberId}/verify` | `pin` (empty for a member with no PIN) | `200` member, or `403 wrong_pin`. Sets no cookie or token: each later member action carries `member_id` and `pin` |
-| `GET /households/{id}/family-members/{memberId}/points-history` | `?limit=1..100` (default 50), `?offset=` | Member or admin; sends `X-Member-PIN` or `X-Admin-PIN` header. `{items: [points award]}` newest first; `{items: []}` when none; `403 wrong_pin` |
+| `GET /households/{id}/family-members/{memberId}/points-history` | `?limit=1..100` (default 50), `?offset=` | Member or admin; sends `X-Member-PIN` or `X-Admin-PIN` header. `{items: [points award]}` newest first; `{items: []}` when none; `403 wrong_pin`. PIN rate limited on a budget of its own, so reading it never uses up the limit member actions share |
 | `GET /households/{id}/admin-pin` | none | `{set: bool}` |
 | `PUT /households/{id}/admin-pin` | `pin` | admin; 4-digit PIN; `X-Admin-PIN` header (current PIN) required if already set; `{set: true}` |
 | `DELETE /households/{id}/admin-pin` | none | admin; `X-Admin-PIN` header required; `204` |

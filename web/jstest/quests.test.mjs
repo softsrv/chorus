@@ -474,6 +474,32 @@ test('a 403 wrong_pin on points-history returns to the member picker, not a blan
   assert.equal(signedOut, 0);
 });
 
+test('the points history is read once per member selection, not again on the rerender after accept or mark done', async () => {
+  srv.extra[`POST ${HP}/quests/q1/accept`] = (r) => {
+    srv.quests = [quest({ available: false, claimed_by: r.body.member_id, claimed_at: '2025-01-02T00:00:00Z' })];
+    return [200, srv.quests[0]];
+  };
+  srv.extra[`POST ${HP}/quests/q1/done`] = () => {
+    srv.quests = [quest({ available: false, awaiting_approval: true })];
+    return [200, srv.quests[0]];
+  };
+  srv.history = [{ id: 'a1', points: 10, reason: 'Clean sweep', earned_at: '2025-01-01T12:00:00Z' }];
+  const historyReads = () => calls.filter((c) => c.method === 'GET' && c.path.endsWith('/points-history'));
+  await loadApp();
+  await becomeAnn();
+  assert.equal(historyReads().length, 1, 'one read on selecting the member');
+
+  await click(buttons(env.$app, 'View')[0]);
+  await click(buttons(env.$app, 'Accept')[0]);
+  assert.match(section(env.$app, 'Mine'), /Feed the cat/);
+  await click(buttons(env.$app, 'Mark done')[0]);
+  assert.equal(historyReads().length, 1, 'actions rerender without reading the history again');
+  assert.match(sectionNode(env.$app, 'Points history').textContent, /Clean sweep/, 'the history still shows');
+
+  await becomeAnn();
+  assert.equal(historyReads().length, 2, 'picking the member again reads it afresh');
+});
+
 test('CLM-11: empty points-history renders empty message and no table', async () => {
   srv.history = [];
   await loadApp();
@@ -839,6 +865,24 @@ test('streaks CLM-11: the quest form sends streak_bonus as a number; quest, edit
   const put = calls.filter((c) => c.method === 'PUT' && c.path === `${HP}/quests/q1`).at(-1);
   assert.equal(put.body.streak_bonus, -1, 'the server, not the client, judges the value');
   noInlineStyle();
+});
+
+test('streaks: the add form starts the streak bonus at 0, and a blank streak bonus is left out so the server saves 0', async () => {
+  srv.extra[`POST ${HP}/quests`] = (r) => [201, quest({ id: 'q2', ...r.body, streak_bonus: r.body.streak_bonus ?? 0 })];
+  await loadApp();
+  const $add = buttons(env.$app, 'Add quest')[0].parentNode;
+  const input = ($f, name) => walk($f).find((n) => (n.tagName === 'INPUT' || n.tagName === 'TEXTAREA') && n.name === name);
+  assert.equal(String(input($add, 'streak_bonus').value), '0', 'a new quest starts at 0');
+
+  input($add, 'name').value = 'Water plants';
+  input($add, 'points').value = '3';
+  input($add, 'repeat_days').value = '1';
+  input($add, 'streak_bonus').value = '';
+  await submit($add);
+  const post = calls.filter((c) => c.method === 'POST' && c.path === `${HP}/quests`).at(-1);
+  assert.ok(post, 'the quest was posted');
+  assert.equal('streak_bonus' in post.body, false, 'a blank streak bonus is not sent as an empty string');
+  assert.equal(post.body.points, 3);
 });
 
 // ── fix CLM-1: the combos read is the combos card's alone ───────────────────
