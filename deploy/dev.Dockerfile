@@ -2,7 +2,7 @@
 # The source tree is bind-mounted at /src, so nothing is copied in here.
 FROM golang:1.27-alpine
 
-RUN go install github.com/air-verse/air@latest
+RUN go install github.com/air-verse/air@v1.67.4
 
 WORKDIR /src
 CMD ["air"]

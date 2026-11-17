@@ -209,6 +209,7 @@ func newCalendarTestServer(t *testing.T, fake *fakeCalendarGoogle) *calendarServ
 			RedirectURL: calCallbackURL,
 			TokenURL:    fake.srv.URL + "/token",
 			RevokeURL:   fake.srv.URL + "/revoke",
+			APIBaseURL:  fake.srv.URL + "/calendar/v3",
 		})
 	}
 
