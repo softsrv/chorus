@@ -370,7 +370,7 @@ func (w *comboWorld) markDone(questID, memberID uuid.UUID, at time.Time) {
 // approve approves the completion the chore's latest markDone recorded.
 func (w *comboWorld) approve(questID uuid.UUID) (db.FamilyMember, []app.ComboBonus) {
 	w.t.Helper()
-	_, m, bonuses, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, w.last[questID], "")
+	_, m, bonuses, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, w.last[questID], "")
 	if err != nil {
 		w.t.Fatalf("approve: %v", err)
 	}
@@ -581,7 +581,7 @@ func TestIntegration_ComboBonusPayment(t *testing.T) {
 				t.Fatalf("set %d: %d awards, want %d", i, w.awards(), s.awards)
 			}
 		}
-		if _, _, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, w.last[b], ""); !errors.Is(err, app.ErrNotFound) {
+		if _, _, _, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, w.last[b], ""); !errors.Is(err, app.ErrNotFound) {
 			t.Fatalf("repeat approval: %v, want ErrNotFound", err)
 		}
 		if w.awards() != 2 || w.points(ann) != 3*(10+15)+2*20 {
@@ -611,7 +611,7 @@ func TestIntegration_ComboBonusPayment(t *testing.T) {
 				go func(i int, id uuid.UUID) {
 					defer wg.Done()
 					<-start
-					_, _, bonuses, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, id, "")
+					_, _, bonuses, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, id, "")
 					errs[i], paid[i] = err, len(bonuses)
 				}(i, id)
 			}
@@ -687,7 +687,7 @@ END $$`, fn, w.h.ID)); err != nil {
 			t.Fatalf("create trigger: %v", err)
 		}
 
-		if _, _, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, w.last[b], ""); err == nil {
+		if _, _, _, _, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, w.last[b], ""); err == nil {
 			t.Fatal("approve with failing award insert succeeded")
 		}
 		if n := w.count(`SELECT count(*) FROM quest_completions WHERE household_id = $1 AND id = $2 AND status = 'pending' AND approved_at IS NULL`, w.h.ID, w.last[b]); n != 1 {
@@ -763,6 +763,90 @@ END $$`, fn, w.h.ID)); err != nil {
 		}
 	})
 
+	// Quest sharing CLM-17: a shared completion counts toward the combos of
+	// every member it covers. Approving it pays each of them the combo bonus
+	// once for the day; a later completion the same day pays it to nobody
+	// again.
+	t.Run("shared quest counts for every participant", func(t *testing.T) {
+		w := newComboWorld(t, base, "Combo Shared")
+		ann, ben := w.member("Ann"), w.member("Ben")
+		sharedQuest, err := w.quests.Create(w.ctx, w.admin, w.h.ID, app.QuestInput{Name: "Clean the living room", Points: num(30), Shareable: true, TeamworkBonus: num(10)}, "")
+		if err != nil {
+			t.Fatalf("create shareable chore: %v", err)
+		}
+		a, b := sharedQuest.ID, w.chore("Wipe counters", 15)
+		kitchen := w.combo("Kitchen Crew", 20, a, b)
+
+		// Each does the plain chore on Jan 10 (NY) on their own.
+		w.markDone(b, ann, utc(10, 14, 0))
+		if _, bonuses := w.approve(b); len(bonuses) != 0 {
+			t.Fatalf("Ann's plain chore paid %+v", bonuses)
+		}
+		w.markDone(b, ben, utc(10, 15, 0))
+		if _, bonuses := w.approve(b); len(bonuses) != 0 {
+			t.Fatalf("Ben's plain chore paid %+v", bonuses)
+		}
+
+		// Ann takes the shared chore and shares it with Ben; Ben marks it
+		// done the same household day.
+		annAct, benAct := app.MemberAction{MemberID: ann}, app.MemberAction{MemberID: ben}
+		if _, err := w.quests.Accept(w.ctx, w.admin, w.h.ID, a, annAct); err != nil {
+			t.Fatalf("Ann accepts: %v", err)
+		}
+		if _, err := w.quests.Share(w.ctx, w.admin, w.h.ID, a, annAct, benAct); err != nil {
+			t.Fatalf("share: %v", err)
+		}
+		if _, err := w.quests.MarkDone(w.ctx, w.admin, w.h.ID, a, benAct); err != nil {
+			t.Fatalf("Ben marks done: %v", err)
+		}
+		var sharedCompletion uuid.UUID
+		if err := pool.QueryRow(w.ctx, `
+			UPDATE quest_completions SET done_at = $3
+			WHERE household_id = $1 AND quest_id = $2 AND status = 'pending'
+			RETURNING id`, w.h.ID, a, utc(10, 16, 0)).Scan(&sharedCompletion); err != nil {
+			t.Fatalf("set shared completion done_at: %v", err)
+		}
+		_, marker, bonuses, credited, err := w.quests.Approve(w.ctx, w.admin, w.h.ID, sharedCompletion, "")
+		if err != nil {
+			t.Fatalf("approve shared completion: %v", err)
+		}
+		if marker.ID != ben || len(bonuses) != 1 || bonuses[0].ComboID != kitchen || bonuses[0].BonusPoints != 20 {
+			t.Fatalf("marker %v bonuses %+v, want Ben paid Kitchen Crew 20", marker.ID, bonuses)
+		}
+		if len(credited) != 2 {
+			t.Fatalf("credited %+v, want Ann and Ben", credited)
+		}
+		// 15 (plain) + 15 split + 10 teamwork bonus + 20 combo each.
+		for _, c := range credited {
+			if c.Member.Points != 60 {
+				t.Errorf("member %v returned points %d, want 60", c.Member.ID, c.Member.Points)
+			}
+		}
+		if w.points(ann) != 60 || w.points(ben) != 60 {
+			t.Fatalf("points Ann %d Ben %d, want 60 each", w.points(ann), w.points(ben))
+		}
+		for _, m := range []uuid.UUID{ann, ben} {
+			if n := w.count(`SELECT count(*) FROM combo_awards WHERE household_id = $1 AND member_id = $2`, w.h.ID, m); n != 1 {
+				t.Fatalf("member %v has %d combo awards, want 1", m, n)
+			}
+		}
+		if n := w.count(`SELECT count(*) FROM combo_award_completions WHERE quest_completion_id = $1`, sharedCompletion); n != 2 {
+			t.Fatalf("shared completion counted %d times, want once per member (2)", n)
+		}
+
+		// The same day again: Ann does both chores alone and is paid only the
+		// chore points; the combo was already paid to her for Jan 10.
+		w.markDone(b, ann, utc(10, 17, 0))
+		w.approve(b)
+		w.markDone(a, ann, utc(10, 18, 0))
+		if m, again := w.approve(a); len(again) != 0 || m.Points != 60+15+30 {
+			t.Fatalf("second set same day: points %d bonuses %+v, want 105 and none", m.Points, again)
+		}
+		if w.awards() != 2 || w.points(ben) != 60 {
+			t.Fatalf("awards %d, Ben %d after Ann's second set; want 2 and 60", w.awards(), w.points(ben))
+		}
+	})
+
 	// CLM-10: another household's approvals never touch this one's awards or
 	// points, even with identical chores and combos.
 	t.Run("households are isolated", func(t *testing.T) {
@@ -786,7 +870,7 @@ END $$`, fn, w.h.ID)); err != nil {
 		}
 		// Approving household two's completion through household one is not found.
 		two.markDone(a2, ann2, utc(11, 14, 0))
-		if _, _, _, err := one.quests.Approve(one.ctx, one.admin, one.h.ID, two.last[a2], ""); !errors.Is(err, app.ErrNotFound) {
+		if _, _, _, _, err := one.quests.Approve(one.ctx, one.admin, one.h.ID, two.last[a2], ""); !errors.Is(err, app.ErrNotFound) {
 			t.Fatalf("cross-household approve: %v, want ErrNotFound", err)
 		}
 	})

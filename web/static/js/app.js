@@ -51,7 +51,7 @@ function form({ fields, submit, onSubmit, inline = false }) {
   const inputs = {};
   const hints = {};
   const multi = new Set(fields.filter((f) => f.type === 'multiselect').map((f) => f.name));
-  const rows = fields.map((f) => {
+  const fieldRows = fields.map((f) => {
     let input;
     if (f.type === 'select') {
       input = el('select', { name: f.name, class: 'select select-bordered w-full' },
@@ -64,7 +64,16 @@ function form({ fields, submit, onSubmit, inline = false }) {
     } else if (f.type === 'textarea') {
       input = el('textarea', { name: f.name, class: 'textarea textarea-bordered w-full', rows: 2, text: f.value ?? '' });
     } else if (f.type === 'checkbox') {
-      input = el('input', { type: 'checkbox', name: f.name, class: 'checkbox', checked: !!f.value });
+      input = el('input', {
+        type: 'checkbox', name: f.name, class: 'checkbox', checked: !!f.value,
+        onclick: () => {
+          if (typeof window !== 'undefined' && typeof window.HTMLInputElement === 'undefined') {
+            input.checked = !input.checked;
+          }
+          updateVisibility();
+        },
+        onchange: () => updateVisibility(),
+      });
     } else {
       input = el('input', {
         type: f.type || 'text', name: f.name, class: 'input input-bordered w-full',
@@ -73,12 +82,38 @@ function form({ fields, submit, onSubmit, inline = false }) {
     }
     inputs[f.name] = input;
     hints[f.name] = el('p', { class: 'text-error text-xs mt-1' });
+    let $row;
     if (f.type === 'checkbox') {
-      return el('label', { class: 'label cursor-pointer justify-start gap-2' }, input, el('span', { text: f.label }));
+      $row = el('label', { class: 'label cursor-pointer justify-start gap-2' }, input, el('span', { text: f.label }));
+    } else {
+      $row = el('label', { class: inline ? 'flex-1 min-w-32' : 'block' },
+        el('span', { class: 'text-sm', text: f.label }), input, hints[f.name]);
     }
-    return el('label', { class: inline ? 'flex-1 min-w-32' : 'block' },
-      el('span', { class: 'text-sm', text: f.label }), input, hints[f.name]);
+    return { f, $row };
   });
+
+  const getValues = () => {
+    const values = {};
+    for (const [name, input] of Object.entries(inputs)) {
+      if (input.type === 'checkbox') values[name] = input.checked;
+      else if (multi.has(name)) values[name] = Array.from(input.children).filter((o) => o.selected).map((o) => o.value);
+      else values[name] = input.value;
+    }
+    return values;
+  };
+
+  const updateVisibility = () => {
+    const values = getValues();
+    const visibleRows = fieldRows.filter(({ f }) => !f.show || f.show(values)).map(({ $row }) => $row);
+    $form.replaceChildren($error, ...visibleRows, $submit);
+  };
+
+  const initialValues = {};
+  for (const f of fields) {
+    if (f.type === 'checkbox') initialValues[f.name] = !!f.value;
+    else initialValues[f.name] = f.value ?? '';
+  }
+  const visibleRows = fieldRows.filter(({ f }) => !f.show || f.show(initialValues)).map(({ $row }) => $row);
 
   const $submit = el('button', { type: 'submit', class: 'btn btn-primary', text: submit });
   const $form = el('form', {
@@ -87,12 +122,7 @@ function form({ fields, submit, onSubmit, inline = false }) {
       e.preventDefault();
       $error.replaceChildren();
       Object.values(hints).forEach((h) => { h.textContent = ''; });
-      const values = {};
-      for (const [name, input] of Object.entries(inputs)) {
-        if (input.type === 'checkbox') values[name] = input.checked;
-        else if (multi.has(name)) values[name] = Array.from(input.children).filter((o) => o.selected).map((o) => o.value);
-        else values[name] = input.value;
-      }
+      const values = getValues();
       $submit.disabled = true;
       try {
         await onSubmit(values, $form);
@@ -102,7 +132,7 @@ function form({ fields, submit, onSubmit, inline = false }) {
         $submit.disabled = false;
       }
     },
-  }, $error, rows, $submit);
+  }, $error, ...visibleRows, $submit);
   return $form;
 }
 
@@ -625,7 +655,7 @@ function partitionQuests(items, memberId) {
   const out = { available: [], mine: [], claimed: [], resting: [] };
   for (const q of items) {
     if (q.available) out.available.push(q);
-    else if (q.claimed_by && q.claimed_by === memberId) out.mine.push(q);
+    else if ((q.claimed_by && q.claimed_by === memberId) || (q.participants || []).includes(memberId)) out.mine.push(q);
     else if (q.claimed_by) out.claimed.push(q);
     else out.resting.push(q);
   }
@@ -641,6 +671,7 @@ const isAdminPinError = (err) => err instanceof ApiError && err.status === 403 &
 function questNotice(err) {
   if (!(err instanceof ApiError)) return null;
   if (err.status === 409 && err.code === 'quest_taken') return 'This quest was already taken.';
+  if (err.status === 409 && err.code === 'already_participant') return 'That member is already on this quest.';
   if (err.status === 404) return 'Quest not found.';
   return null;
 }
@@ -649,6 +680,17 @@ function questNotice(err) {
 const waitingBadge = (q) => q.awaiting_approval && el('span', { class: 'badge badge-sm', text: 'Waiting for approval' });
 
 const questMeta = (q) => `${q.points} points · resets at midnight after ${q.repeat_days} day(s)`;
+
+// joinNames lists names with commas and 'and' before the last: 'A', 'A and B',
+// 'A, B and C'.
+const joinNames = (names) => (names.length <= 1 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`);
+
+// pendingMembers is every member recorded on a pending completion, each with
+// the name and the split award the server computed; an item without a members
+// list is the one member who marked it done, paid the full points.
+const pendingMembers = (q) => (q.members && q.members.length
+  ? q.members
+  : [{ member_id: q.member_id, member_name: q.member_name, points: q.points }]);
 
 async function questsTab(h, $root, notice = null) {
   const rerender = (next = null) => { $root.replaceChildren(); questsTab(h, $root, next).catch((err) => showError($root, err)); };
@@ -661,11 +703,10 @@ async function questsTab(h, $root, notice = null) {
   const quests = page.items || [];
   const members = family.items || [];
   const combosData = managementVisible() ? await loadCombosData(h, page) : null;
-  const nameOf = Object.fromEntries(members.map((m) => [m.id, m.name]));
 
   const cards = [
     notice && alertBox('warning', notice),
-    activeMember ? takeCard(h, quests, nameOf, rerender) : card(null,
+    activeMember ? takeCard(h, quests, members, rerender) : card(null,
       el('h3', { class: 'font-semibold', text: 'Quests' }),
       el('p', { class: 'text-sm opacity-70', text: 'Choose a family member to take quests.' })),
     !activeMember && await approvalsCard(h, members, rerender),
@@ -705,10 +746,12 @@ async function loadCombosData(h, firstPage) {
 // it now: a chore re-taken after its cooldown keeps showing the earlier
 // completion that waits, and Mark done stays, since each marking is its own
 // completion.
-function takeCard(h, quests, nameOf, rerender) {
+function takeCard(h, quests, members, rerender) {
   const $err = el('div');
   const $detail = el('div');
+  const $share = el('div');
   const parts = partitionQuests(quests, activeMember.id);
+  const nameOf = Object.fromEntries(members.map((m) => [m.id, m.name]));
 
   const act = (verb, q) => action(async () => {
     const body = activeMemberAction();
@@ -738,6 +781,60 @@ function takeCard(h, quests, nameOf, rerender) {
       el('div', { class: 'text-xs opacity-60', text: questMeta(q) })),
     ...extra);
 
+  // shareCandidates: the household members a quest can still be shared with,
+  // everyone but the active member and those already on it.
+  const shareCandidates = (q) => {
+    const on = new Set([activeMember.id, ...(q.participants || [])]);
+    return members.filter((m) => !on.has(m.id));
+  };
+
+  // share POSTs the active member's action plus the picked member and their
+  // PIN. The server marks a wrong target PIN with fields.target_pin; it is
+  // rethrown so the target's PIN form shows it. Any other wrong_pin is the
+  // active member's, handled as on accept: the member is cleared and the
+  // user is sent back to the picker.
+  const share = async (q, m, targetPin) => {
+    const body = activeMemberAction();
+    if (!body) return;
+    try {
+      await api('POST', `/households/${h.id}/quests/${q.id}/share`, { ...body, target_member_id: m.id, target_pin: targetPin });
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'wrong_pin' && err.fields && err.fields.target_pin) throw err;
+      if (memberActionFailed(err)) return;
+      const msg = questNotice(err);
+      if (msg) { rerender(msg); return; }
+      throw err;
+    }
+    rerender();
+  };
+
+  const pickTarget = (q, m) => action(async () => {
+    if (!m.has_pin) { await share(q, m, ''); return; }
+    $share.replaceChildren(el('div', { class: 'p-3 bg-base-200 rounded space-y-2' },
+      el('p', { class: 'text-sm', text: `${m.name} enters their PIN to accept, as when accepting a quest.` }),
+      pinForm({ label: `PIN for ${m.name}`, submit: 'Share', onPin: (pin) => share(q, m, pin) })));
+  }, $err);
+
+  const showShare = (q) => $share.replaceChildren(el('div', { class: 'p-3 bg-base-200 rounded space-y-2' },
+    el('div', { class: 'font-semibold', text: `Share ${q.name} with` }),
+    el('div', { class: 'flex flex-wrap gap-2' },
+      shareCandidates(q).map((m) => el('button', { class: 'btn btn-sm', text: m.name, onclick: pickTarget(q, m) }))),
+    el('button', { class: 'btn btn-ghost btn-sm', text: 'Cancel', onclick: (e) => { e.preventDefault(); $share.replaceChildren(); } })));
+
+  // Share is offered only on a shareable quest the active member holds, and
+  // only while someone in the household is not yet on it.
+  const shareButton = (q) => q.shareable && q.claimed_by === activeMember.id && shareCandidates(q).length > 0 &&
+    el('button', { class: 'btn btn-ghost btn-xs', text: 'Share', onclick: (e) => { e.preventDefault(); showShare(q); } });
+
+  const sharedWith = (q) => {
+    if (!q.shared) return null;
+    const others = (q.participants || []).filter((id) => id !== activeMember.id).map((id) => nameOf[id] || 'a former member');
+    return [
+      el('span', { class: 'badge badge-sm', text: 'Shared' }),
+      el('span', { class: 'text-xs opacity-70', text: `Shared with ${joinNames(others)}` }),
+    ];
+  };
+
   const section = (title, items, render, empty) => el('div', { class: 'space-y-1' },
     el('h4', { class: 'font-semibold text-sm opacity-80', text: title }),
     items.length ? el('ul', {}, items.map(render)) : el('p', { class: 'text-xs opacity-60', text: empty }));
@@ -752,10 +849,13 @@ function takeCard(h, quests, nameOf, rerender) {
       'No quests available right now.'),
     $detail,
     section('Mine', parts.mine, (q) => row(q,
+      sharedWith(q),
       waitingBadge(q),
+      shareButton(q),
       el('button', { class: 'btn btn-primary btn-xs', text: 'Mark done', onclick: act('done', q) }),
       el('button', { class: 'btn btn-ghost btn-xs', text: 'Abandon', onclick: act('abandon', q) }),
     ), 'You have no quests yet.'),
+    $share,
     section('Claimed', parts.claimed,
       (q) => row(q, el('span', { class: 'text-xs opacity-70', text: `Taken by ${nameOf[q.claimed_by] || 'a former member'}` }),
         waitingBadge(q)),
@@ -773,7 +873,10 @@ function comboBonusNotice(q, res) {
   const bonuses = (res && res.combo_bonuses) || [];
   if (bonuses.length === 0) return null;
   const paid = bonuses.map((b) => `combo bonus '${b.name}' +${b.bonus_points}`).join(', ');
-  return `Approved '${q.name}' for ${q.member_name}: +${q.points} points, ${paid}`;
+  const who = pendingMembers(q);
+  if (who.length < 2) return `Approved '${q.name}' for ${who[0].member_name}: +${who[0].points} points, ${paid}`;
+  const bonus = q.teamwork_bonus || 0;
+  return `Approved '${q.name}' for ${joinNames(who.map((m) => m.member_name))}: +${who[0].points} points and +${bonus} teamwork bonus each, ${paid}`;
 }
 
 // approvalsCard is the administrator's list of quests marked done. Loading,
@@ -822,10 +925,25 @@ async function approvalsCard(h, members, rerender) {
     rerender(comboBonusNotice(q, res));
   }, $err);
 
+  // A shared completion names everyone on it and what each will receive:
+  // the split points plus the teamwork bonus. A single member's keeps its
+  // one line with the full points.
+  const whoLines = (q) => {
+    const who = pendingMembers(q);
+    if (who.length < 2) {
+      return [el('div', { class: 'text-xs opacity-60', text: `${who[0].member_name} · ${who[0].points} points` })];
+    }
+    const bonus = q.teamwork_bonus || 0;
+    return [
+      el('div', { class: 'text-xs opacity-60', text: `shared by ${joinNames(who.map((m) => m.member_name))}` }),
+      ...who.map((m) => el('div', { class: 'text-xs', text: `${m.member_name} gets ${m.points} + ${bonus} bonus = ${m.points + bonus}` })),
+    ];
+  };
+
   const rows = pending.map((q) => el('li', { class: 'flex flex-wrap items-center gap-2 py-2 border-b border-base-300' },
     el('div', { class: 'flex-1 min-w-0' },
       el('div', { class: 'font-medium', text: q.name }),
-      el('div', { class: 'text-xs opacity-60', text: `${q.member_name} · ${q.points} points` }),
+      whoLines(q),
       q.done_at && el('div', { class: 'text-xs opacity-60', text: fmtDate(q.done_at) })),
     el('button', { class: 'btn btn-success btn-xs', text: 'Approve', onclick: act('approve', q) }),
     el('button', { class: 'btn btn-ghost btn-xs', text: 'Send back', onclick: act('reject', q) })));
@@ -848,11 +966,15 @@ function manageQuestsCard(h, quests, library, page, rerender) {
     return Number.isNaN(n) ? val : n;
   };
 
+  // teamwork_bonus is sent only while Shareable is ticked; unticked, it is 0,
+  // so a hidden bonus is never stored on a quest that cannot be shared.
   const toBody = (v) => ({
     name: v.name,
     points: toNum(v.points),
     repeat_days: toNum(v.repeat_days),
     notes: v.notes,
+    shareable: !!v.shareable,
+    teamwork_bonus: v.shareable ? toNum(v.teamwork_bonus ?? '') : 0,
   });
 
   const questFields = (q = {}) => [
@@ -860,6 +982,8 @@ function manageQuestsCard(h, quests, library, page, rerender) {
     { name: 'points', label: 'Points', type: 'number', value: q.points ?? '' },
     { name: 'repeat_days', label: 'Repeats after (days, back at midnight)', type: 'number', value: q.repeat_days ?? '' },
     { name: 'notes', label: 'Notes', type: 'textarea', value: q.notes ?? '' },
+    { name: 'shareable', label: 'Shareable', type: 'checkbox', value: !!q.shareable },
+    { name: 'teamwork_bonus', label: 'Teamwork bonus', type: 'number', value: q.teamwork_bonus ?? 0, show: (v) => !!v.shareable },
   ];
 
   const rows = quests.map((q) => {
@@ -868,6 +992,7 @@ function manageQuestsCard(h, quests, library, page, rerender) {
       el('div', { class: 'flex-1 min-w-0' },
         el('div', { class: 'font-medium', text: q.name }),
         el('div', { class: 'text-xs opacity-60', text: `${q.points} points · ${q.repeat_days} day(s)` }),
+        el('div', { class: 'text-xs opacity-60', text: `Shareable ${q.shareable ? 'Yes' : 'No'} · Teamwork bonus ${q.shareable ? q.teamwork_bonus : '-'}` }),
         q.notes ? el('div', { class: 'text-xs opacity-70 mt-1', text: q.notes }) : null),
       unlocked && el('button', {
         class: 'btn btn-ghost btn-xs', text: 'Edit',

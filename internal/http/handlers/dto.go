@@ -128,27 +128,35 @@ func toFamilyMember(m db.FamilyMember) familyMemberJSON {
 // quest is in the pool; awaiting_approval says at least one of its
 // completions waits for the administrator to approve or reject it.
 type questJSON struct {
-	ID               uuid.UUID  `json:"id"`
-	HouseholdID      uuid.UUID  `json:"household_id"`
-	LibraryID        *uuid.UUID `json:"library_id"`
-	Name             string     `json:"name"`
-	Points           int32      `json:"points"`
-	RepeatDays       int32      `json:"repeat_days"`
-	Notes            string     `json:"notes"`
-	Available        bool       `json:"available"`
-	ClaimedBy        *uuid.UUID `json:"claimed_by"`
-	ClaimedAt        *time.Time `json:"claimed_at"`
-	AwaitingApproval bool       `json:"awaiting_approval"`
-	CompletedAt      *time.Time `json:"completed_at"`
-	AvailableAt      *time.Time `json:"available_at"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
+	ID               uuid.UUID   `json:"id"`
+	HouseholdID      uuid.UUID   `json:"household_id"`
+	LibraryID        *uuid.UUID  `json:"library_id"`
+	Name             string      `json:"name"`
+	Points           int32       `json:"points"`
+	RepeatDays       int32       `json:"repeat_days"`
+	Notes            string      `json:"notes"`
+	Available        bool        `json:"available"`
+	ClaimedBy        *uuid.UUID  `json:"claimed_by"`
+	ClaimedAt        *time.Time  `json:"claimed_at"`
+	AwaitingApproval bool        `json:"awaiting_approval"`
+	CompletedAt      *time.Time  `json:"completed_at"`
+	AvailableAt      *time.Time  `json:"available_at"`
+	CreatedAt        time.Time   `json:"created_at"`
+	UpdatedAt        time.Time   `json:"updated_at"`
+	Shareable        bool        `json:"shareable"`
+	TeamworkBonus    int32       `json:"teamwork_bonus"`
+	Shared           bool        `json:"shared"`
+	Participants     []uuid.UUID `json:"participants"`
 }
 
 // toQuest maps a quest; awaiting_approval comes only from the service's
-// pending-completion flag.
+// pending-completion flag. participants is [] for a quest that is not shared.
 func toQuest(v app.QuestView) questJSON {
 	q := v.HouseholdQuest
+	participants := v.Participants
+	if participants == nil {
+		participants = []uuid.UUID{}
+	}
 	return questJSON{
 		ID:               q.ID,
 		HouseholdID:      q.HouseholdID,
@@ -165,19 +173,25 @@ func toQuest(v app.QuestView) questJSON {
 		AvailableAt:      timePtr(q.AvailableAt),
 		CreatedAt:        q.CreatedAt.Time.UTC(),
 		UpdatedAt:        q.UpdatedAt.Time.UTC(),
+		Shareable:        q.Shareable,
+		TeamworkBonus:    q.TeamworkBonus,
+		Shared:           v.Shared(),
+		Participants:     participants,
 	}
 }
 
 // completionJSON is one time a member marked a chore done. approved_at is
 // present once approved; status is pending, approved, rejected or cancelled.
-// member_id is null once the member has been removed.
+// member_id is null once the member has been removed. member_ids, present on
+// an approved completion, lists every member it credited, earliest first.
 type completionJSON struct {
-	ID         uuid.UUID  `json:"id"`
-	QuestID    uuid.UUID  `json:"quest_id"`
-	MemberID   *uuid.UUID `json:"member_id"`
-	DoneAt     time.Time  `json:"done_at"`
-	ApprovedAt *time.Time `json:"approved_at,omitempty"`
-	Status     string     `json:"status"`
+	ID         uuid.UUID   `json:"id"`
+	QuestID    uuid.UUID   `json:"quest_id"`
+	MemberID   *uuid.UUID  `json:"member_id"`
+	MemberIDs  []uuid.UUID `json:"member_ids,omitempty"`
+	DoneAt     time.Time   `json:"done_at"`
+	ApprovedAt *time.Time  `json:"approved_at,omitempty"`
+	Status     string      `json:"status"`
 }
 
 func toCompletion(c app.Completion) completionJSON {
@@ -185,6 +199,7 @@ func toCompletion(c app.Completion) completionJSON {
 		ID:         c.ID,
 		QuestID:    c.QuestID,
 		MemberID:   c.MemberID,
+		MemberIDs:  c.MemberIDs,
 		DoneAt:     c.DoneAt,
 		ApprovedAt: c.ApprovedAt,
 		Status:     c.Status,
@@ -192,26 +207,45 @@ func toCompletion(c app.Completion) completionJSON {
 }
 
 // pendingCompletionJSON is a completion waiting for approval, with the
-// chore's name and points and the name of the member who marked it done.
+// chore's name, points and teamwork bonus, the member who marked it done
+// (member_id, member_name) and every member it covers with their split
+// (members; one entry when it is not shared). teamwork_bonus is what each
+// member earns on top of their split, 0 when it is not shared.
 type pendingCompletionJSON struct {
-	CompletionID uuid.UUID `json:"completion_id"`
-	QuestID      uuid.UUID `json:"quest_id"`
-	Name         string    `json:"name"`
-	Points       int32     `json:"points"`
-	MemberID     uuid.UUID `json:"member_id"`
-	MemberName   string    `json:"member_name"`
-	DoneAt       time.Time `json:"done_at"`
+	CompletionID  uuid.UUID           `json:"completion_id"`
+	QuestID       uuid.UUID           `json:"quest_id"`
+	Name          string              `json:"name"`
+	Points        int32               `json:"points"`
+	TeamworkBonus int32               `json:"teamwork_bonus"`
+	MemberID      uuid.UUID           `json:"member_id"`
+	MemberName    string              `json:"member_name"`
+	DoneAt        time.Time           `json:"done_at"`
+	Members       []pendingMemberJSON `json:"members"`
+}
+
+// pendingMemberJSON is one member of a pending completion and the points
+// their split will credit.
+type pendingMemberJSON struct {
+	MemberID   uuid.UUID `json:"member_id"`
+	MemberName string    `json:"member_name"`
+	Points     int32     `json:"points"`
 }
 
 func toPendingCompletion(p app.PendingCompletion) pendingCompletionJSON {
+	members := make([]pendingMemberJSON, len(p.Members))
+	for i, m := range p.Members {
+		members[i] = pendingMemberJSON{MemberID: m.MemberID, MemberName: m.Name, Points: m.Award}
+	}
 	return pendingCompletionJSON{
-		CompletionID: p.ID,
-		QuestID:      p.QuestID,
-		Name:         p.QuestName,
-		Points:       p.Points,
-		MemberID:     p.MemberID,
-		MemberName:   p.MemberName,
-		DoneAt:       p.DoneAt,
+		CompletionID:  p.ID,
+		QuestID:       p.QuestID,
+		Name:          p.QuestName,
+		Points:        p.Points,
+		TeamworkBonus: p.TeamworkBonus,
+		MemberID:      p.MemberID,
+		MemberName:    p.MemberName,
+		DoneAt:        p.DoneAt,
+		Members:       members,
 	}
 }
 

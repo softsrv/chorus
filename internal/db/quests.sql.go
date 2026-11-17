@@ -13,22 +13,69 @@ import (
 )
 
 const abandonQuest = `-- name: AbandonQuest :one
-UPDATE household_quests
-SET claimed_by = NULL, claimed_at = NULL, updated_at = NOW()
-WHERE household_id = $1 AND id = $2
-  AND claimed_by = $3
-RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at
+WITH mine AS (
+    SELECT q.household_id, q.id,
+           q.claimed_by IS NOT DISTINCT FROM $1::uuid AS holder,
+           nxt.member_id AS next_member, nxt.joined_at AS next_joined_at,
+           (SELECT count(*) FROM household_quest_participants r
+            WHERE r.household_id = q.household_id AND r.quest_id = q.id
+              AND r.member_id <> $1::uuid) AS remaining
+    FROM household_quests q
+    LEFT JOIN LATERAL (
+        SELECT p.member_id, p.joined_at FROM household_quest_participants p
+        WHERE p.household_id = q.household_id AND p.quest_id = q.id
+          AND p.member_id <> $1::uuid
+        ORDER BY p.joined_at ASC, p.member_id ASC
+        LIMIT 1
+    ) nxt ON true
+    WHERE q.household_id = $2 AND q.id = $3
+      AND (q.claimed_by = $1::uuid OR EXISTS (
+          SELECT 1 FROM household_quest_participants p
+          WHERE p.household_id = q.household_id AND p.quest_id = q.id
+            AND p.member_id = $1::uuid
+      ))
+    FOR UPDATE OF q
+), left_quest AS (
+    DELETE FROM household_quest_participants p
+    USING mine m
+    WHERE p.household_id = m.household_id AND p.quest_id = m.id
+      AND (p.member_id = $1::uuid OR m.remaining <= 1)
+    RETURNING p.quest_id
+)
+UPDATE household_quests q
+SET claimed_by = CASE WHEN m.holder THEN m.next_member ELSE q.claimed_by END,
+    claimed_at = CASE WHEN NOT m.holder THEN q.claimed_at
+                      WHEN m.next_member IS NULL THEN NULL
+                      ELSE m.next_joined_at END,
+    done_at = CASE WHEN m.holder AND m.next_member IS NULL THEN NULL ELSE q.done_at END,
+    updated_at = NOW()
+FROM mine m
+WHERE q.household_id = m.household_id AND q.id = m.id
+RETURNING q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes,
+          q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at,
+          q.created_at, q.updated_at, q.shareable, q.teamwork_bonus
 `
 
 type AbandonQuestParams struct {
-	HouseholdID uuid.UUID  `json:"household_id"`
-	ID          uuid.UUID  `json:"id"`
-	MemberID    *uuid.UUID `json:"member_id"`
+	MemberID    uuid.UUID `json:"member_id"`
+	HouseholdID uuid.UUID `json:"household_id"`
+	ID          uuid.UUID `json:"id"`
 }
 
-// Puts a quest back in the pool. Only its current holder can abandon it.
+// The acting member leaves a quest they hold or are on. Only their part goes:
+// their participant row. If they held it, the holder of record moves to the
+// earliest remaining participant (joined_at, then member_id), who keeps
+// their joined_at as claimed_at; a quest with nobody left is back in the
+// pool, done_at cleared with the holder so the done_at-needs-a-holder CHECK
+// holds. A quest left with one member is no longer shared, so that member's
+// participant row goes too. A member not on the quest, or a quest not in
+// this household, matches no row and changes nothing. The caller holds the
+// member locks and then the quest's row lock (LockHouseholdQuest, a statement
+// of its own), so the participants counted here are the committed ones: a
+// concurrent share or abandon of the quest is either in this snapshot or
+// waits until this transaction ends.
 func (q *Queries) AbandonQuest(ctx context.Context, arg AbandonQuestParams) (HouseholdQuest, error) {
-	row := q.db.QueryRow(ctx, abandonQuest, arg.HouseholdID, arg.ID, arg.MemberID)
+	row := q.db.QueryRow(ctx, abandonQuest, arg.MemberID, arg.HouseholdID, arg.ID)
 	var i HouseholdQuest
 	err := row.Scan(
 		&i.ID,
@@ -45,24 +92,34 @@ func (q *Queries) AbandonQuest(ctx context.Context, arg AbandonQuestParams) (Hou
 		&i.AvailableAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Shareable,
+		&i.TeamworkBonus,
 	)
 	return i, err
 }
 
 const approveCompletion = `-- name: ApproveCompletion :one
 WITH pending AS (
-    SELECT pc.id, q.points
+    SELECT pc.id, q.points, q.teamwork_bonus
     FROM quest_completions pc
     JOIN household_quests q ON q.household_id = pc.household_id AND q.id = pc.quest_id
     WHERE pc.household_id = $1 AND pc.id = $2
       AND pc.status = 'pending' AND pc.member_id = $3::uuid
     FOR UPDATE OF pc
+), approved AS (
+    UPDATE quest_completions c
+    SET status = 'approved', approved_at = NOW()
+    FROM pending p
+    WHERE c.id = p.id AND c.status = 'pending'
+    RETURNING c.id, c.household_id, c.quest_id, c.member_id, c.done_at, c.approved_at, p.points, p.teamwork_bonus
 )
-UPDATE quest_completions c
-SET status = 'approved', approved_at = NOW()
-FROM pending p
-WHERE c.id = p.id AND c.status = 'pending'
-RETURNING c.id, c.quest_id, c.member_id, c.done_at, c.approved_at, p.points
+SELECT a.id, a.quest_id, a.member_id, a.done_at, a.approved_at, a.points, a.teamwork_bonus,
+       ARRAY(
+           SELECT cm.member_id FROM quest_completion_members cm
+           WHERE cm.household_id = a.household_id AND cm.completion_id = a.id
+           ORDER BY cm.added_at, cm.member_id
+       )::uuid[] AS member_ids
+FROM approved a
 `
 
 type ApproveCompletionParams struct {
@@ -72,19 +129,25 @@ type ApproveCompletionParams struct {
 }
 
 type ApproveCompletionRow struct {
-	ID         uuid.UUID          `json:"id"`
-	QuestID    uuid.UUID          `json:"quest_id"`
-	MemberID   *uuid.UUID         `json:"member_id"`
-	DoneAt     pgtype.Timestamptz `json:"done_at"`
-	ApprovedAt pgtype.Timestamptz `json:"approved_at"`
-	Points     int32              `json:"points"`
+	ID            uuid.UUID          `json:"id"`
+	QuestID       uuid.UUID          `json:"quest_id"`
+	MemberID      *uuid.UUID         `json:"member_id"`
+	DoneAt        pgtype.Timestamptz `json:"done_at"`
+	ApprovedAt    pgtype.Timestamptz `json:"approved_at"`
+	Points        int32              `json:"points"`
+	TeamworkBonus int32              `json:"teamwork_bonus"`
+	MemberIds     []uuid.UUID        `json:"member_ids"`
 }
 
 // Approves one pending completion. The completion is locked first and its
 // status re-read under the lock, so of two concurrent approvals exactly one
 // gets a row. The quest is not touched: its cooldown already started at
-// mark-done. points is the chore's current points, to credit to member_id.
-// member_id must match the member the caller already locked.
+// mark-done. points and teamwork_bonus are the chore's as they stand now
+// (the CHECK keeps the bonus 0 once shareable is off); member_ids are the
+// members the completion covers, earliest recorded first, empty for a
+// completion recorded before quest sharing (its marker alone). member_id
+// must match the marker the caller already locked; the caller holds the
+// locks of every recorded member, so the member set cannot change under it.
 func (q *Queries) ApproveCompletion(ctx context.Context, arg ApproveCompletionParams) (ApproveCompletionRow, error) {
 	row := q.db.QueryRow(ctx, approveCompletion, arg.HouseholdID, arg.ID, arg.MemberID)
 	var i ApproveCompletionRow
@@ -95,16 +158,46 @@ func (q *Queries) ApproveCompletion(ctx context.Context, arg ApproveCompletionPa
 		&i.DoneAt,
 		&i.ApprovedAt,
 		&i.Points,
+		&i.TeamworkBonus,
+		&i.MemberIds,
 	)
 	return i, err
 }
 
 const cancelMemberPendingCompletions = `-- name: CancelMemberPendingCompletions :exec
-WITH cancelled AS (
+WITH mine AS (
+    SELECT c.id, c.household_id,
+           (c.member_id IS NULL OR c.member_id = $1::uuid) AS marker,
+           (SELECT cm.member_id FROM quest_completion_members cm
+            WHERE cm.household_id = c.household_id AND cm.completion_id = c.id
+              AND cm.member_id <> $1::uuid
+            ORDER BY cm.added_at ASC, cm.member_id ASC
+            LIMIT 1) AS next_member
+    FROM quest_completions c
+    WHERE c.household_id = $2 AND c.status = 'pending'
+      AND (c.member_id = $1::uuid OR EXISTS (
+          SELECT 1 FROM quest_completion_members cm
+          WHERE cm.household_id = c.household_id AND cm.completion_id = c.id
+            AND cm.member_id = $1::uuid
+      ))
+    FOR UPDATE OF c
+), left_completions AS (
+    DELETE FROM quest_completion_members cm
+    USING mine m
+    WHERE cm.household_id = m.household_id AND cm.completion_id = m.id
+      AND cm.member_id = $1::uuid
+    RETURNING cm.completion_id
+), handed_over AS (
+    UPDATE quest_completions hc
+    SET member_id = m.next_member
+    FROM mine m
+    WHERE hc.id = m.id AND m.marker AND m.next_member IS NOT NULL
+    RETURNING hc.id
+), cancelled AS (
     UPDATE quest_completions cc
     SET status = 'cancelled'
-    WHERE cc.household_id = $1 AND cc.member_id = $2
-      AND cc.status = 'pending'
+    FROM mine m
+    WHERE cc.id = m.id AND m.marker AND m.next_member IS NULL
     RETURNING cc.household_id, cc.quest_id, cc.done_at
 )
 UPDATE household_quests q
@@ -115,17 +208,25 @@ WHERE q.household_id = c.household_id AND q.id = c.quest_id
 `
 
 type CancelMemberPendingCompletionsParams struct {
-	HouseholdID uuid.UUID  `json:"household_id"`
-	MemberID    *uuid.UUID `json:"member_id"`
+	MemberID    uuid.UUID `json:"member_id"`
+	HouseholdID uuid.UUID `json:"household_id"`
 }
 
-// Cancels every completion of the member still waiting for approval. No
-// points move. As on reject, a quest whose running cooldown one of those
-// completions started (the quest's completed_at is its done_at, available_at
+// Takes a member who is leaving the household off every completion still
+// waiting for approval. Their quest_completion_members row goes. Where they
+// marked it done, the marker moves first to the earliest remaining recorded
+// member (added_at, then member_id), so the item stays listed and
+// approvable and the marker key is never nulled under it; the rest are paid
+// as the remaining n at approval. A completion with no recorded member left
+// (a lone member's, or one recorded before quest sharing) is cancelled. No
+// points move. As on reject, a quest whose running cooldown a cancelled
+// completion started (the quest's completed_at is its done_at, available_at
 // still ahead) is available again right away: the chore was never approved,
-// so it does not sit resting. Cooldowns started by anyone else stay.
+// so it does not sit resting. Cooldowns started by anyone else stay. The
+// completions are locked after the caller's lock on the member row (member
+// first, the order Approve uses).
 func (q *Queries) CancelMemberPendingCompletions(ctx context.Context, arg CancelMemberPendingCompletionsParams) error {
-	_, err := q.db.Exec(ctx, cancelMemberPendingCompletions, arg.HouseholdID, arg.MemberID)
+	_, err := q.db.Exec(ctx, cancelMemberPendingCompletions, arg.MemberID, arg.HouseholdID)
 	return err
 }
 
@@ -135,7 +236,7 @@ SET claimed_by = $1, claimed_at = NOW(), updated_at = NOW()
 WHERE household_id = $2 AND id = $3
   AND claimed_by IS NULL
   AND (available_at IS NULL OR available_at <= NOW())
-RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at
+RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at, shareable, teamwork_bonus
 `
 
 type ClaimQuestParams struct {
@@ -165,24 +266,28 @@ func (q *Queries) ClaimQuest(ctx context.Context, arg ClaimQuestParams) (Househo
 		&i.AvailableAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Shareable,
+		&i.TeamworkBonus,
 	)
 	return i, err
 }
 
 const createHouseholdQuest = `-- name: CreateHouseholdQuest :one
-INSERT INTO household_quests (id, household_id, library_id, name, points, repeat_days, notes, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
-RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at
+INSERT INTO household_quests (id, household_id, library_id, name, points, repeat_days, notes, shareable, teamwork_bonus, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at, shareable, teamwork_bonus
 `
 
 type CreateHouseholdQuestParams struct {
-	ID          uuid.UUID  `json:"id"`
-	HouseholdID uuid.UUID  `json:"household_id"`
-	LibraryID   *uuid.UUID `json:"library_id"`
-	Name        string     `json:"name"`
-	Points      int32      `json:"points"`
-	RepeatDays  int32      `json:"repeat_days"`
-	Notes       string     `json:"notes"`
+	ID            uuid.UUID  `json:"id"`
+	HouseholdID   uuid.UUID  `json:"household_id"`
+	LibraryID     *uuid.UUID `json:"library_id"`
+	Name          string     `json:"name"`
+	Points        int32      `json:"points"`
+	RepeatDays    int32      `json:"repeat_days"`
+	Notes         string     `json:"notes"`
+	Shareable     bool       `json:"shareable"`
+	TeamworkBonus int32      `json:"teamwork_bonus"`
 }
 
 func (q *Queries) CreateHouseholdQuest(ctx context.Context, arg CreateHouseholdQuestParams) (HouseholdQuest, error) {
@@ -194,6 +299,8 @@ func (q *Queries) CreateHouseholdQuest(ctx context.Context, arg CreateHouseholdQ
 		arg.Points,
 		arg.RepeatDays,
 		arg.Notes,
+		arg.Shareable,
+		arg.TeamworkBonus,
 	)
 	var i HouseholdQuest
 	err := row.Scan(
@@ -211,6 +318,8 @@ func (q *Queries) CreateHouseholdQuest(ctx context.Context, arg CreateHouseholdQ
 		&i.AvailableAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Shareable,
+		&i.TeamworkBonus,
 	)
 	return i, err
 }
@@ -233,7 +342,7 @@ func (q *Queries) DeleteHouseholdQuest(ctx context.Context, arg DeleteHouseholdQ
 }
 
 const getHouseholdQuest = `-- name: GetHouseholdQuest :one
-SELECT id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at FROM household_quests WHERE household_id = $1 AND id = $2
+SELECT id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at, shareable, teamwork_bonus FROM household_quests WHERE household_id = $1 AND id = $2
 `
 
 type GetHouseholdQuestParams struct {
@@ -259,15 +368,22 @@ func (q *Queries) GetHouseholdQuest(ctx context.Context, arg GetHouseholdQuestPa
 		&i.AvailableAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Shareable,
+		&i.TeamworkBonus,
 	)
 	return i, err
 }
 
 const getHouseholdQuestView = `-- name: GetHouseholdQuestView :one
-SELECT q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at, EXISTS (
+SELECT q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at, q.shareable, q.teamwork_bonus, EXISTS (
     SELECT 1 FROM quest_completions c
     WHERE c.household_id = q.household_id AND c.quest_id = q.id AND c.status = 'pending'
-) AS awaiting_approval
+) AS awaiting_approval,
+ARRAY(
+    SELECT p.member_id FROM household_quest_participants p
+    WHERE p.household_id = q.household_id AND p.quest_id = q.id
+    ORDER BY p.joined_at, p.member_id
+)::uuid[] AS participants
 FROM household_quests q
 WHERE q.household_id = $1 AND q.id = $2
 `
@@ -280,9 +396,11 @@ type GetHouseholdQuestViewParams struct {
 type GetHouseholdQuestViewRow struct {
 	HouseholdQuest   HouseholdQuest `json:"household_quest"`
 	AwaitingApproval bool           `json:"awaiting_approval"`
+	Participants     []uuid.UUID    `json:"participants"`
 }
 
-// One quest with awaiting_approval, as ListHouseholdQuests reads it.
+// One quest with awaiting_approval and participants, as ListHouseholdQuests
+// reads it.
 func (q *Queries) GetHouseholdQuestView(ctx context.Context, arg GetHouseholdQuestViewParams) (GetHouseholdQuestViewRow, error) {
 	row := q.db.QueryRow(ctx, getHouseholdQuestView, arg.HouseholdID, arg.ID)
 	var i GetHouseholdQuestViewRow
@@ -301,30 +419,45 @@ func (q *Queries) GetHouseholdQuestView(ctx context.Context, arg GetHouseholdQue
 		&i.HouseholdQuest.AvailableAt,
 		&i.HouseholdQuest.CreatedAt,
 		&i.HouseholdQuest.UpdatedAt,
+		&i.HouseholdQuest.Shareable,
+		&i.HouseholdQuest.TeamworkBonus,
 		&i.AwaitingApproval,
+		&i.Participants,
 	)
 	return i, err
 }
 
-const getPendingCompletionMember = `-- name: GetPendingCompletionMember :one
-SELECT member_id FROM quest_completions
-WHERE household_id = $1 AND id = $2
-  AND status = 'pending' AND member_id IS NOT NULL
+const getPendingCompletionMembers = `-- name: GetPendingCompletionMembers :one
+SELECT c.member_id,
+       ARRAY(
+           SELECT cm.member_id FROM quest_completion_members cm
+           WHERE cm.household_id = c.household_id AND cm.completion_id = c.id
+           ORDER BY cm.added_at, cm.member_id
+       )::uuid[] AS member_ids
+FROM quest_completions c
+WHERE c.household_id = $1 AND c.id = $2
+  AND c.status = 'pending' AND c.member_id IS NOT NULL
 `
 
-type GetPendingCompletionMemberParams struct {
+type GetPendingCompletionMembersParams struct {
 	HouseholdID uuid.UUID `json:"household_id"`
 	ID          uuid.UUID `json:"id"`
 }
 
-// The member of a pending completion, read without a lock so Approve can
-// lock that member's row before it locks the completion (the order
-// FamilyService.Remove uses).
-func (q *Queries) GetPendingCompletionMember(ctx context.Context, arg GetPendingCompletionMemberParams) (*uuid.UUID, error) {
-	row := q.db.QueryRow(ctx, getPendingCompletionMember, arg.HouseholdID, arg.ID)
-	var member_id *uuid.UUID
-	err := row.Scan(&member_id)
-	return member_id, err
+type GetPendingCompletionMembersRow struct {
+	MemberID  *uuid.UUID  `json:"member_id"`
+	MemberIds []uuid.UUID `json:"member_ids"`
+}
+
+// The marker of a pending completion and every member it covers (earliest
+// recorded first), read without a lock so Approve can lock those members'
+// rows before it locks the completion (the order FamilyService.Remove uses).
+// A completion recorded before quest sharing has no member rows.
+func (q *Queries) GetPendingCompletionMembers(ctx context.Context, arg GetPendingCompletionMembersParams) (GetPendingCompletionMembersRow, error) {
+	row := q.db.QueryRow(ctx, getPendingCompletionMembers, arg.HouseholdID, arg.ID)
+	var i GetPendingCompletionMembersRow
+	err := row.Scan(&i.MemberID, &i.MemberIds)
+	return i, err
 }
 
 const getQuestLibraryItem = `-- name: GetQuestLibraryItem :one
@@ -346,10 +479,15 @@ func (q *Queries) GetQuestLibraryItem(ctx context.Context, id uuid.UUID) (QuestL
 }
 
 const listHouseholdQuests = `-- name: ListHouseholdQuests :many
-SELECT q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at, EXISTS (
+SELECT q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at, q.shareable, q.teamwork_bonus, EXISTS (
     SELECT 1 FROM quest_completions c
     WHERE c.household_id = q.household_id AND c.quest_id = q.id AND c.status = 'pending'
-) AS awaiting_approval
+) AS awaiting_approval,
+ARRAY(
+    SELECT p.member_id FROM household_quest_participants p
+    WHERE p.household_id = q.household_id AND p.quest_id = q.id
+    ORDER BY p.joined_at, p.member_id
+)::uuid[] AS participants
 FROM household_quests q
 WHERE q.household_id = $1
 ORDER BY q.created_at ASC, q.id ASC
@@ -365,9 +503,11 @@ type ListHouseholdQuestsParams struct {
 type ListHouseholdQuestsRow struct {
 	HouseholdQuest   HouseholdQuest `json:"household_quest"`
 	AwaitingApproval bool           `json:"awaiting_approval"`
+	Participants     []uuid.UUID    `json:"participants"`
 }
 
 // awaiting_approval: the quest has a completion waiting for the administrator.
+// participants: the members on the quest when it is shared, earliest first.
 func (q *Queries) ListHouseholdQuests(ctx context.Context, arg ListHouseholdQuestsParams) ([]ListHouseholdQuestsRow, error) {
 	rows, err := q.db.Query(ctx, listHouseholdQuests, arg.HouseholdID, arg.RowOffset, arg.RowLimit)
 	if err != nil {
@@ -392,7 +532,10 @@ func (q *Queries) ListHouseholdQuests(ctx context.Context, arg ListHouseholdQues
 			&i.HouseholdQuest.AvailableAt,
 			&i.HouseholdQuest.CreatedAt,
 			&i.HouseholdQuest.UpdatedAt,
+			&i.HouseholdQuest.Shareable,
+			&i.HouseholdQuest.TeamworkBonus,
 			&i.AwaitingApproval,
+			&i.Participants,
 		); err != nil {
 			return nil, err
 		}
@@ -405,8 +548,20 @@ func (q *Queries) ListHouseholdQuests(ctx context.Context, arg ListHouseholdQues
 }
 
 const listPendingCompletions = `-- name: ListPendingCompletions :many
-SELECT c.id, c.quest_id, q.name AS quest_name, q.points, c.member_id,
-       m.name AS member_name, c.done_at
+SELECT c.id, c.quest_id, q.name AS quest_name, q.points, q.teamwork_bonus, c.member_id,
+       m.name AS member_name, c.done_at,
+       ARRAY(
+           SELECT cm.member_id FROM quest_completion_members cm
+           JOIN family_members fm ON fm.household_id = cm.household_id AND fm.id = cm.member_id
+           WHERE cm.household_id = c.household_id AND cm.completion_id = c.id
+           ORDER BY cm.added_at, cm.member_id
+       )::uuid[] AS member_ids,
+       ARRAY(
+           SELECT fm.name FROM quest_completion_members cm
+           JOIN family_members fm ON fm.household_id = cm.household_id AND fm.id = cm.member_id
+           WHERE cm.household_id = c.household_id AND cm.completion_id = c.id
+           ORDER BY cm.added_at, cm.member_id
+       )::text[] AS member_names
 FROM quest_completions c
 JOIN household_quests q ON q.household_id = c.household_id AND q.id = c.quest_id
 JOIN family_members m ON m.household_id = c.household_id AND m.id = c.member_id
@@ -415,17 +570,23 @@ ORDER BY c.done_at ASC, c.id ASC
 `
 
 type ListPendingCompletionsRow struct {
-	ID         uuid.UUID          `json:"id"`
-	QuestID    uuid.UUID          `json:"quest_id"`
-	QuestName  string             `json:"quest_name"`
-	Points     int32              `json:"points"`
-	MemberID   *uuid.UUID         `json:"member_id"`
-	MemberName string             `json:"member_name"`
-	DoneAt     pgtype.Timestamptz `json:"done_at"`
+	ID            uuid.UUID          `json:"id"`
+	QuestID       uuid.UUID          `json:"quest_id"`
+	QuestName     string             `json:"quest_name"`
+	Points        int32              `json:"points"`
+	TeamworkBonus int32              `json:"teamwork_bonus"`
+	MemberID      *uuid.UUID         `json:"member_id"`
+	MemberName    string             `json:"member_name"`
+	DoneAt        pgtype.Timestamptz `json:"done_at"`
+	MemberIds     []uuid.UUID        `json:"member_ids"`
+	MemberNames   []string           `json:"member_names"`
 }
 
 // Completions waiting for approval, one row each, oldest mark-done first,
-// with the chore's name and points and the name of the member who did it.
+// with the chore's name, current points and teamwork bonus, the member who
+// marked it done, and every member it covers (member_ids and member_names,
+// in the same order: earliest recorded first). A completion recorded before
+// quest sharing has no member rows; the caller reads its marker alone.
 func (q *Queries) ListPendingCompletions(ctx context.Context, householdID uuid.UUID) ([]ListPendingCompletionsRow, error) {
 	rows, err := q.db.Query(ctx, listPendingCompletions, householdID)
 	if err != nil {
@@ -440,9 +601,12 @@ func (q *Queries) ListPendingCompletions(ctx context.Context, householdID uuid.U
 			&i.QuestID,
 			&i.QuestName,
 			&i.Points,
+			&i.TeamworkBonus,
 			&i.MemberID,
 			&i.MemberName,
 			&i.DoneAt,
+			&i.MemberIds,
+			&i.MemberNames,
 		); err != nil {
 			return nil, err
 		}
@@ -490,6 +654,148 @@ func (q *Queries) ListQuestLibrary(ctx context.Context) ([]QuestLibrary, error) 
 	return items, nil
 }
 
+const listQuestParticipants = `-- name: ListQuestParticipants :many
+SELECT member_id FROM household_quest_participants
+WHERE household_id = $1 AND quest_id = $2
+ORDER BY joined_at ASC, member_id ASC
+`
+
+type ListQuestParticipantsParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	QuestID     uuid.UUID `json:"quest_id"`
+}
+
+// The members on one quest, earliest first; none when it is not shared.
+func (q *Queries) ListQuestParticipants(ctx context.Context, arg ListQuestParticipantsParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listQuestParticipants, arg.HouseholdID, arg.QuestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var member_id uuid.UUID
+		if err := rows.Scan(&member_id); err != nil {
+			return nil, err
+		}
+		items = append(items, member_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockHouseholdQuest = `-- name: LockHouseholdQuest :one
+SELECT id FROM household_quests
+WHERE household_id = $1 AND id = $2
+FOR UPDATE
+`
+
+type LockHouseholdQuestParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	ID          uuid.UUID `json:"id"`
+}
+
+// Locks one quest row of the household for the rest of the transaction,
+// taken in a statement of its own after the caller's member locks. A
+// statement run after it reads the quest's participants in a snapshot that
+// already holds every share, abandon, mark-done or removal of that quest that
+// committed while the lock waited (each takes this row lock), and none can
+// commit under it.
+func (q *Queries) LockHouseholdQuest(ctx context.Context, arg LockHouseholdQuestParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, lockHouseholdQuest, arg.HouseholdID, arg.ID)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
+const lockMemberPendingCompletions = `-- name: LockMemberPendingCompletions :many
+SELECT c.id
+FROM quest_completions c
+WHERE c.household_id = $1 AND c.status = 'pending'
+  AND (c.member_id = $2::uuid OR EXISTS (
+      SELECT 1 FROM quest_completion_members cm
+      WHERE cm.household_id = c.household_id AND cm.completion_id = c.id
+        AND cm.member_id = $2::uuid
+  ))
+ORDER BY c.id
+FOR UPDATE OF c
+`
+
+type LockMemberPendingCompletionsParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	MemberID    uuid.UUID `json:"member_id"`
+}
+
+// Locks, in id order, every pending completion of the household that the
+// member marked done or is recorded on, before CancelMemberPendingCompletions
+// reads them, so its earliest remaining member is read after any concurrent
+// removal of another member on the same completion has committed.
+func (q *Queries) LockMemberPendingCompletions(ctx context.Context, arg LockMemberPendingCompletionsParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, lockMemberPendingCompletions, arg.HouseholdID, arg.MemberID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockMemberQuests = `-- name: LockMemberQuests :many
+SELECT q.id
+FROM household_quests q
+WHERE q.household_id = $1
+  AND (q.claimed_by = $2::uuid OR EXISTS (
+      SELECT 1 FROM household_quest_participants p
+      WHERE p.household_id = q.household_id AND p.quest_id = q.id
+        AND p.member_id = $2::uuid
+  ))
+ORDER BY q.id
+FOR UPDATE OF q
+`
+
+type LockMemberQuestsParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	MemberID    uuid.UUID `json:"member_id"`
+}
+
+// Locks, in id order, every quest of the household that the member holds or
+// is on, before ReleaseMemberQuests reads them. ReleaseMemberQuests counts
+// the members left on each quest; it runs as a statement of its own after
+// this lock, so its snapshot already holds every share, abandon or mark-done
+// that committed while the lock waited (each takes the quest row lock), and
+// none can commit under it.
+func (q *Queries) LockMemberQuests(ctx context.Context, arg LockMemberQuestsParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, lockMemberQuests, arg.HouseholdID, arg.MemberID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markQuestDone = `-- name: MarkQuestDone :one
 WITH done AS (
     UPDATE household_quests q
@@ -500,17 +806,45 @@ WITH done AS (
     FROM households h
     WHERE h.id = q.household_id
       AND q.household_id = $1 AND q.id = $2
-      AND q.claimed_by = $3::uuid
-    RETURNING q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at
+      AND q.claimed_by IS NOT NULL
+      AND (q.claimed_by = $3::uuid OR EXISTS (
+          SELECT 1 FROM household_quest_participants p
+          WHERE p.household_id = q.household_id AND p.quest_id = q.id
+            AND p.member_id = $3::uuid
+      ))
+    RETURNING q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at, q.shareable, q.teamwork_bonus
 ), recorded AS (
     INSERT INTO quest_completions (id, household_id, quest_id, member_id, done_at, status)
     SELECT $4::uuid, d.household_id, d.id, $3::uuid, NOW(), 'pending'
     FROM done d
-    RETURNING id
+    RETURNING id, household_id
+), on_quest AS (
+    SELECT p.member_id, p.joined_at
+    FROM done d
+    JOIN household_quest_participants p ON p.household_id = d.household_id AND p.quest_id = d.id
+    UNION ALL
+    SELECT $3::uuid, NOW()
+    FROM done d
+    WHERE NOT EXISTS (
+        SELECT 1 FROM household_quest_participants p
+        WHERE p.household_id = d.household_id AND p.quest_id = d.id
+          AND p.member_id = $3::uuid
+    )
+), recorded_members AS (
+    INSERT INTO quest_completion_members (household_id, completion_id, member_id, added_at)
+    SELECT r.household_id, r.id, o.member_id, o.joined_at
+    FROM recorded r
+    CROSS JOIN on_quest o
+    RETURNING member_id
+), cleared AS (
+    DELETE FROM household_quest_participants p
+    USING done d
+    WHERE p.household_id = d.household_id AND p.quest_id = d.id
+    RETURNING p.member_id
 )
 SELECT d.id, d.household_id, d.library_id, d.name, d.points, d.repeat_days, d.notes,
        d.claimed_by, d.claimed_at, d.done_at, d.completed_at, d.available_at,
-       d.created_at, d.updated_at
+       d.created_at, d.updated_at, d.shareable, d.teamwork_bonus
 FROM done d
 `
 
@@ -522,29 +856,38 @@ type MarkQuestDoneParams struct {
 }
 
 type MarkQuestDoneRow struct {
-	ID          uuid.UUID          `json:"id"`
-	HouseholdID uuid.UUID          `json:"household_id"`
-	LibraryID   *uuid.UUID         `json:"library_id"`
-	Name        string             `json:"name"`
-	Points      int32              `json:"points"`
-	RepeatDays  int32              `json:"repeat_days"`
-	Notes       string             `json:"notes"`
-	ClaimedBy   *uuid.UUID         `json:"claimed_by"`
-	ClaimedAt   pgtype.Timestamptz `json:"claimed_at"`
-	DoneAt      pgtype.Timestamptz `json:"done_at"`
-	CompletedAt pgtype.Timestamptz `json:"completed_at"`
-	AvailableAt pgtype.Timestamptz `json:"available_at"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	ID            uuid.UUID          `json:"id"`
+	HouseholdID   uuid.UUID          `json:"household_id"`
+	LibraryID     *uuid.UUID         `json:"library_id"`
+	Name          string             `json:"name"`
+	Points        int32              `json:"points"`
+	RepeatDays    int32              `json:"repeat_days"`
+	Notes         string             `json:"notes"`
+	ClaimedBy     *uuid.UUID         `json:"claimed_by"`
+	ClaimedAt     pgtype.Timestamptz `json:"claimed_at"`
+	DoneAt        pgtype.Timestamptz `json:"done_at"`
+	CompletedAt   pgtype.Timestamptz `json:"completed_at"`
+	AvailableAt   pgtype.Timestamptz `json:"available_at"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	Shareable     bool               `json:"shareable"`
+	TeamworkBonus int32              `json:"teamwork_bonus"`
 }
 
-// The holder marks the quest done. In one statement the quest is released
-// and starts its cooldown from now (quest_next_available_at: local midnight
-// in the household's timezone, repeat_days days after today), and a pending
-// completion recording the member and the mark-done time is inserted for the
-// administrator. NOW() is one instant per transaction, so completed_at equals
-// the completion's done_at. A quest the member does not hold matches no row
-// and inserts nothing. No points move here.
+// A member on the quest marks it done: its holder, or any participant when
+// it is shared. In one statement the quest is released and starts its
+// cooldown from now (quest_next_available_at: local midnight in the
+// household's timezone, repeat_days days after today), one pending
+// completion recording the marker and the mark-done time is inserted for the
+// administrator, every member on the quest is recorded on that completion
+// (the lone marker when it is not shared, so n is 1), and the quest's
+// participants are cleared. Members keep their order: participants by
+// joined_at, the lone marker at now. NOW() is one instant per transaction, so
+// completed_at equals the completion's done_at. A quest the member is not on
+// matches no row and writes nothing. No points move here. The caller holds
+// the row locks of every member on the quest and then the quest's row lock
+// (LockHouseholdQuest, a statement of its own), so the participants recorded
+// and cleared here are the committed ones.
 func (q *Queries) MarkQuestDone(ctx context.Context, arg MarkQuestDoneParams) (MarkQuestDoneRow, error) {
 	row := q.db.QueryRow(ctx, markQuestDone,
 		arg.HouseholdID,
@@ -568,6 +911,8 @@ func (q *Queries) MarkQuestDone(ctx context.Context, arg MarkQuestDoneParams) (M
 		&i.AvailableAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Shareable,
+		&i.TeamworkBonus,
 	)
 	return i, err
 }
@@ -643,39 +988,184 @@ func (q *Queries) RejectCompletion(ctx context.Context, arg RejectCompletionPara
 }
 
 const releaseMemberQuests = `-- name: ReleaseMemberQuests :exec
-UPDATE household_quests
-SET claimed_by = NULL, claimed_at = NULL, done_at = NULL, updated_at = NOW()
-WHERE household_id = $1 AND claimed_by = $2
+WITH mine AS (
+    SELECT q.household_id, q.id,
+           q.claimed_by IS NOT DISTINCT FROM $1::uuid AS holder,
+           nxt.member_id AS next_member, nxt.joined_at AS next_joined_at,
+           (SELECT count(*) FROM household_quest_participants r
+            WHERE r.household_id = q.household_id AND r.quest_id = q.id
+              AND r.member_id <> $1::uuid) AS remaining
+    FROM household_quests q
+    LEFT JOIN LATERAL (
+        SELECT p.member_id, p.joined_at FROM household_quest_participants p
+        WHERE p.household_id = q.household_id AND p.quest_id = q.id
+          AND p.member_id <> $1::uuid
+        ORDER BY p.joined_at ASC, p.member_id ASC
+        LIMIT 1
+    ) nxt ON true
+    WHERE q.household_id = $2
+      AND (q.claimed_by = $1::uuid OR EXISTS (
+          SELECT 1 FROM household_quest_participants p
+          WHERE p.household_id = q.household_id AND p.quest_id = q.id
+            AND p.member_id = $1::uuid
+      ))
+    FOR UPDATE OF q
+), left_quests AS (
+    DELETE FROM household_quest_participants p
+    USING mine m
+    WHERE p.household_id = m.household_id AND p.quest_id = m.id
+      AND (p.member_id = $1::uuid OR m.remaining <= 1)
+    RETURNING p.quest_id
+)
+UPDATE household_quests q
+SET claimed_by = m.next_member,
+    claimed_at = CASE WHEN m.next_member IS NULL THEN NULL ELSE m.next_joined_at END,
+    done_at = CASE WHEN m.next_member IS NULL THEN NULL ELSE q.done_at END,
+    updated_at = NOW()
+FROM mine m
+WHERE q.household_id = m.household_id AND q.id = m.id AND m.holder
 `
 
 type ReleaseMemberQuestsParams struct {
-	HouseholdID uuid.UUID  `json:"household_id"`
-	MemberID    *uuid.UUID `json:"member_id"`
+	MemberID    uuid.UUID `json:"member_id"`
+	HouseholdID uuid.UUID `json:"household_id"`
 }
 
-// Returns every quest the member holds to the pool. done_at is cleared with
-// the holder, so the done_at-needs-a-holder CHECK holds. No points move.
+// Takes a member who is leaving the household off every quest they are on.
+// The caller has locked those quests first (LockMemberQuests), so the
+// members counted here are the ones committed on each quest.
+// Their participant rows go. On a quest they hold, the holder of record
+// moves to the earliest remaining participant (joined_at, then member_id),
+// who keeps their joined_at as claimed_at; a quest with no participant left
+// is returned to the pool, done_at cleared with the holder so the
+// done_at-needs-a-holder CHECK holds. A quest left with one member is no
+// longer shared, so that member's participant row goes too. The quests are
+// locked after the caller's lock on the member row (member first). No
+// points move.
 func (q *Queries) ReleaseMemberQuests(ctx context.Context, arg ReleaseMemberQuestsParams) error {
-	_, err := q.db.Exec(ctx, releaseMemberQuests, arg.HouseholdID, arg.MemberID)
+	_, err := q.db.Exec(ctx, releaseMemberQuests, arg.MemberID, arg.HouseholdID)
 	return err
+}
+
+const setCompletionMemberAward = `-- name: SetCompletionMemberAward :exec
+UPDATE quest_completion_members
+SET points_awarded = $1
+WHERE household_id = $2 AND completion_id = $3
+  AND member_id = $4
+`
+
+type SetCompletionMemberAwardParams struct {
+	PointsAwarded pgtype.Int4 `json:"points_awarded"`
+	HouseholdID   uuid.UUID   `json:"household_id"`
+	CompletionID  uuid.UUID   `json:"completion_id"`
+	MemberID      uuid.UUID   `json:"member_id"`
+}
+
+// Records what an approval credited one member of a completion: their split
+// plus any teamwork bonus. A completion recorded before quest sharing has no
+// member row, and this writes nothing for it.
+func (q *Queries) SetCompletionMemberAward(ctx context.Context, arg SetCompletionMemberAwardParams) error {
+	_, err := q.db.Exec(ctx, setCompletionMemberAward,
+		arg.PointsAwarded,
+		arg.HouseholdID,
+		arg.CompletionID,
+		arg.MemberID,
+	)
+	return err
+}
+
+const shareQuest = `-- name: ShareQuest :many
+WITH quest AS (
+    SELECT q.household_id, q.id, q.claimed_at
+    FROM household_quests q
+    WHERE q.household_id = $2 AND q.id = $3
+      AND q.shareable AND q.claimed_by = $1::uuid
+    -- Locked and re-checked, so a share racing the holder's mark-done or
+    -- abandon either sees the quest still held or writes nothing.
+    FOR UPDATE OF q
+), target AS (
+    SELECT m.id
+    FROM family_members m
+    WHERE m.household_id = $2 AND m.id = $4::uuid
+      AND m.id <> $1::uuid
+      AND NOT EXISTS (
+          SELECT 1 FROM household_quest_participants p
+          WHERE p.household_id = $2 AND p.quest_id = $3
+            AND p.member_id = m.id
+      )
+)
+INSERT INTO household_quest_participants (household_id, quest_id, member_id, joined_at)
+SELECT q.household_id, q.id, v.member_id, v.joined_at
+FROM quest q
+CROSS JOIN target t
+CROSS JOIN LATERAL (VALUES
+    ($1::uuid, COALESCE(q.claimed_at, NOW())),
+    (t.id, NOW())
+) AS v(member_id, joined_at)
+ON CONFLICT (quest_id, member_id) DO NOTHING
+RETURNING member_id
+`
+
+type ShareQuestParams struct {
+	MemberID       uuid.UUID `json:"member_id"`
+	HouseholdID    uuid.UUID `json:"household_id"`
+	ID             uuid.UUID `json:"id"`
+	TargetMemberID uuid.UUID `json:"target_member_id"`
+}
+
+// The holder of a shareable quest adds another member of the household to
+// it. One statement: the quest must be in this household, shareable and held
+// by the acting member, and the target must be a household member other than
+// the actor who is not on the quest yet; otherwise nothing is written. The
+// first share also records the holder, joined at the time they accepted, so
+// the holder stays the earliest member. Returns the member ids it added.
+func (q *Queries) ShareQuest(ctx context.Context, arg ShareQuestParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, shareQuest,
+		arg.MemberID,
+		arg.HouseholdID,
+		arg.ID,
+		arg.TargetMemberID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var member_id uuid.UUID
+		if err := rows.Scan(&member_id); err != nil {
+			return nil, err
+		}
+		items = append(items, member_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const updateHouseholdQuest = `-- name: UpdateHouseholdQuest :one
 UPDATE household_quests
-SET name = $3, points = $4, repeat_days = $5, notes = $6, updated_at = NOW()
+SET name = $3, points = $4, repeat_days = $5, notes = $6,
+    shareable = $7, teamwork_bonus = $8, updated_at = NOW()
 WHERE household_id = $1 AND id = $2
-RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at
+RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at, shareable, teamwork_bonus
 `
 
 type UpdateHouseholdQuestParams struct {
-	HouseholdID uuid.UUID `json:"household_id"`
-	ID          uuid.UUID `json:"id"`
-	Name        string    `json:"name"`
-	Points      int32     `json:"points"`
-	RepeatDays  int32     `json:"repeat_days"`
-	Notes       string    `json:"notes"`
+	HouseholdID   uuid.UUID `json:"household_id"`
+	ID            uuid.UUID `json:"id"`
+	Name          string    `json:"name"`
+	Points        int32     `json:"points"`
+	RepeatDays    int32     `json:"repeat_days"`
+	Notes         string    `json:"notes"`
+	Shareable     bool      `json:"shareable"`
+	TeamworkBonus int32     `json:"teamwork_bonus"`
 }
 
+// Full replacement of the editable fields. A new points, shareable or
+// teamwork_bonus applies from the next approval: a pending completion is
+// paid from the quest as it stands when it is approved.
 func (q *Queries) UpdateHouseholdQuest(ctx context.Context, arg UpdateHouseholdQuestParams) (HouseholdQuest, error) {
 	row := q.db.QueryRow(ctx, updateHouseholdQuest,
 		arg.HouseholdID,
@@ -684,6 +1174,8 @@ func (q *Queries) UpdateHouseholdQuest(ctx context.Context, arg UpdateHouseholdQ
 		arg.Points,
 		arg.RepeatDays,
 		arg.Notes,
+		arg.Shareable,
+		arg.TeamworkBonus,
 	)
 	var i HouseholdQuest
 	err := row.Scan(
@@ -701,6 +1193,8 @@ func (q *Queries) UpdateHouseholdQuest(ctx context.Context, arg UpdateHouseholdQ
 		&i.AvailableAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Shareable,
+		&i.TeamworkBonus,
 	)
 	return i, err
 }
