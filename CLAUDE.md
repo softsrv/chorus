@@ -13,8 +13,9 @@ make run              # One-off app container without hot reload
 make test             # Unit tests (-race)
 make test-js          # Web client unit tests (node --test web/jstest/quests.test.mjs; needs Node 22+)
 make test-integration # Migrates chorus_test, runs round-trip test, then runs integration tests
+make boundaries       # Boundary check (internal/archtest)
 make secret-scan      # Pinned gitleaks full-history scan (--redact) against .gitleaks.toml
-make check            # vet + unit + web JS unit + integration + govulncheck + secret-scan (what CI runs)
+make check            # boundaries + vet + unit + web JS unit + integration + govulncheck + secret-scan (what CI runs)
 make vet / fmt / lint
 
 # Database
@@ -50,6 +51,26 @@ db/migrations, db/queries       golang-migrate SQL + sqlc queries
 web/static/                     web test client (index.html + vanilla JS modules)
 docs/API.md                     API contract for client developers
 ```
+
+### Allowed import directions
+
+Allowed import directions are enforced by `make boundaries` and owned by `internal/archtest`:
+
+- **Production rules (non-test files):**
+  - `cmd/app` → `internal/*`
+  - `internal/http` → `handlers`, `middleware`, `respond`, `app`, `db`, `web`
+  - `internal/http/handlers` → `app`, `db`, `middleware`, `respond`
+  - `internal/http/middleware` → `auth`, `db`, `respond`
+  - `internal/app` → `auth`, `db`, `email`, `users`
+  - `internal/auth`, `internal/users`, `internal/email`, `internal/http/respond`, `internal/db`, `internal/testnet`, `web` → no chorus package imports
+  - Nothing imports `cmd/app`
+- **Test rules (`_test.go` files):**
+  - Tests may import the package under test plus anything that package is allowed to import.
+  - `internal/http` and `internal/http/handlers` tests may additionally import `internal/auth` (for token minting).
+  - `internal/app` and `internal/http` tests may additionally import `internal/testnet` (to refuse outbound dials); no production file may import it.
+  - Tests may never import `cmd/app`.
+- **Web client rules:**
+  - `web/static/js/*.js` and `web/jstest/*.mjs` imports must resolve within `web/` or be `node:`-prefixed Node builtins (for example `node:fs`); they may never import from `internal/` or `cmd/`.
 
 ### Rules that keep the API hardened
 

@@ -5,7 +5,7 @@ BIN_DIR          := ./bin
 -include .env
 export
 
-.PHONY: dev run build test test-js test-integration test-cover fmt vet lint vulncheck secret-scan check \
+.PHONY: dev run build test test-js test-integration test-cover boundaries fmt vet lint vulncheck secret-scan check \
         services-up services-down services-reset \
         daisyui-install tailwind tailwind-watch app \
         migrate-up migrate-down migrate-create migrate-status migrate-test migrate-roundtrip-test \
@@ -58,6 +58,9 @@ test-cover:
 	go test -coverprofile=coverage.out ./...
 	go tool cover -html=coverage.out
 
+boundaries:
+	go test -run 'TestImportBoundaries|TestWebClientImportsStayInWeb' ./internal/archtest/
+
 fmt:
 	gofmt -w .
 
@@ -76,7 +79,7 @@ secret-scan:
 	go run github.com/zricethezav/gitleaks/v8@v$(GITLEAKS_VERSION) git --redact --config .gitleaks.toml
 
 # Everything CI runs.
-check: vet test test-js test-integration vulncheck secret-scan
+check: boundaries vet test test-js test-integration vulncheck secret-scan
 
 ## ── CSS ──────────────────────────────────────────────────────────────────────
 
