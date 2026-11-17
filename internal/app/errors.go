@@ -31,6 +31,9 @@ var (
 	// ErrQuestTaken is returned when a quest is accepted but is no longer
 	// available: another member holds it, or it is waiting out its repeat days.
 	ErrQuestTaken = errors.New("quest is already taken")
+	// ErrAlreadyParticipant is returned when a quest is shared with the
+	// sharer themselves or with a member who is already on it.
+	ErrAlreadyParticipant = errors.New("member is already on this quest")
 )
 
 // RateLimitedError is returned when an operation is attempted too frequently.

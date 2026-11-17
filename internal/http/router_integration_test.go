@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -406,6 +407,74 @@ func TestAPI_EndToEnd(t *testing.T) {
 	if taken.Error.Code != "quest_taken" {
 		t.Errorf("second accept: code %q, want quest_taken", taken.Error.Code)
 	}
+
+	// Share: the holder of a shareable quest adds another member, each with
+	// their own PIN (Kid two has none, so target_pin is empty). The quest
+	// is then shared, lists both members and stays held; the share route is
+	// a PIN-limited member action like accept.
+	type sharedBody struct {
+		ID           uuid.UUID   `json:"id"`
+		ClaimedBy    *uuid.UUID  `json:"claimed_by"`
+		Shared       bool        `json:"shared"`
+		Participants []uuid.UUID `json:"participants"`
+	}
+	var shareQuest sharedBody
+	s.expect(http.StatusCreated, "POST", hp+"/quests", parent.AccessToken, map[string]any{"name": "Clean the living room", "points": 100}, &shareQuest)
+	if shareQuest.Shared || shareQuest.Participants == nil || len(shareQuest.Participants) != 0 {
+		t.Errorf("new quest: shared=%v participants=%v, want false []", shareQuest.Shared, shareQuest.Participants)
+	}
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE household_quests SET shareable = true, teamwork_bonus = 20 WHERE id = $1`, shareQuest.ID); err != nil {
+		t.Fatalf("make quest shareable: %v", err)
+	}
+	sq := hp + "/quests/" + shareQuest.ID.String()
+	s.expect(http.StatusOK, "POST", sq+"/accept", parent.AccessToken, map[string]any{"member_id": member.ID, "pin": "4321"}, nil)
+	var shareErr apiError
+	s.expect(http.StatusUnprocessableEntity, "POST", sq+"/share", parent.AccessToken, map[string]any{"member_id": member.ID, "pin": "4321"}, &shareErr)
+	if shareErr.Error.Fields["target_member_id"] == "" {
+		t.Errorf("share without target: %+v, want a target_member_id field error", shareErr)
+	}
+	shareErr = apiError{}
+	s.expect(http.StatusForbidden, "POST", sq+"/share", parent.AccessToken,
+		map[string]any{"member_id": member.ID, "pin": "4321", "target_member_id": member2.ID, "target_pin": "0000"}, &shareErr)
+	if shareErr.Error.Code != "wrong_pin" {
+		t.Errorf("share with wrong target pin: code %q, want wrong_pin", shareErr.Error.Code)
+	}
+	s.expect(http.StatusNotFound, "POST", sq+"/share", parent.AccessToken,
+		map[string]any{"member_id": member.ID, "pin": "4321", "target_member_id": uuid.New()}, nil)
+	var sharedQuest sharedBody
+	s.expect(http.StatusOK, "POST", sq+"/share", parent.AccessToken,
+		map[string]any{"member_id": member.ID, "pin": "4321", "target_member_id": member2.ID, "target_pin": ""}, &sharedQuest)
+	wantParticipants := []uuid.UUID{member.ID, member2.ID}
+	if !sharedQuest.Shared || !slices.Equal(sharedQuest.Participants, wantParticipants) ||
+		sharedQuest.ClaimedBy == nil || *sharedQuest.ClaimedBy != member.ID {
+		t.Errorf("shared quest: %+v, want shared, participants %v, held by %v", sharedQuest, wantParticipants, member.ID)
+	}
+	var gotShared sharedBody
+	s.expect(http.StatusOK, "GET", sq, parent.AccessToken, nil, &gotShared)
+	if !gotShared.Shared || !slices.Equal(gotShared.Participants, wantParticipants) {
+		t.Errorf("get shared quest: %+v", gotShared)
+	}
+	var sharedList struct {
+		Items []sharedBody `json:"items"`
+	}
+	s.expect(http.StatusOK, "GET", hp+"/quests", parent.AccessToken, nil, &sharedList)
+	for _, it := range sharedList.Items {
+		if it.ID == shareQuest.ID && (!it.Shared || !slices.Equal(it.Participants, wantParticipants)) {
+			t.Errorf("listed shared quest: %+v", it)
+		}
+		if it.ID != shareQuest.ID && (it.Shared || len(it.Participants) != 0) {
+			t.Errorf("listed unshared quest %s: shared=%v participants=%v", it.ID, it.Shared, it.Participants)
+		}
+	}
+	shareErr = apiError{}
+	s.expect(http.StatusConflict, "POST", sq+"/share", parent.AccessToken,
+		map[string]any{"member_id": member.ID, "pin": "4321", "target_member_id": member2.ID}, &shareErr)
+	if shareErr.Error.Code != "already_participant" {
+		t.Errorf("share again: code %q, want already_participant", shareErr.Error.Code)
+	}
+	// Clear it so the quest lists below hold only the trash chore.
+	s.expect(http.StatusNoContent, "DELETE", sq, parent.AccessToken, nil, nil)
 
 	// Approval is per completion: nothing waits yet ({items: []}, not null);
 	// the holder marks the chore done, which releases it into its cooldown and

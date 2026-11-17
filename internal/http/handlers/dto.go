@@ -128,27 +128,33 @@ func toFamilyMember(m db.FamilyMember) familyMemberJSON {
 // quest is in the pool; awaiting_approval says at least one of its
 // completions waits for the administrator to approve or reject it.
 type questJSON struct {
-	ID               uuid.UUID  `json:"id"`
-	HouseholdID      uuid.UUID  `json:"household_id"`
-	LibraryID        *uuid.UUID `json:"library_id"`
-	Name             string     `json:"name"`
-	Points           int32      `json:"points"`
-	RepeatDays       int32      `json:"repeat_days"`
-	Notes            string     `json:"notes"`
-	Available        bool       `json:"available"`
-	ClaimedBy        *uuid.UUID `json:"claimed_by"`
-	ClaimedAt        *time.Time `json:"claimed_at"`
-	AwaitingApproval bool       `json:"awaiting_approval"`
-	CompletedAt      *time.Time `json:"completed_at"`
-	AvailableAt      *time.Time `json:"available_at"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
+	ID               uuid.UUID   `json:"id"`
+	HouseholdID      uuid.UUID   `json:"household_id"`
+	LibraryID        *uuid.UUID  `json:"library_id"`
+	Name             string      `json:"name"`
+	Points           int32       `json:"points"`
+	RepeatDays       int32       `json:"repeat_days"`
+	Notes            string      `json:"notes"`
+	Available        bool        `json:"available"`
+	ClaimedBy        *uuid.UUID  `json:"claimed_by"`
+	ClaimedAt        *time.Time  `json:"claimed_at"`
+	AwaitingApproval bool        `json:"awaiting_approval"`
+	CompletedAt      *time.Time  `json:"completed_at"`
+	AvailableAt      *time.Time  `json:"available_at"`
+	CreatedAt        time.Time   `json:"created_at"`
+	UpdatedAt        time.Time   `json:"updated_at"`
+	Shared           bool        `json:"shared"`
+	Participants     []uuid.UUID `json:"participants"`
 }
 
 // toQuest maps a quest; awaiting_approval comes only from the service's
-// pending-completion flag.
+// pending-completion flag. participants is [] for a quest that is not shared.
 func toQuest(v app.QuestView) questJSON {
 	q := v.HouseholdQuest
+	participants := v.Participants
+	if participants == nil {
+		participants = []uuid.UUID{}
+	}
 	return questJSON{
 		ID:               q.ID,
 		HouseholdID:      q.HouseholdID,
@@ -165,6 +171,8 @@ func toQuest(v app.QuestView) questJSON {
 		AvailableAt:      timePtr(q.AvailableAt),
 		CreatedAt:        q.CreatedAt.Time.UTC(),
 		UpdatedAt:        q.UpdatedAt.Time.UTC(),
+		Shared:           v.Shared(),
+		Participants:     participants,
 	}
 }
 

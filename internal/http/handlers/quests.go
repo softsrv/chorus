@@ -27,6 +27,7 @@ type questServicer interface {
 	Accept(ctx context.Context, userID, householdID, questID uuid.UUID, act app.MemberAction) (app.QuestView, error)
 	Abandon(ctx context.Context, userID, householdID, questID uuid.UUID, act app.MemberAction) (app.QuestView, error)
 	MarkDone(ctx context.Context, userID, householdID, questID uuid.UUID, act app.MemberAction) (app.QuestView, error)
+	Share(ctx context.Context, userID, householdID, questID uuid.UUID, act, target app.MemberAction) (app.QuestView, error)
 	ListPending(ctx context.Context, userID, householdID uuid.UUID, adminPin string) ([]app.PendingCompletion, error)
 	Approve(ctx context.Context, userID, householdID, completionID uuid.UUID, adminPin string) (app.Completion, db.FamilyMember, []app.ComboBonus, error)
 	Reject(ctx context.Context, userID, householdID, completionID uuid.UUID, adminPin string) (app.Completion, error)
@@ -285,6 +286,56 @@ func (h *QuestHandler) Abandon(w http.ResponseWriter, r *http.Request) {
 // {"member_id": "...", "pin": "1234"}.
 func (h *QuestHandler) MarkDone(w http.ResponseWriter, r *http.Request) {
 	h.memberAction(w, r, h.svc.MarkDone)
+}
+
+// shareRequest is the body of a share: the sharing member and their PIN, and
+// the member being shared with and theirs. Each PIN is omitted or empty when
+// that member has none.
+type shareRequest struct {
+	MemberID       uuid.UUID `json:"member_id"`
+	PIN            *string   `json:"pin"`
+	TargetMemberID uuid.UUID `json:"target_member_id"`
+	TargetPIN      *string   `json:"target_pin"`
+}
+
+// Share adds another household member to the acting member's shareable
+// quest: {"member_id": "...", "pin": "1234", "target_member_id": "...",
+// "target_pin": "5678"}. A missing member_id or target_member_id is a 422 on
+// that field.
+func (h *QuestHandler) Share(w http.ResponseWriter, r *http.Request) {
+	hid, qid, ok := parseQuestIDs(w, r)
+	if !ok {
+		return
+	}
+	var req shareRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	fields := map[string]string{}
+	if req.MemberID == uuid.Nil {
+		fields["member_id"] = "is required"
+	}
+	if req.TargetMemberID == uuid.Nil {
+		fields["target_member_id"] = "is required"
+	}
+	if len(fields) > 0 {
+		writeError(w, r, &app.ValidationError{Fields: fields})
+		return
+	}
+	act := app.MemberAction{MemberID: req.MemberID}
+	if req.PIN != nil {
+		act.PIN = *req.PIN
+	}
+	target := app.MemberAction{MemberID: req.TargetMemberID}
+	if req.TargetPIN != nil {
+		target.PIN = *req.TargetPIN
+	}
+	quest, err := h.svc.Share(r.Context(), currentUser(r), hid, qid, act, target)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, toQuest(quest))
 }
 
 // Pending lists the completions waiting for approval, one per mark-done,

@@ -89,7 +89,8 @@ type Querier interface {
 	GetHouseholdForMember(ctx context.Context, arg GetHouseholdForMemberParams) (GetHouseholdForMemberRow, error)
 	GetHouseholdMember(ctx context.Context, arg GetHouseholdMemberParams) (HouseholdMember, error)
 	GetHouseholdQuest(ctx context.Context, arg GetHouseholdQuestParams) (HouseholdQuest, error)
-	// One quest with awaiting_approval, as ListHouseholdQuests reads it.
+	// One quest with awaiting_approval and participants, as ListHouseholdQuests
+	// reads it.
 	GetHouseholdQuestView(ctx context.Context, arg GetHouseholdQuestViewParams) (GetHouseholdQuestViewRow, error)
 	GetHouseholdReward(ctx context.Context, arg GetHouseholdRewardParams) (HouseholdReward, error)
 	GetOldestRecentVerificationCode(ctx context.Context, userID uuid.UUID) (pgtype.Timestamptz, error)
@@ -144,6 +145,7 @@ type Querier interface {
 	// or chore ID from another household can never be read or modified through this one.
 	ListHouseholdCombos(ctx context.Context, householdID uuid.UUID) ([]Combo, error)
 	// awaiting_approval: the quest has a completion waiting for the administrator.
+	// participants: the members on the quest when it is shared, earliest first.
 	ListHouseholdQuests(ctx context.Context, arg ListHouseholdQuestsParams) ([]ListHouseholdQuestsRow, error)
 	ListHouseholdRewards(ctx context.Context, householdID uuid.UUID) ([]HouseholdReward, error)
 	ListHouseholdsForUser(ctx context.Context, userID uuid.UUID) ([]ListHouseholdsForUserRow, error)
@@ -155,6 +157,8 @@ type Querier interface {
 	// from another household can never be read or modified through this one.
 	// The quest library is global and read-only: there are no write queries on it.
 	ListQuestLibrary(ctx context.Context) ([]QuestLibrary, error)
+	// The members on one quest, earliest first; none when it is not shared.
+	ListQuestParticipants(ctx context.Context, arg ListQuestParticipantsParams) ([]uuid.UUID, error)
 	// Household reward queries are scoped by household_id. Membership is checked
 	// by the service layer first; the household_id predicate guarantees a reward
 	// ID from another household can never be read or modified through this one.
@@ -210,6 +214,13 @@ type Querier interface {
 	// Links a Google account to an existing user. Conditional on google_subject IS
 	// NULL so an account already linked to a Google identity is never relinked.
 	SetGoogleSubject(ctx context.Context, arg SetGoogleSubjectParams) (int64, error)
+	// The holder of a shareable quest adds another member of the household to
+	// it. One statement: the quest must be in this household, shareable and held
+	// by the acting member, and the target must be a household member other than
+	// the actor who is not on the quest yet; otherwise nothing is written. The
+	// first share also records the holder, joined at the time they accepted, so
+	// the holder stays the earliest member. Returns the member ids it added.
+	ShareQuest(ctx context.Context, arg ShareQuestParams) ([]uuid.UUID, error)
 	UpdateDisplayName(ctx context.Context, arg UpdateDisplayNameParams) (User, error)
 	UpdateEvent(ctx context.Context, arg UpdateEventParams) (Event, error)
 	UpdateGoogleCalendarAccessToken(ctx context.Context, arg UpdateGoogleCalendarAccessTokenParams) (int64, error)

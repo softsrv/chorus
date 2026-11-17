@@ -11,10 +11,16 @@ SELECT * FROM quest_library WHERE id = $1;
 
 -- name: ListHouseholdQuests :many
 -- awaiting_approval: the quest has a completion waiting for the administrator.
+-- participants: the members on the quest when it is shared, earliest first.
 SELECT sqlc.embed(q), EXISTS (
     SELECT 1 FROM quest_completions c
     WHERE c.household_id = q.household_id AND c.quest_id = q.id AND c.status = 'pending'
-) AS awaiting_approval
+) AS awaiting_approval,
+ARRAY(
+    SELECT p.member_id FROM household_quest_participants p
+    WHERE p.household_id = q.household_id AND p.quest_id = q.id
+    ORDER BY p.joined_at, p.member_id
+)::uuid[] AS participants
 FROM household_quests q
 WHERE q.household_id = sqlc.arg(household_id)
 ORDER BY q.created_at ASC, q.id ASC
@@ -24,11 +30,17 @@ LIMIT sqlc.arg(row_limit) OFFSET sqlc.arg(row_offset);
 SELECT * FROM household_quests WHERE household_id = $1 AND id = $2;
 
 -- name: GetHouseholdQuestView :one
--- One quest with awaiting_approval, as ListHouseholdQuests reads it.
+-- One quest with awaiting_approval and participants, as ListHouseholdQuests
+-- reads it.
 SELECT sqlc.embed(q), EXISTS (
     SELECT 1 FROM quest_completions c
     WHERE c.household_id = q.household_id AND c.quest_id = q.id AND c.status = 'pending'
-) AS awaiting_approval
+) AS awaiting_approval,
+ARRAY(
+    SELECT p.member_id FROM household_quest_participants p
+    WHERE p.household_id = q.household_id AND p.quest_id = q.id
+    ORDER BY p.joined_at, p.member_id
+)::uuid[] AS participants
 FROM household_quests q
 WHERE q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id);
 
@@ -72,6 +84,49 @@ SET claimed_by = NULL, claimed_at = NULL, updated_at = NOW()
 WHERE household_id = sqlc.arg(household_id) AND id = sqlc.arg(id)
   AND claimed_by = sqlc.arg(member_id)
 RETURNING *;
+
+-- name: ShareQuest :many
+-- The holder of a shareable quest adds another member of the household to
+-- it. One statement: the quest must be in this household, shareable and held
+-- by the acting member, and the target must be a household member other than
+-- the actor who is not on the quest yet; otherwise nothing is written. The
+-- first share also records the holder, joined at the time they accepted, so
+-- the holder stays the earliest member. Returns the member ids it added.
+WITH quest AS (
+    SELECT q.household_id, q.id, q.claimed_at
+    FROM household_quests q
+    WHERE q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id)
+      AND q.shareable AND q.claimed_by = sqlc.arg(member_id)::uuid
+    -- Locked and re-checked, so a share racing the holder's mark-done or
+    -- abandon either sees the quest still held or writes nothing.
+    FOR UPDATE OF q
+), target AS (
+    SELECT m.id
+    FROM family_members m
+    WHERE m.household_id = sqlc.arg(household_id) AND m.id = sqlc.arg(target_member_id)::uuid
+      AND m.id <> sqlc.arg(member_id)::uuid
+      AND NOT EXISTS (
+          SELECT 1 FROM household_quest_participants p
+          WHERE p.household_id = sqlc.arg(household_id) AND p.quest_id = sqlc.arg(id)
+            AND p.member_id = m.id
+      )
+)
+INSERT INTO household_quest_participants (household_id, quest_id, member_id, joined_at)
+SELECT q.household_id, q.id, v.member_id, v.joined_at
+FROM quest q
+CROSS JOIN target t
+CROSS JOIN LATERAL (VALUES
+    (sqlc.arg(member_id)::uuid, COALESCE(q.claimed_at, NOW())),
+    (t.id, NOW())
+) AS v(member_id, joined_at)
+ON CONFLICT (quest_id, member_id) DO NOTHING
+RETURNING member_id;
+
+-- name: ListQuestParticipants :many
+-- The members on one quest, earliest first; none when it is not shared.
+SELECT member_id FROM household_quest_participants
+WHERE household_id = sqlc.arg(household_id) AND quest_id = sqlc.arg(quest_id)
+ORDER BY joined_at ASC, member_id ASC;
 
 -- name: ReleaseMemberQuests :exec
 -- Returns every quest the member holds to the pool. done_at is cleared with
@@ -134,7 +189,7 @@ WITH done AS (
 )
 SELECT d.id, d.household_id, d.library_id, d.name, d.points, d.repeat_days, d.notes,
        d.claimed_by, d.claimed_at, d.done_at, d.completed_at, d.available_at,
-       d.created_at, d.updated_at
+       d.created_at, d.updated_at, d.shareable, d.teamwork_bonus
 FROM done d;
 
 -- name: ListPendingCompletions :many

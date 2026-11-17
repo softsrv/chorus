@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -58,11 +59,17 @@ func NewQuestService(q *db.Queries, pool pgxBeginner) *QuestService {
 }
 
 // QuestView is a household quest with awaiting_approval: whether one of its
-// completions is waiting for the administrator.
+// completions is waiting for the administrator. Participants lists every
+// member on a shared quest, earliest first (the holder included); it is
+// empty for a quest that is not shared.
 type QuestView struct {
 	db.HouseholdQuest
 	AwaitingApproval bool
+	Participants     []uuid.UUID
 }
+
+// Shared reports whether more than one member is on the quest.
+func (v QuestView) Shared() bool { return len(v.Participants) > 1 }
 
 // Completion is one time a member marked a chore done. Status is pending,
 // approved, rejected or cancelled; ApprovedAt is set only when approved.
@@ -105,13 +112,18 @@ func releaseMemberQuests(ctx context.Context, qtx *db.Queries, householdID, memb
 	return nil
 }
 
-// view adds awaiting_approval to a quest just read or written.
+// view adds awaiting_approval and the participants to a quest just read or
+// written.
 func (s *QuestService) view(ctx context.Context, quest db.HouseholdQuest) (QuestView, error) {
 	pending, err := s.q.QuestHasPendingCompletion(ctx, db.QuestHasPendingCompletionParams{HouseholdID: quest.HouseholdID, QuestID: quest.ID})
 	if err != nil {
 		return QuestView{}, fmt.Errorf("read pending completion: %w", err)
 	}
-	return QuestView{HouseholdQuest: quest, AwaitingApproval: pending}, nil
+	participants, err := s.q.ListQuestParticipants(ctx, db.ListQuestParticipantsParams{HouseholdID: quest.HouseholdID, QuestID: quest.ID})
+	if err != nil {
+		return QuestView{}, fmt.Errorf("read participants: %w", err)
+	}
+	return QuestView{HouseholdQuest: quest, AwaitingApproval: pending, Participants: participants}, nil
 }
 
 // viewOf takes a single-quest query's result and adds awaiting_approval to
@@ -153,7 +165,7 @@ func (s *QuestService) List(ctx context.Context, userID, householdID uuid.UUID, 
 	}
 	quests := make([]QuestView, len(rows))
 	for i, r := range rows {
-		quests[i] = QuestView{HouseholdQuest: r.HouseholdQuest, AwaitingApproval: r.AwaitingApproval}
+		quests[i] = QuestView{HouseholdQuest: r.HouseholdQuest, AwaitingApproval: r.AwaitingApproval, Participants: r.Participants}
 	}
 	if len(quests) > p.Limit {
 		return quests[:p.Limit], true, nil
@@ -170,7 +182,7 @@ func (s *QuestService) Get(ctx context.Context, userID, householdID, questID uui
 	if err != nil {
 		return QuestView{}, err
 	}
-	return QuestView{HouseholdQuest: row.HouseholdQuest, AwaitingApproval: row.AwaitingApproval}, nil
+	return QuestView{HouseholdQuest: row.HouseholdQuest, AwaitingApproval: row.AwaitingApproval, Participants: row.Participants}, nil
 }
 
 // Create adds a quest to the household.
@@ -300,6 +312,72 @@ func (s *QuestService) Abandon(ctx context.Context, userID, householdID, questID
 	}
 	quest, err := s.q.AbandonQuest(ctx, db.AbandonQuestParams{HouseholdID: householdID, ID: questID, MemberID: &act.MemberID})
 	return s.viewOf(ctx, quest, err)
+}
+
+// Share adds target to the acting member's shareable quest, so both hold it.
+// Both members prove themselves with their own PIN, as on accept: a wrong
+// PIN for either is ErrWrongPIN. A quest that is not in this household, not
+// shareable or not held by the acting member, and a target that is not a
+// member of this household, are ErrNotFound. Sharing with oneself or with a
+// member already on the quest is ErrAlreadyParticipant. Nothing changes on
+// any error. The first share records the holder as a participant too.
+func (s *QuestService) Share(ctx context.Context, userID, householdID, questID uuid.UUID, act, target MemberAction) (QuestView, error) {
+	if err := s.verifyActingMember(ctx, userID, householdID, act); err != nil {
+		return QuestView{}, err
+	}
+	if _, err := VerifyMemberPin(ctx, s.q, householdID, target.MemberID, target.PIN); err != nil {
+		return QuestView{}, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return QuestView{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	qtx := s.q.WithTx(tx)
+	// Both member rows are locked before the quest row, in id order, the
+	// order FamilyService.Remove and the other quest actions use (member
+	// first), so neither a concurrent removal nor a crossed share deadlocks.
+	for _, id := range memberLockOrder(act.MemberID, target.MemberID) {
+		if _, err := notFoundIfNoRows(qtx.LockFamilyMember(ctx, db.LockFamilyMemberParams{HouseholdID: householdID, ID: id})); err != nil {
+			// A member was removed between the PIN check and the lock.
+			return QuestView{}, err
+		}
+	}
+	added, err := qtx.ShareQuest(ctx, db.ShareQuestParams{
+		HouseholdID: householdID, ID: questID, MemberID: act.MemberID, TargetMemberID: target.MemberID,
+	})
+	if err != nil {
+		return QuestView{}, fmt.Errorf("share quest: %w", err)
+	}
+	quest, err := notFoundIfNoRows(qtx.GetHouseholdQuest(ctx, db.GetHouseholdQuestParams{HouseholdID: householdID, ID: questID}))
+	if err != nil {
+		return QuestView{}, err
+	}
+	if len(added) == 0 {
+		// Nothing written: either the quest is not one the actor may share,
+		// or the target is the actor or already on it.
+		if !quest.Shareable || quest.ClaimedBy == nil || *quest.ClaimedBy != act.MemberID {
+			return QuestView{}, ErrNotFound
+		}
+		return QuestView{}, ErrAlreadyParticipant
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return QuestView{}, fmt.Errorf("commit: %w", err)
+	}
+	return s.view(ctx, quest)
+}
+
+// memberLockOrder returns the distinct member ids in ascending order, the
+// order a transaction locking several member rows takes them in.
+func memberLockOrder(a, b uuid.UUID) []uuid.UUID {
+	switch c := bytes.Compare(a[:], b[:]); {
+	case c == 0:
+		return []uuid.UUID{a}
+	case c < 0:
+		return []uuid.UUID{a, b}
+	default:
+		return []uuid.UUID{b, a}
+	}
 }
 
 // MarkDone records that the acting member finished their quest. In one
