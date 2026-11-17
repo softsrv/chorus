@@ -19,8 +19,12 @@ type Querier interface {
 	// Approves one pending completion. The completion is locked first and its
 	// status re-read under the lock, so of two concurrent approvals exactly one
 	// gets a row. The quest is not touched: its cooldown already started at
-	// mark-done. points is the chore's current points, to credit to member_id.
-	// member_id must match the member the caller already locked.
+	// mark-done. points and teamwork_bonus are the chore's as they stand now
+	// (the CHECK keeps the bonus 0 once shareable is off); member_ids are the
+	// members the completion covers, earliest recorded first, empty for a
+	// completion recorded before quest sharing (its marker alone). member_id
+	// must match the marker the caller already locked; the caller holds the
+	// locks of every recorded member, so the member set cannot change under it.
 	ApproveCompletion(ctx context.Context, arg ApproveCompletionParams) (ApproveCompletionRow, error)
 	// Cancels every completion of the member still waiting for approval. No
 	// points move. As on reject, a quest whose running cooldown one of those
@@ -95,10 +99,11 @@ type Querier interface {
 	GetHouseholdReward(ctx context.Context, arg GetHouseholdRewardParams) (HouseholdReward, error)
 	GetOldestRecentVerificationCode(ctx context.Context, userID uuid.UUID) (pgtype.Timestamptz, error)
 	GetPasswordResetTokenByHash(ctx context.Context, tokenHash string) (PasswordResetToken, error)
-	// The member of a pending completion, read without a lock so Approve can
-	// lock that member's row before it locks the completion (the order
-	// FamilyService.Remove uses).
-	GetPendingCompletionMember(ctx context.Context, arg GetPendingCompletionMemberParams) (*uuid.UUID, error)
+	// The marker of a pending completion and every member it covers (earliest
+	// recorded first), read without a lock so Approve can lock those members'
+	// rows before it locks the completion (the order FamilyService.Remove uses).
+	// A completion recorded before quest sharing has no member rows.
+	GetPendingCompletionMembers(ctx context.Context, arg GetPendingCompletionMembersParams) (GetPendingCompletionMembersRow, error)
 	GetQuestLibraryItem(ctx context.Context, id uuid.UUID) (QuestLibrary, error)
 	GetRefreshTokenByHash(ctx context.Context, tokenHash string) (RefreshToken, error)
 	GetRefreshTokenByID(ctx context.Context, id uuid.UUID) (RefreshToken, error)
@@ -217,6 +222,10 @@ type Querier interface {
 	RevokeAllUserRefreshTokens(ctx context.Context, userID uuid.UUID) error
 	RevokeOtherUserRefreshTokens(ctx context.Context, arg RevokeOtherUserRefreshTokensParams) error
 	RevokeRefreshToken(ctx context.Context, id uuid.UUID) error
+	// Records what an approval credited one member of a completion: their split
+	// plus any teamwork bonus. A completion recorded before quest sharing has no
+	// member row, and this writes nothing for it.
+	SetCompletionMemberAward(ctx context.Context, arg SetCompletionMemberAwardParams) error
 	SetEmailVerified(ctx context.Context, id uuid.UUID) error
 	SetFamilyMemberPin(ctx context.Context, arg SetFamilyMemberPinParams) (FamilyMember, error)
 	// Links a Google account to an existing user. Conditional on google_subject IS

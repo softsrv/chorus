@@ -79,11 +79,13 @@ func (v QuestView) Shared() bool { return len(v.Participants) > 1 }
 
 // Completion is one time a member marked a chore done. Status is pending,
 // approved, rejected or cancelled; ApprovedAt is set only when approved.
-// MemberID is nil once the member has been removed.
+// MemberID is nil once the member has been removed. MemberIDs, set on an
+// approval, lists every member the completion credited, earliest first.
 type Completion struct {
 	ID         uuid.UUID
 	QuestID    uuid.UUID
 	MemberID   *uuid.UUID
+	MemberIDs  []uuid.UUID
 	DoneAt     time.Time
 	ApprovedAt *time.Time
 	Status     string
@@ -569,73 +571,146 @@ type ComboBonus struct {
 	BonusPoints int32
 }
 
-// Approve approves one pending completion and credits the chore's points to
-// the member who marked it done, in one transaction: either all of it
-// happens or none does. Admin only, behind the admin PIN once one is set. A
-// completion that is not pending (approved, rejected, cancelled, or not in
-// this household) is ErrNotFound, so a repeated or concurrent approval
-// credits the points once. The quest itself is not touched: its cooldown
-// started when the member marked it done.
+// ApprovedMember is one member an approval credited: their balance after
+// the credit (combo bonuses included), their split of the chore's points and
+// the teamwork bonus paid on top (0 unless more than one member was on it).
+type ApprovedMember struct {
+	Member        db.FamilyMember
+	PointsAwarded int32
+	TeamworkBonus int32
+}
+
+// Approve approves one pending completion and credits every member it
+// covers, in one transaction: either all of it happens or none does. Admin
+// only, behind the admin PIN once one is set. A completion that is not
+// pending (approved, rejected, cancelled, or not in this household) is
+// ErrNotFound, so a repeated or concurrent approval credits the points once.
+// The quest itself is not touched: its cooldown started when the member
+// marked it done.
 //
-// The approval also pays every combo it finishes: a combo of two or more
-// chores each of which the member marked done on the same household-local
-// day (by each completion's done_at, however late the approvals), using
-// approved completions not yet counted toward that combo. The returned
-// member's points include the bonuses; the returned slice is empty, never
-// nil, when none paid.
-func (s *QuestService) Approve(ctx context.Context, userID, householdID, completionID uuid.UUID, adminPin string) (Completion, db.FamilyMember, []ComboBonus, error) {
+// Each of the n members recorded on the completion at approval gets the
+// chore's current points divided by n, rounded up, plus the quest's current
+// teamwork bonus when n is more than 1. A completion that is not shared (n is
+// 1) pays its one member the full points and no bonus. If shareable was
+// turned off since the mark-done, the split still follows the recorded
+// members and the bonus is 0 (the database keeps a bonus only on a
+// shareable quest).
+//
+// The approval also pays every combo it finishes, for each credited member:
+// a combo of two or more chores each of which the member did on the same
+// household-local day (by each completion's done_at, however late the
+// approvals), using approved completions not yet counted toward that combo.
+// The returned member is the one who marked it done; it and every entry of
+// the returned members carry points that include the bonuses. The returned
+// bonus slice is empty, never nil, when none paid.
+func (s *QuestService) Approve(ctx context.Context, userID, householdID, completionID uuid.UUID, adminPin string) (Completion, db.FamilyMember, []ComboBonus, []ApprovedMember, error) {
+	fail := func(err error) (Completion, db.FamilyMember, []ComboBonus, []ApprovedMember, error) {
+		return Completion{}, db.FamilyMember{}, nil, nil, err
+	}
 	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
-		return Completion{}, db.FamilyMember{}, nil, err
+		return fail(err)
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return Completion{}, db.FamilyMember{}, nil, fmt.Errorf("begin tx: %w", err)
+		return fail(fmt.Errorf("begin tx: %w", err))
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
 	qtx := s.q.WithTx(tx)
-	// Lock order is member row, then completion, the order FamilyService.Remove
-	// uses (it locks the member, then cancels the member's completions).
+	// Lock order is member rows (ascending id), then completion, the order
+	// FamilyService.Remove and the other quest actions use (member first).
 	// Locking the completion first would deadlock against a concurrent removal.
-	memberRef, err := notFoundIfNoRows(qtx.GetPendingCompletionMember(ctx, db.GetPendingCompletionMemberParams{HouseholdID: householdID, ID: completionID}))
+	ref, err := notFoundIfNoRows(qtx.GetPendingCompletionMembers(ctx, db.GetPendingCompletionMembersParams{HouseholdID: householdID, ID: completionID}))
 	if err != nil {
-		return Completion{}, db.FamilyMember{}, nil, err
+		return fail(err)
 	}
-	if memberRef == nil {
+	if ref.MemberID == nil {
 		// The query reads only completions that still have a member.
-		return Completion{}, db.FamilyMember{}, nil, fmt.Errorf("approve completion %s: no member", completionID)
+		return fail(fmt.Errorf("approve completion %s: no member", completionID))
 	}
-	memberID := *memberRef
-	if _, err := notFoundIfNoRows(qtx.LockFamilyMember(ctx, db.LockFamilyMemberParams{HouseholdID: householdID, ID: memberID})); err != nil {
-		// The member was removed meanwhile; their completion is cancelled.
-		return Completion{}, db.FamilyMember{}, nil, err
+	markerID := *ref.MemberID
+	toLock := append([]uuid.UUID{markerID}, ref.MemberIds...)
+	slices.SortFunc(toLock, func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) })
+	locked := map[uuid.UUID]bool{}
+	for _, id := range slices.Compact(toLock) {
+		if _, err := notFoundIfNoRows(qtx.LockFamilyMember(ctx, db.LockFamilyMemberParams{HouseholdID: householdID, ID: id})); err != nil {
+			if errors.Is(err, ErrNotFound) && id != markerID {
+				// Removed meanwhile: their part of the completion went with them.
+				continue
+			}
+			// The marker was removed meanwhile; the completion is no longer theirs.
+			return fail(err)
+		}
+		locked[id] = true
 	}
 	// Re-read under the locks: a concurrent approval, reject or removal that
 	// committed first leaves no pending row, so this one is ErrNotFound.
-	row, err := notFoundIfNoRows(qtx.ApproveCompletion(ctx, db.ApproveCompletionParams{HouseholdID: householdID, ID: completionID, MemberID: memberID}))
+	row, err := notFoundIfNoRows(qtx.ApproveCompletion(ctx, db.ApproveCompletionParams{HouseholdID: householdID, ID: completionID, MemberID: markerID}))
 	if err != nil {
-		return Completion{}, db.FamilyMember{}, nil, err
+		return fail(err)
 	}
-	member, err := qtx.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: householdID, ID: memberID, Delta: row.Points})
-	if err != nil {
-		return Completion{}, db.FamilyMember{}, nil, fmt.Errorf("credit points: %w", err)
+	members := row.MemberIds
+	if len(members) == 0 {
+		// Recorded before quest sharing: the marker is its one member.
+		members = []uuid.UUID{markerID}
 	}
-	member, bonuses, err := payCombos(ctx, qtx, householdID, row.QuestID, member, row.DoneAt)
-	if err != nil {
-		return Completion{}, db.FamilyMember{}, nil, err
+	for _, id := range members {
+		if !locked[id] {
+			// Members join a completion only at mark-done, so the locked set
+			// must cover it; anything else rolls the approval back.
+			return fail(fmt.Errorf("approve completion %s: member %s not locked", completionID, id))
+		}
+	}
+	split := splitPoints(row.Points, len(members))
+	bonus := row.TeamworkBonus
+	if len(members) < 2 {
+		bonus = 0
+	}
+	credited := make([]ApprovedMember, 0, len(members))
+	bonuses := []ComboBonus{}
+	var marker db.FamilyMember
+	for _, id := range members {
+		if err := qtx.SetCompletionMemberAward(ctx, db.SetCompletionMemberAwardParams{
+			PointsAwarded: pgtype.Int4{Int32: split + bonus, Valid: true}, HouseholdID: householdID, CompletionID: completionID, MemberID: id,
+		}); err != nil {
+			return fail(fmt.Errorf("record award: %w", err))
+		}
+		member, err := qtx.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: householdID, ID: id, Delta: split + bonus})
+		if err != nil {
+			return fail(fmt.Errorf("credit points: %w", err))
+		}
+		member, paid, err := payCombos(ctx, qtx, householdID, row.QuestID, member, row.DoneAt)
+		if err != nil {
+			return fail(err)
+		}
+		if id == markerID {
+			marker = member
+			bonuses = paid
+		}
+		credited = append(credited, ApprovedMember{Member: member, PointsAwarded: split, TeamworkBonus: bonus})
+	}
+	if marker.ID != markerID {
+		// The marker left the quest's members (removed meanwhile with the
+		// completion handed on): report their unchanged balance.
+		m, err := qtx.GetFamilyMember(ctx, db.GetFamilyMemberParams{HouseholdID: householdID, ID: markerID})
+		if err != nil {
+			return fail(fmt.Errorf("read marker: %w", err))
+		}
+		marker = m
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return Completion{}, db.FamilyMember{}, nil, fmt.Errorf("commit: %w", err)
+		return fail(fmt.Errorf("commit: %w", err))
 	}
 	approvedAt := row.ApprovedAt.Time.UTC()
 	return Completion{
 		ID:         row.ID,
 		QuestID:    row.QuestID,
-		MemberID:   &memberID,
+		MemberID:   &markerID,
+		MemberIDs:  members,
 		DoneAt:     row.DoneAt.Time.UTC(),
 		ApprovedAt: &approvedAt,
 		Status:     "approved",
-	}, member, bonuses, nil
+	}, marker, bonuses, credited, nil
 }
 
 // payCombos runs inside Approve's transaction (qtx), after the completion

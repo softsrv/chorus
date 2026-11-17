@@ -158,13 +158,20 @@ FROM cancelled c
 WHERE q.household_id = c.household_id AND q.id = c.quest_id
   AND q.completed_at = c.done_at AND q.available_at > NOW();
 
--- name: GetPendingCompletionMember :one
--- The member of a pending completion, read without a lock so Approve can
--- lock that member's row before it locks the completion (the order
--- FamilyService.Remove uses).
-SELECT member_id FROM quest_completions
-WHERE household_id = sqlc.arg(household_id) AND id = sqlc.arg(id)
-  AND status = 'pending' AND member_id IS NOT NULL;
+-- name: GetPendingCompletionMembers :one
+-- The marker of a pending completion and every member it covers (earliest
+-- recorded first), read without a lock so Approve can lock those members'
+-- rows before it locks the completion (the order FamilyService.Remove uses).
+-- A completion recorded before quest sharing has no member rows.
+SELECT c.member_id,
+       ARRAY(
+           SELECT cm.member_id FROM quest_completion_members cm
+           WHERE cm.household_id = c.household_id AND cm.completion_id = c.id
+           ORDER BY cm.added_at, cm.member_id
+       )::uuid[] AS member_ids
+FROM quest_completions c
+WHERE c.household_id = sqlc.arg(household_id) AND c.id = sqlc.arg(id)
+  AND c.status = 'pending' AND c.member_id IS NOT NULL;
 
 -- name: MarkQuestDone :one
 -- A member on the quest marks it done: its holder, or any participant when
@@ -259,21 +266,42 @@ ORDER BY c.done_at ASC, c.id ASC;
 -- Approves one pending completion. The completion is locked first and its
 -- status re-read under the lock, so of two concurrent approvals exactly one
 -- gets a row. The quest is not touched: its cooldown already started at
--- mark-done. points is the chore's current points, to credit to member_id.
--- member_id must match the member the caller already locked.
+-- mark-done. points and teamwork_bonus are the chore's as they stand now
+-- (the CHECK keeps the bonus 0 once shareable is off); member_ids are the
+-- members the completion covers, earliest recorded first, empty for a
+-- completion recorded before quest sharing (its marker alone). member_id
+-- must match the marker the caller already locked; the caller holds the
+-- locks of every recorded member, so the member set cannot change under it.
 WITH pending AS (
-    SELECT pc.id, q.points
+    SELECT pc.id, q.points, q.teamwork_bonus
     FROM quest_completions pc
     JOIN household_quests q ON q.household_id = pc.household_id AND q.id = pc.quest_id
     WHERE pc.household_id = sqlc.arg(household_id) AND pc.id = sqlc.arg(id)
       AND pc.status = 'pending' AND pc.member_id = sqlc.arg(member_id)::uuid
     FOR UPDATE OF pc
+), approved AS (
+    UPDATE quest_completions c
+    SET status = 'approved', approved_at = NOW()
+    FROM pending p
+    WHERE c.id = p.id AND c.status = 'pending'
+    RETURNING c.id, c.household_id, c.quest_id, c.member_id, c.done_at, c.approved_at, p.points, p.teamwork_bonus
 )
-UPDATE quest_completions c
-SET status = 'approved', approved_at = NOW()
-FROM pending p
-WHERE c.id = p.id AND c.status = 'pending'
-RETURNING c.id, c.quest_id, c.member_id, c.done_at, c.approved_at, p.points;
+SELECT a.id, a.quest_id, a.member_id, a.done_at, a.approved_at, a.points, a.teamwork_bonus,
+       ARRAY(
+           SELECT cm.member_id FROM quest_completion_members cm
+           WHERE cm.household_id = a.household_id AND cm.completion_id = a.id
+           ORDER BY cm.added_at, cm.member_id
+       )::uuid[] AS member_ids
+FROM approved a;
+
+-- name: SetCompletionMemberAward :exec
+-- Records what an approval credited one member of a completion: their split
+-- plus any teamwork bonus. A completion recorded before quest sharing has no
+-- member row, and this writes nothing for it.
+UPDATE quest_completion_members
+SET points_awarded = sqlc.arg(points_awarded)
+WHERE household_id = sqlc.arg(household_id) AND completion_id = sqlc.arg(completion_id)
+  AND member_id = sqlc.arg(member_id);
 
 -- name: RejectCompletion :one
 -- Rejects one pending completion: no points. If it started the quest's

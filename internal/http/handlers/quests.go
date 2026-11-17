@@ -29,7 +29,7 @@ type questServicer interface {
 	MarkDone(ctx context.Context, userID, householdID, questID uuid.UUID, act app.MemberAction) (app.QuestView, error)
 	Share(ctx context.Context, userID, householdID, questID uuid.UUID, act, target app.MemberAction) (app.QuestView, error)
 	ListPending(ctx context.Context, userID, householdID uuid.UUID, adminPin string) ([]app.PendingCompletion, error)
-	Approve(ctx context.Context, userID, householdID, completionID uuid.UUID, adminPin string) (app.Completion, db.FamilyMember, []app.ComboBonus, error)
+	Approve(ctx context.Context, userID, householdID, completionID uuid.UUID, adminPin string) (app.Completion, db.FamilyMember, []app.ComboBonus, []app.ApprovedMember, error)
 	Reject(ctx context.Context, userID, householdID, completionID uuid.UUID, adminPin string) (app.Completion, error)
 }
 
@@ -377,13 +377,28 @@ func decodeEmptyBody(w http.ResponseWriter, r *http.Request) bool {
 	return decodeJSON(w, r, &req)
 }
 
-// approveResponse is the approved completion, the member it credited with
-// their new point total (bonuses included), and every combo bonus the
-// approval paid; combo_bonuses is [] when none.
+// approveResponse is the approved completion, the member who marked it done
+// with their new point total (bonuses included), every combo bonus the
+// approval paid that member (combo_bonuses is [] when none), and every member
+// it credited (members; one entry when it was not shared).
 type approveResponse struct {
-	Completion   completionJSON   `json:"completion"`
-	Member       familyMemberJSON `json:"member"`
-	ComboBonuses []comboAwardJSON `json:"combo_bonuses"`
+	Completion   completionJSON       `json:"completion"`
+	Member       familyMemberJSON     `json:"member"`
+	ComboBonuses []comboAwardJSON     `json:"combo_bonuses"`
+	Members      []approvedMemberJSON `json:"members"`
+}
+
+// approvedMemberJSON is one member an approval credited: the member with
+// their new point total, their split of the chore's points, and the teamwork
+// bonus paid on top (0 when the completion was not shared).
+type approvedMemberJSON struct {
+	Member        familyMemberJSON `json:"member"`
+	PointsAwarded int32            `json:"points_awarded"`
+	TeamworkBonus int32            `json:"teamwork_bonus"`
+}
+
+func toApprovedMember(m app.ApprovedMember) approvedMemberJSON {
+	return approvedMemberJSON{Member: toFamilyMember(m.Member), PointsAwarded: m.PointsAwarded, TeamworkBonus: m.TeamworkBonus}
 }
 
 // completionResponse wraps a rejected completion.
@@ -391,15 +406,16 @@ type completionResponse struct {
 	Completion completionJSON `json:"completion"`
 }
 
-// Approve approves a pending completion and credits its chore's points, and
-// any combo bonuses it finishes, to the member who marked it done.
+// Approve approves a pending completion and credits every member it covers
+// their split of the chore's points (plus the teamwork bonus when shared) and
+// any combo bonuses it finishes for them.
 // The admin PIN travels in X-Admin-PIN; the body is empty or {}.
 func (h *QuestHandler) Approve(w http.ResponseWriter, r *http.Request) {
 	hid, cid, ok := parseCompletionIDs(w, r)
 	if !ok || !decodeEmptyBody(w, r) {
 		return
 	}
-	completion, member, bonuses, err := h.svc.Approve(r.Context(), currentUser(r), hid, cid, r.Header.Get("X-Admin-PIN"))
+	completion, member, bonuses, members, err := h.svc.Approve(r.Context(), currentUser(r), hid, cid, r.Header.Get("X-Admin-PIN"))
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -408,6 +424,7 @@ func (h *QuestHandler) Approve(w http.ResponseWriter, r *http.Request) {
 		Completion:   toCompletion(completion),
 		Member:       toFamilyMember(member),
 		ComboBonuses: mapSlice(bonuses, toComboAward),
+		Members:      mapSlice(members, toApprovedMember),
 	})
 }
 

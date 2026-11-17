@@ -5,7 +5,9 @@ package app_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -466,4 +468,237 @@ func memberPoints(t *testing.T, q *db.Queries, householdID, memberID uuid.UUID) 
 		t.Fatalf("get member: %v", err)
 	}
 	return m.Points
+}
+
+// TestIntegration_QuestSharingApprove (CLM-11, CLM-12): approving a shared
+// completion credits each recorded member ceil(points/n) plus the quest's
+// teamwork bonus as it stands at approval, all in one transaction. Two
+// members of a 100-point quest with bonus 20 get 70 each, three get 34 + 20;
+// a quest edited to not shareable after mark-done still splits among the
+// recorded members but pays no bonus. A repeated or concurrent approval
+// credits once, and a failure crediting any member pays nobody.
+func TestIntegration_QuestSharingApprove(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	households := app.NewHouseholdService(q, pool)
+	familySvc := app.NewFamilyService(q, pool, 10)
+	quests := app.NewQuestService(q, pool)
+	ctx := context.Background()
+
+	admin := registerVerified(t, pool, authSvc, mailer, "questshareapprove").User.ID
+	h, err := households.Create(ctx, admin, app.HouseholdInput{Name: "Payers"})
+	if err != nil {
+		t.Fatalf("create household: %v", err)
+	}
+	newMember := func(name string) app.MemberAction {
+		t.Helper()
+		m, err := familySvc.Create(ctx, admin, h.ID, app.FamilyMemberInput{Name: name}, "")
+		if err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+		return app.MemberAction{MemberID: m.ID}
+	}
+	ann, ben, cara := newMember("Ann"), newMember("Ben"), newMember("Cara")
+	quest, err := quests.Create(ctx, admin, h.ID, app.QuestInput{Name: "Clean the living room", Points: num(100), Shareable: true, TeamworkBonus: num(20)}, "")
+	if err != nil {
+		t.Fatalf("create quest: %v", err)
+	}
+	// sharedDone has Ann accept the quest, share it with the others, and the
+	// last of them mark it done; it returns the pending completion's id.
+	sharedDone := func(with ...app.MemberAction) uuid.UUID {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `UPDATE household_quests SET available_at = NULL WHERE id = $1`, quest.ID); err != nil {
+			t.Fatalf("end cooldown: %v", err)
+		}
+		if _, err := quests.Accept(ctx, admin, h.ID, quest.ID, ann); err != nil {
+			t.Fatalf("Ann accepts: %v", err)
+		}
+		for _, m := range with {
+			if _, err := quests.Share(ctx, admin, h.ID, quest.ID, ann, m); err != nil {
+				t.Fatalf("share: %v", err)
+			}
+		}
+		if _, err := quests.MarkDone(ctx, admin, h.ID, quest.ID, with[len(with)-1]); err != nil {
+			t.Fatalf("mark done: %v", err)
+		}
+		return pendingFor(t, quests, admin, h.ID, quest.ID).ID
+	}
+	balances := func(ms ...app.MemberAction) []int32 {
+		t.Helper()
+		out := make([]int32, len(ms))
+		for i, m := range ms {
+			out[i] = memberPoints(t, q, h.ID, m.MemberID)
+		}
+		return out
+	}
+	storedAwards := func(completionID uuid.UUID) map[uuid.UUID]int32 {
+		t.Helper()
+		rows, err := pool.Query(ctx, `SELECT member_id, points_awarded FROM quest_completion_members WHERE completion_id = $1`, completionID)
+		if err != nil {
+			t.Fatalf("read awards: %v", err)
+		}
+		defer rows.Close()
+		out := map[uuid.UUID]int32{}
+		for rows.Next() {
+			var id uuid.UUID
+			var award *int32
+			if err := rows.Scan(&id, &award); err != nil {
+				t.Fatalf("scan award: %v", err)
+			}
+			if award == nil {
+				out[id] = -1
+			} else {
+				out[id] = *award
+			}
+		}
+		return out
+	}
+
+	// Two members: 50 + 20 each.
+	cid := sharedDone(ben)
+	before := balances(ann, ben, cara)
+	comp, marker, bonuses, members, err := quests.Approve(ctx, admin, h.ID, cid, "")
+	if err != nil {
+		t.Fatalf("approve two-member completion: %v", err)
+	}
+	after := balances(ann, ben, cara)
+	if after[0]-before[0] != 70 || after[1]-before[1] != 70 || after[2] != before[2] {
+		t.Errorf("two members: balances %v -> %v, want +70 +70 +0", before, after)
+	}
+	if comp.Status != "approved" || comp.MemberID == nil || *comp.MemberID != ben.MemberID ||
+		!slices.Equal(comp.MemberIDs, []uuid.UUID{ann.MemberID, ben.MemberID}) {
+		t.Errorf("approved completion: %+v, want marked by Ben covering Ann and Ben", comp)
+	}
+	if marker.ID != ben.MemberID || marker.Points != after[1] || bonuses == nil || len(bonuses) != 0 {
+		t.Errorf("approve marker %+v bonuses %v, want Ben at %d, no combos", marker, bonuses, after[1])
+	}
+	if len(members) != 2 || members[0].Member.ID != ann.MemberID || members[1].Member.ID != ben.MemberID {
+		t.Fatalf("approve members: %+v, want Ann then Ben", members)
+	}
+	for i, m := range members {
+		if m.PointsAwarded != 50 || m.TeamworkBonus != 20 || m.Member.Points != after[i] {
+			t.Errorf("approved member %d: %+v, want 50 + 20 at balance %d", i, m, after[i])
+		}
+	}
+	if got := storedAwards(cid); len(got) != 2 || got[ann.MemberID] != 70 || got[ben.MemberID] != 70 {
+		t.Errorf("stored awards: %v, want 70 each", got)
+	}
+	// Approving again pays nothing.
+	if _, _, _, _, err := quests.Approve(ctx, admin, h.ID, cid, ""); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("approve again: %v, want ErrNotFound", err)
+	}
+	if again := balances(ann, ben, cara); !slices.Equal(again, after) {
+		t.Errorf("approve again moved points: %v -> %v", after, again)
+	}
+
+	// Three members: ceil(100/3) = 34, + 20 = 54 each.
+	cid = sharedDone(ben, cara)
+	before = balances(ann, ben, cara)
+	_, _, _, members, err = quests.Approve(ctx, admin, h.ID, cid, "")
+	if err != nil {
+		t.Fatalf("approve three-member completion: %v", err)
+	}
+	after = balances(ann, ben, cara)
+	for i := range after {
+		if after[i]-before[i] != 54 {
+			t.Errorf("three members: member %d %d -> %d, want +54", i, before[i], after[i])
+		}
+	}
+	if len(members) != 3 {
+		t.Fatalf("three-member approve: %+v", members)
+	}
+	for _, m := range members {
+		if m.PointsAwarded != 34 || m.TeamworkBonus != 20 {
+			t.Errorf("three-member award: %+v, want 34 + 20", m)
+		}
+	}
+
+	// Shareable turned off after mark-done: the split follows the recorded
+	// members, the bonus is 0.
+	cid = sharedDone(ben)
+	if _, err := quests.Update(ctx, admin, h.ID, quest.ID, app.QuestInput{Name: "Clean the living room", Points: num(100)}, ""); err != nil {
+		t.Fatalf("turn shareable off: %v", err)
+	}
+	before = balances(ann, ben, cara)
+	_, _, _, members, err = quests.Approve(ctx, admin, h.ID, cid, "")
+	if err != nil {
+		t.Fatalf("approve after shareable off: %v", err)
+	}
+	after = balances(ann, ben, cara)
+	if after[0]-before[0] != 50 || after[1]-before[1] != 50 || after[2] != before[2] {
+		t.Errorf("shareable off: balances %v -> %v, want +50 +50 +0", before, after)
+	}
+	for _, m := range members {
+		if m.PointsAwarded != 50 || m.TeamworkBonus != 0 {
+			t.Errorf("shareable off award: %+v, want 50 and no bonus", m)
+		}
+	}
+	if _, err := quests.Update(ctx, admin, h.ID, quest.ID, app.QuestInput{Name: "Clean the living room", Points: num(100), Shareable: true, TeamworkBonus: num(20)}, ""); err != nil {
+		t.Fatalf("turn shareable back on: %v", err)
+	}
+
+	// Two concurrent approvals of one shared completion credit it once.
+	cid = sharedDone(ben)
+	before = balances(ann, ben)
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, _, _, _, errs[i] = quests.Approve(ctx, admin, h.ID, cid, "")
+		}(i)
+	}
+	wg.Wait()
+	ok, notFound := 0, 0
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			ok++
+		case errors.Is(err, app.ErrNotFound):
+			notFound++
+		default:
+			t.Errorf("concurrent approve: %v", err)
+		}
+	}
+	after = balances(ann, ben)
+	if ok != 1 || notFound != 1 || after[0]-before[0] != 70 || after[1]-before[1] != 70 {
+		t.Errorf("concurrent approvals: %d ok, %d not found, balances %v -> %v; want one credit of 70 each", ok, notFound, before, after)
+	}
+
+	// A failure crediting the second member rolls back the whole approval:
+	// nobody is paid and the completion stays pending.
+	cid = sharedDone(ben)
+	failOn := ben.MemberID
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
+CREATE FUNCTION fail_credit_%[1]s() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.id = '%[2]s' AND NEW.points <> OLD.points THEN
+    RAISE EXCEPTION 'injected credit failure';
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER fail_credit_%[1]s BEFORE UPDATE ON family_members
+  FOR EACH ROW EXECUTE FUNCTION fail_credit_%[1]s();`, failOn.String()[:8], failOn)); err != nil {
+		t.Fatalf("install failing trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), fmt.Sprintf(`DROP TRIGGER IF EXISTS fail_credit_%[1]s ON family_members; DROP FUNCTION IF EXISTS fail_credit_%[1]s();`, failOn.String()[:8])) //nolint:errcheck
+	})
+	before = balances(ann, ben)
+	if _, _, _, _, err := quests.Approve(ctx, admin, h.ID, cid, ""); err == nil {
+		t.Fatalf("approve with failing credit succeeded")
+	}
+	if after = balances(ann, ben); !slices.Equal(after, before) {
+		t.Errorf("failed approve moved points: %v -> %v", before, after)
+	}
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM quest_completions WHERE id = $1`, cid).Scan(&status); err != nil || status != "pending" {
+		t.Errorf("after failed approve: status %q, %v; want pending", status, err)
+	}
+	if got := storedAwards(cid); got[ann.MemberID] != -1 || got[ben.MemberID] != -1 {
+		t.Errorf("failed approve stored awards: %v, want none", got)
+	}
 }

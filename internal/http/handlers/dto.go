@@ -182,14 +182,16 @@ func toQuest(v app.QuestView) questJSON {
 
 // completionJSON is one time a member marked a chore done. approved_at is
 // present once approved; status is pending, approved, rejected or cancelled.
-// member_id is null once the member has been removed.
+// member_id is null once the member has been removed. member_ids, present on
+// an approved completion, lists every member it credited, earliest first.
 type completionJSON struct {
-	ID         uuid.UUID  `json:"id"`
-	QuestID    uuid.UUID  `json:"quest_id"`
-	MemberID   *uuid.UUID `json:"member_id"`
-	DoneAt     time.Time  `json:"done_at"`
-	ApprovedAt *time.Time `json:"approved_at,omitempty"`
-	Status     string     `json:"status"`
+	ID         uuid.UUID   `json:"id"`
+	QuestID    uuid.UUID   `json:"quest_id"`
+	MemberID   *uuid.UUID  `json:"member_id"`
+	MemberIDs  []uuid.UUID `json:"member_ids,omitempty"`
+	DoneAt     time.Time   `json:"done_at"`
+	ApprovedAt *time.Time  `json:"approved_at,omitempty"`
+	Status     string      `json:"status"`
 }
 
 func toCompletion(c app.Completion) completionJSON {
@@ -197,6 +199,7 @@ func toCompletion(c app.Completion) completionJSON {
 		ID:         c.ID,
 		QuestID:    c.QuestID,
 		MemberID:   c.MemberID,
+		MemberIDs:  c.MemberIDs,
 		DoneAt:     c.DoneAt,
 		ApprovedAt: c.ApprovedAt,
 		Status:     c.Status,

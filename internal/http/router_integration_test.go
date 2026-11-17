@@ -627,11 +627,12 @@ func TestAPI_EndToEnd(t *testing.T) {
 
 	var approvedBody struct {
 		Completion struct {
-			ID         uuid.UUID  `json:"id"`
-			QuestID    uuid.UUID  `json:"quest_id"`
-			DoneAt     *time.Time `json:"done_at"`
-			ApprovedAt *time.Time `json:"approved_at"`
-			Status     string     `json:"status"`
+			ID         uuid.UUID   `json:"id"`
+			QuestID    uuid.UUID   `json:"quest_id"`
+			DoneAt     *time.Time  `json:"done_at"`
+			ApprovedAt *time.Time  `json:"approved_at"`
+			Status     string      `json:"status"`
+			MemberIDs  []uuid.UUID `json:"member_ids"`
 		} `json:"completion"`
 		Member struct {
 			ID     uuid.UUID `json:"id"`
@@ -640,6 +641,14 @@ func TestAPI_EndToEnd(t *testing.T) {
 			Points int       `json:"points"`
 		} `json:"member"`
 		ComboBonuses []json.RawMessage `json:"combo_bonuses"`
+		Members      []struct {
+			Member struct {
+				ID     uuid.UUID `json:"id"`
+				Points int       `json:"points"`
+			} `json:"member"`
+			PointsAwarded int `json:"points_awarded"`
+			TeamworkBonus int `json:"teamwork_bonus"`
+		} `json:"members"`
 	}
 	s.expectWithHeaders(http.StatusOK, "POST", cbase+"/approve", parent.AccessToken, adminHdr, map[string]any{}, &approvedBody)
 	if approvedBody.Completion.ID != pendingList.Items[0].CompletionID || approvedBody.Completion.QuestID != acceptQuest.ID ||
@@ -648,6 +657,13 @@ func TestAPI_EndToEnd(t *testing.T) {
 		approvedBody.Member.ID != member.ID || approvedBody.Member.Name != "Kid" || !approvedBody.Member.HasPIN || approvedBody.Member.Points != 9 ||
 		approvedBody.ComboBonuses == nil || len(approvedBody.ComboBonuses) != 0 {
 		t.Errorf("approved: %+v", approvedBody)
+	}
+	// A quest that is not shared credits its one member, with no teamwork
+	// bonus, in members as well as member.
+	if len(approvedBody.Members) != 1 || approvedBody.Members[0].Member.ID != member.ID ||
+		approvedBody.Members[0].Member.Points != 9 || approvedBody.Members[0].TeamworkBonus != 0 ||
+		len(approvedBody.Completion.MemberIDs) != 1 || approvedBody.Completion.MemberIDs[0] != member.ID {
+		t.Errorf("approved members: %+v, completion member_ids %v; want only Kid, no bonus", approvedBody.Members, approvedBody.Completion.MemberIDs)
 	}
 	s.expectWithHeaders(http.StatusNotFound, "POST", cbase+"/approve", parent.AccessToken, adminHdr, map[string]any{}, nil)
 	if awaiting, _, _ := listedQuest(); awaiting {
