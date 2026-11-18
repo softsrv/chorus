@@ -1112,6 +1112,35 @@ func (q *Queries) QuestHasPendingCompletion(ctx context.Context, arg QuestHasPen
 	return awaiting_approval, err
 }
 
+const questMemberAgeEligible = `-- name: QuestMemberAgeEligible :one
+SELECT quest_age_eligible(m.birthday, h.timezone, q.min_age, q.max_age)::boolean AS eligible
+FROM family_members m
+JOIN households h ON h.id = m.household_id
+JOIN household_quests q ON q.household_id = m.household_id
+WHERE m.household_id = $1
+  AND h.id = $1
+  AND q.household_id = $1
+  AND m.id = $2::uuid
+  AND q.id = $3::uuid
+`
+
+type QuestMemberAgeEligibleParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	MemberID    uuid.UUID `json:"member_id"`
+	QuestID     uuid.UUID `json:"quest_id"`
+}
+
+// Check whether a member of a household is age-eligible for a quest in that
+// household. Returns quest_age_eligible using the household timezone and quest
+// age limits. Filters family_members, households and household_quests by
+// household_id.
+func (q *Queries) QuestMemberAgeEligible(ctx context.Context, arg QuestMemberAgeEligibleParams) (bool, error) {
+	row := q.db.QueryRow(ctx, questMemberAgeEligible, arg.HouseholdID, arg.MemberID, arg.QuestID)
+	var eligible bool
+	err := row.Scan(&eligible)
+	return eligible, err
+}
+
 const recomputeMemberQuestStreak = `-- name: RecomputeMemberQuestStreak :exec
 WITH chain AS (
     SELECT c.id, c.status, c.done_at,

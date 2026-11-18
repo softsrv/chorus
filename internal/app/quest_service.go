@@ -492,8 +492,9 @@ func (s *QuestService) Abandon(ctx context.Context, userID, householdID, questID
 // otherwise succeed. A quest that is not in this household, not shareable or
 // not held by the acting member, and a target that is not a member of this
 // household, are ErrNotFound. Sharing with oneself or with a member already
-// on the quest is ErrAlreadyParticipant. Nothing changes on any error. The
-// first share records the holder as a participant too.
+// on the quest is ErrAlreadyParticipant. A target outside the quest's age
+// range is ErrAgeRestricted. Nothing changes on any error. The first share
+// records the holder as a participant too.
 func (s *QuestService) Share(ctx context.Context, userID, householdID, questID uuid.UUID, act, target MemberAction) (QuestView, error) {
 	if err := s.verifyActingMember(ctx, userID, householdID, act); err != nil {
 		return QuestView{}, err
@@ -533,9 +534,38 @@ func (s *QuestService) Share(ctx context.Context, userID, householdID, questID u
 	}
 	if len(added) == 0 {
 		// Nothing written: either the quest is not one the actor may share,
-		// or the target is the actor or already on it.
+		// or the target is the actor or already on it, or the target is
+		// outside the quest's age range.
 		if !quest.Shareable || quest.ClaimedBy == nil || *quest.ClaimedBy != act.MemberID {
 			return QuestView{}, ErrNotFound
+		}
+		if target.MemberID == act.MemberID {
+			return QuestView{}, ErrAlreadyParticipant
+		}
+		participants, err := qtx.ListQuestParticipants(ctx, db.ListQuestParticipantsParams{
+			HouseholdID: householdID,
+			QuestID:     questID,
+		})
+		if err != nil {
+			return QuestView{}, fmt.Errorf("list quest participants: %w", err)
+		}
+		for _, p := range participants {
+			if p == target.MemberID {
+				return QuestView{}, ErrAlreadyParticipant
+			}
+		}
+		eligible, err := qtx.QuestMemberAgeEligible(ctx, db.QuestMemberAgeEligibleParams{
+			HouseholdID: householdID,
+			MemberID:    target.MemberID,
+			QuestID:     questID,
+		})
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return QuestView{}, ErrNotFound
+		case err != nil:
+			return QuestView{}, fmt.Errorf("check age eligibility: %w", err)
+		case !eligible:
+			return QuestView{}, ErrAgeRestricted
 		}
 		return QuestView{}, ErrAlreadyParticipant
 	}
