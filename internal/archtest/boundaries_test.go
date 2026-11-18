@@ -333,8 +333,14 @@ func TestImportBoundaries(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := checkEdges(plain); len(got) != 1 || !strings.Contains(got[0], "internal/users/x_test.go") {
-			t.Errorf("default tags: want only the external test edge to cmd/app flagged, got %v", got)
+		gotPlain := checkEdges(plain)
+		if len(gotPlain) != 1 || !strings.Contains(gotPlain[0], "internal/users/x_test.go") {
+			t.Errorf("default tags: want only the external test edge to cmd/app flagged, got %v", gotPlain)
+		}
+		for _, msg := range gotPlain {
+			if strings.Contains(msg, "systest") {
+				t.Errorf("default tags: untagged scan flagged systest: %s", msg)
+			}
 		}
 		tagged, err := scanEdges(dir, module, []string{"integration"})
 		if err != nil {
@@ -350,9 +356,15 @@ func TestImportBoundaries(t *testing.T) {
 			t.Fatal(err)
 		}
 		gotSys := checkEdges(sysTagged)
-		sort.Strings(gotSys)
-		if len(gotSys) != 2 || !strings.Contains(gotSys[0], "systest/bad_test.go") || !strings.Contains(gotSys[0], "systest -> internal/app") {
-			t.Errorf("systest tag: want the tagged systest -> internal/app edge flagged, got %v", gotSys)
+		var foundSys bool
+		for _, msg := range gotSys {
+			if strings.Contains(msg, "systest/bad_test.go") && strings.Contains(msg, "systest -> internal/app") {
+				foundSys = true
+				break
+			}
+		}
+		if len(gotSys) != 2 || !foundSys {
+			t.Errorf("systest tag: want exactly 2 violations including systest/bad_test.go (systest -> internal/app), got %v", gotSys)
 		}
 	})
 }
