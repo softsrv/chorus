@@ -37,6 +37,7 @@ function routes() {
     [`GET ${HP}/combos`]: () => [200, { items: [] }],
     'GET /quest-library': () => [200, { items: [] }],
     [`GET ${HP}/quests/pending`]: () => [200, { items: [] }],
+    [`GET ${HP}/reward-redemptions/pending`]: () => [200, { items: [] }],
     [`GET ${HP}/family-members`]: () => [200, { items: srv.members }],
   };
   for (const m of srv.members) {

@@ -44,6 +44,7 @@ function routes() {
     [`GET ${HP}/family-members`]: () => [200, { items: srv.members }],
     [`POST ${HP}/family-members/m-a/verify`]: () => [204, null],
     [`GET ${HP}/quests/pending`]: () => [200, { items: [] }],
+    [`GET ${HP}/reward-redemptions/pending`]: () => [200, { items: [] }],
     ...srv.extra,
   };
 }
