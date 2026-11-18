@@ -327,7 +327,7 @@ func (p *appProc) signUp(t *testing.T, email string) tokens {
 	return tk
 }
 
-var verifyLink = regexp.MustCompile(`/verify-email\?token=([A-Za-z0-9_\-]+)`)
+var verifyLink = regexp.MustCompile(`/verify-email\?token=([A-Za-z0-9_\-=]+)`)
 
 // verificationToken extracts the token from a verification email.
 func verificationToken(t *testing.T, msg string) string {
