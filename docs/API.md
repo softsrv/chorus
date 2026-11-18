@@ -21,7 +21,7 @@ The contract the iOS/Android apps and the web test client build against. Base pa
 | 401 | `unauthenticated`, `token_expired`, `invalid_credentials`, `invalid_refresh_token` | See auth flow below |
 | 403 | `email_not_verified`, `forbidden`, `wrong_pin`, `admin_pin_required` | `wrong_pin`: a member or admin PIN did not match. `admin_pin_required`: an admin PIN is set and the `X-Admin-PIN` header was missing. Neither signs you out. |
 | 404 | `not_found` | |
-| 409 | `already_verified` | Email is already verified |
+| 409 | `already_verified`, `quest_taken`, `already_participant`, `age_restricted` | Conflict: email is already verified, or quest conflict (already taken, member already participant, or age restricted) |
 | 413 / 415 | `body_too_large` / `unsupported_media_type` | |
 | 422 | `validation_failed` | `fields` maps field → message |
 | 423 | `account_locked` | 10 failed logins locks for 1 hour |
