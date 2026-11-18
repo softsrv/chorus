@@ -6,11 +6,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"go/types"
 	"math"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1144,9 +1149,10 @@ func TestIntegration_QuestSharingAgeRange(t *testing.T) {
 		t.Errorf("after share with aged-12: claimed_by=%v, want holder %v", got.ClaimedBy, holderID)
 	}
 
-	// Repo grep confirming no age(/date_part/EXTRACT over birthday in internal/app/*.go (non-test)
-	forbiddenSQL := regexp.MustCompile(`(?i)\b(age|date_part|extract)\s*\(`)
-	forbiddenGo := regexp.MustCompile(`(?i)birthday\S*\.(Year|YearDay|AddDate|Sub)\(`)
+	// No age arithmetic in the non-test Go code of internal/app: the rule
+	// lives in SQL (quest_age_eligible). The checker reads code only, never
+	// comments, and is itself checked to flag a violation.
+	checkAgeArithmeticChecker(t)
 	err = filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -1160,16 +1166,12 @@ func TestIntegration_QuestSharingAgeRange(t *testing.T) {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		content, err := os.ReadFile(path)
+		found, err := ageArithmeticInCode(path, nil)
 		if err != nil {
 			return err
 		}
-		text := string(content)
-		if loc := forbiddenSQL.FindStringIndex(text); loc != nil {
-			t.Errorf("%s contains forbidden SQL age calculation: %q", path, text[loc[0]:loc[1]])
-		}
-		if loc := forbiddenGo.FindStringIndex(text); loc != nil {
-			t.Errorf("%s contains forbidden Go age calculation: %q", path, text[loc[0]:loc[1]])
+		for _, f := range found {
+			t.Errorf("forbidden age arithmetic in Go code: %s", f)
 		}
 		return nil
 	})
@@ -1345,5 +1347,118 @@ func TestIntegration_QuestSharingAgeRange(t *testing.T) {
 	}
 	if _, err := quests.Share(ctx, admin, h.ID, qSelf.ID, holderAct, holderAct); !errors.Is(err, app.ErrAlreadyParticipant) {
 		t.Errorf("share with holder as target: got %v, want ErrAlreadyParticipant", err)
+	}
+}
+
+// sqlAgeArithmetic matches SQL age arithmetic inside a Go string literal.
+var sqlAgeArithmetic = regexp.MustCompile(`(?i)\b(age|date_part|extract)\s*\(`)
+
+// goDateMethods are the time methods that would restate the age rule in Go
+// when called on (or with) a birthday.
+var goDateMethods = map[string]bool{"Year": true, "YearDay": true, "AddDate": true, "Sub": true}
+
+// ageArithmeticInCode parses one Go file (from src when non-nil, else from
+// path) without its comments and reports code that restates the age rule:
+// a string literal holding SQL age(/date_part(/extract(, a .Year(),
+// .YearDay(), .AddDate() or .Sub() whose receiver or argument mentions a
+// birthday, and time.Since/time.Until over a birthday. Comments are never
+// read, so prose such as a doc comment mentioning an age is not code.
+func ageArithmeticInCode(path string, src any) ([]string, error) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, src, parser.SkipObjectResolution)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	mentionsBirthday := func(e ast.Expr) bool {
+		return strings.Contains(strings.ToLower(types.ExprString(e)), "birthday")
+	}
+	var found []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.BasicLit:
+			if n.Kind != token.STRING {
+				return true
+			}
+			s, err := strconv.Unquote(n.Value)
+			if err != nil {
+				s = n.Value
+			}
+			if m := sqlAgeArithmetic.FindString(s); m != "" {
+				found = append(found, fmt.Sprintf("%s: SQL %q in a string literal", fset.Position(n.Pos()), m))
+			}
+		case *ast.CallExpr:
+			sel, ok := n.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "time" && (sel.Sel.Name == "Since" || sel.Sel.Name == "Until") {
+				for _, a := range n.Args {
+					if mentionsBirthday(a) {
+						found = append(found, fmt.Sprintf("%s: %s over a birthday", fset.Position(n.Pos()), types.ExprString(n)))
+					}
+				}
+				return true
+			}
+			if !goDateMethods[sel.Sel.Name] {
+				return true
+			}
+			hit := mentionsBirthday(sel.X)
+			for _, a := range n.Args {
+				hit = hit || mentionsBirthday(a)
+			}
+			if hit {
+				found = append(found, fmt.Sprintf("%s: %s on a birthday", fset.Position(n.Pos()), types.ExprString(n)))
+			}
+		}
+		return true
+	})
+	return found, nil
+}
+
+// checkAgeArithmeticChecker proves the guard can fail: it flags each kind of
+// violation in an in-memory snippet, and passes comments and date code that
+// does not touch a birthday.
+func checkAgeArithmeticChecker(t *testing.T) {
+	t.Helper()
+	const violating = `package p
+
+import "time"
+
+type member struct{ Birthday time.Time }
+
+const q = "SELECT age(birthday) FROM family_members"
+const q2 = ` + "`SELECT date_part('year', now())`" + `
+
+func f(b member, now time.Time) {
+	_ = b.Birthday.Year()
+	_ = b.Birthday.AddDate(10, 0, 0)
+	_ = now.Sub(b.Birthday)
+	_ = time.Since(b.Birthday)
+}
+`
+	found, err := ageArithmeticInCode("violating.go", violating)
+	if err != nil {
+		t.Fatalf("self-check parse violating snippet: %v", err)
+	}
+	if len(found) != 6 {
+		t.Errorf("self-check: violating snippet flagged %d times, want 6: %v", len(found), found)
+	}
+	const clean = `package p
+
+import "time"
+
+// and age (nil for both when unset)
+/* EXTRACT(year FROM birthday) in a block comment */
+func g(now time.Time, birthday *string) int {
+	_ = "Minimum age can't be above the maximum age."
+	return now.Year()
+}
+`
+	found, err = ageArithmeticInCode("clean.go", clean)
+	if err != nil {
+		t.Fatalf("self-check parse clean snippet: %v", err)
+	}
+	if len(found) != 0 {
+		t.Errorf("self-check: comment-only and unrelated code flagged: %v", found)
 	}
 }
