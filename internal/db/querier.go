@@ -286,6 +286,11 @@ type Querier interface {
 	MarkVerificationCodeUsed(ctx context.Context, id uuid.UUID) (int64, error)
 	// Whether the quest has a completion waiting for the administrator.
 	QuestHasPendingCompletion(ctx context.Context, arg QuestHasPendingCompletionParams) (bool, error)
+	// Check whether a member of a household is age-eligible for a quest in that
+	// household. Returns quest_age_eligible using the household timezone and quest
+	// age limits. Filters family_members, households and household_quests by
+	// household_id.
+	QuestMemberAgeEligible(ctx context.Context, arg QuestMemberAgeEligibleParams) (bool, error)
 	// Rebuilds the member's streak for the quest from the completions that still
 	// count: theirs, pending or approved, marked done since streaks existed
 	// (streak_count set), in done_at order. It replaces undoing one stored step,

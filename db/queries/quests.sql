@@ -220,6 +220,21 @@ CROSS JOIN LATERAL (VALUES
 ON CONFLICT (quest_id, member_id) DO NOTHING
 RETURNING member_id;
 
+-- name: QuestMemberAgeEligible :one
+-- Check whether a member of a household is age-eligible for a quest in that
+-- household. Returns quest_age_eligible using the household timezone and quest
+-- age limits. Filters family_members, households and household_quests by
+-- household_id.
+SELECT quest_age_eligible(m.birthday, h.timezone, q.min_age, q.max_age)::boolean AS eligible
+FROM family_members m
+JOIN households h ON h.id = m.household_id
+JOIN household_quests q ON q.household_id = m.household_id
+WHERE m.household_id = sqlc.arg(household_id)
+  AND h.id = sqlc.arg(household_id)
+  AND q.household_id = sqlc.arg(household_id)
+  AND m.id = sqlc.arg(member_id)::uuid
+  AND q.id = sqlc.arg(quest_id)::uuid;
+
 -- name: ListQuestParticipants :many
 -- The members on one quest, earliest first; none when it is not shared.
 SELECT member_id FROM household_quest_participants

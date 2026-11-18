@@ -1217,6 +1217,176 @@ test('sharing CLM-6: no Share on a quest that is not shareable, one held by some
   assert.equal(calls.filter((c) => c.path.endsWith('/share')).length, 0);
 });
 
+test('sharing CLM-8: share picker lists every candidate including out-of-range; shareButton absent when every candidate is out of range', async () => {
+  srv.members.push({ id: 'm-c', household_id: H, name: 'Cat', has_pin: false, points: 0 });
+  // Ann holds a shareable quest where Cat is ineligible.
+  srv.quests = [quest({
+    id: 'q1', name: 'Clean living room', available: false, claimed_by: 'm-a', shareable: true,
+    min_age: 10, max_age: 14, ineligible_member_ids: ['m-c'],
+  })];
+  await loadApp();
+  await becomeAnn();
+  const rowOf = () => walk(env.$app).find((n) => n.tagName === 'LI' && n.textContent.startsWith('Clean living room'));
+  assert.equal(buttons(rowOf(), 'Share').length, 1, 'Share offered because Ben is eligible');
+  await click(buttons(rowOf(), 'Share')[0]);
+
+  const picker = walk(env.$app).find((n) => n.className === 'font-semibold' && n.textContent === 'Share Clean living room with').parentNode;
+  const offered = walk(picker).filter((n) => n.tagName === 'BUTTON' && n.textContent !== 'Cancel').map((n) => n.textContent);
+  assert.deepEqual(offered, ['Ben', 'Cat'], 'lists every non-participant including ineligible member Cat');
+
+  // If every candidate is ineligible, shareButton is absent.
+  srv.quests = [quest({
+    id: 'q1', name: 'Clean living room', available: false, claimed_by: 'm-a', shareable: true,
+    min_age: 10, max_age: 14, ineligible_member_ids: ['m-b', 'm-c'],
+  })];
+  await become('Ann');
+  assert.equal(buttons(rowOf(), 'Share').length, 0, 'shareButton absent when every candidate is ineligible');
+
+  // If nobody is ineligible, Share button shows.
+  srv.quests = [quest({
+    id: 'q1', name: 'Clean living room', available: false, claimed_by: 'm-a', shareable: true,
+    min_age: null, max_age: null, ineligible_member_ids: [],
+  })];
+  await become('Ann');
+  assert.equal(buttons(rowOf(), 'Share').length, 1, 'Share offered when all candidates eligible');
+});
+
+test('sharing CLM-9 / CLM-10: ineligible candidates rendered disabled with visible reason text; in-range members stay enabled buttons', async () => {
+  ageHousehold();
+  srv.extra[`POST ${HP}/quests/q-mow/share`] = (r) => {
+    srv.quests = [quest({ ...srv.quests[0], shared: true, participants: [SAM.id, r.body.target_member_id] })];
+    return [200, srv.quests[0]];
+  };
+  const shareCalls = () => calls.filter((c) => c.path === `${HP}/quests/q-mow/share`);
+
+  // Sam holds Mow the lawn (10–14). Ava is in ineligible_member_ids. Leo is eligible.
+  srv.quests = [quest({
+    ...MOW_LAWN,
+    available: false, claimed_by: SAM.id, shareable: true,
+  })];
+
+  await loadApp();
+  await become('Sam');
+  const rowOf = () => walk(env.$app).find((n) => n.tagName === 'LI' && n.textContent.startsWith('Mow the lawn'));
+  await click(buttons(rowOf(), 'Share')[0]);
+
+  const picker = walk(env.$app).find((n) => n.className === 'font-semibold' && n.textContent === 'Share Mow the lawn with').parentNode;
+  const avaBtn = buttons(picker, 'Ava')[0];
+  const leoBtn = buttons(picker, 'Leo')[0];
+  assert.ok(avaBtn, 'Ava button rendered');
+  assert.equal(avaBtn.disabled, true, 'Ava button is disabled');
+  assert.ok(leoBtn, 'Leo button rendered');
+  assert.equal(leoBtn.disabled, false, 'Leo button is enabled');
+
+  // Reason text beside Ava
+  const avaSpan = avaBtn.parentNode;
+  assert.equal(avaSpan.tagName, 'SPAN');
+  const small = walk(avaSpan).find((n) => n.tagName === 'SMALL');
+  assert.ok(small, 'small tag for reason');
+  assert.equal(small.textContent, 'Ages 10–14 only');
+
+  // Clicking disabled entry makes no request
+  await click(avaBtn);
+  assert.equal(shareCalls().length, 0, 'clicking disabled Ava sends no request');
+  assert.doesNotMatch(text(), /Ava enters their PIN/);
+
+  // Clicking Leo starts the share flow
+  await click(leoBtn);
+  assert.equal(shareCalls().length, 1, 'Leo without PIN shared with at once');
+  assert.equal(shareCalls()[0].body.target_member_id, LEO.id);
+  noInlineStyle();
+
+  // One-sided variants: min only ('Ages 10+ only') and max only ('Up to 14 only')
+  srv.quests = [quest({
+    ...READ_CHAPTER, // min_age: 6, ineligible: [LEO.id]
+    available: false, claimed_by: SAM.id, shareable: true, min_age: 10, max_age: null, ineligible_member_ids: [LEO.id],
+  })];
+  await become('Sam');
+  const readRow = () => walk(env.$app).find((n) => n.tagName === 'LI' && n.textContent.startsWith('Read a chapter'));
+  await click(buttons(readRow(), 'Share')[0]);
+  const pickerMin = walk(env.$app).find((n) => n.className === 'font-semibold' && n.textContent === 'Share Read a chapter with').parentNode;
+  const leoBtnMin = buttons(pickerMin, 'Leo')[0];
+  assert.equal(leoBtnMin.disabled, true);
+  assert.equal(walk(leoBtnMin.parentNode).find((n) => n.tagName === 'SMALL').textContent, 'Ages 10+ only');
+  noInlineStyle();
+
+  srv.quests = [quest({
+    ...WATER_PLANTS, // max_age: 12, ineligible: [AVA.id]
+    available: false, claimed_by: SAM.id, shareable: true, min_age: null, max_age: 14, ineligible_member_ids: [AVA.id],
+  })];
+  await become('Sam');
+  const waterRow = () => walk(env.$app).find((n) => n.tagName === 'LI' && n.textContent.startsWith('Water plants'));
+  await click(buttons(waterRow(), 'Share')[0]);
+  const pickerMax = walk(env.$app).find((n) => n.className === 'font-semibold' && n.textContent === 'Share Water plants with').parentNode;
+  const avaBtnMax = buttons(pickerMax, 'Ava')[0];
+  assert.equal(avaBtnMax.disabled, true);
+  assert.equal(walk(avaBtnMax.parentNode).find((n) => n.tagName === 'SMALL').textContent, 'Up to 14 only');
+  noInlineStyle();
+});
+
+test('sharing CLM-11: a 409 age_restricted from share reloads the list, shows the age-range notice, and leaves the quest unshared', async () => {
+  ageHousehold();
+  srv.extra[`POST ${HP}/quests/q-mow/share`] = () => err(409, 'age_restricted', "member is outside this quest's age range");
+
+  // Sam holds Mow the lawn (10–14). Ava is in ineligible_member_ids. Leo is eligible.
+  srv.quests = [quest({
+    ...MOW_LAWN,
+    available: false, claimed_by: SAM.id, shareable: true,
+  })];
+
+  await loadApp();
+  await become('Sam');
+  const rowOf = () => walk(env.$app).find((n) => n.tagName === 'LI' && n.textContent.startsWith('Mow the lawn'));
+  await click(buttons(rowOf(), 'Share')[0]);
+
+  const picker = walk(env.$app).find((n) => n.className === 'font-semibold' && n.textContent === 'Share Mow the lawn with').parentNode;
+  const leoBtn = buttons(picker, 'Leo')[0];
+  assert.ok(leoBtn, 'Leo button rendered');
+  assert.equal(leoBtn.disabled, false, 'Leo is eligible');
+
+  await click(leoBtn);
+
+  const shareAt = calls.findIndex((c) => c.path === `${HP}/quests/q-mow/share`);
+  assert.ok(shareAt !== -1, 'share request sent');
+  assert.ok(calls.slice(shareAt + 1).some((c) => c.method === 'GET' && c.path === `${HP}/quests`), 'list reloaded after 409');
+
+  assert.match(text(), /This quest is outside that member's age range\./);
+  const updatedRow = rowOf();
+  assert.ok(updatedRow, 'quest still present');
+  assert.doesNotMatch(updatedRow.textContent, /Shared with/);
+  noInlineStyle();
+});
+
+test('sharing CLM-12: share picker decides eligibility only from ineligible_member_ids, ignores birthdays, and only includes household members', async () => {
+  // Sam holds quest. Leo has birthday in fixture that would make him age 42, but is NOT in ineligible_member_ids.
+  // Ava has no birthday.
+  // Ineligible_member_ids has an outsider id not in household members.
+  ageHousehold();
+  srv.members = [
+    { ...SAM, birthday: '2015-04-02' },
+    { ...AVA, birthday: null },
+    { ...LEO, birthday: '1980-01-01' },
+  ];
+  srv.quests = [quest({
+    id: 'q-share', name: 'Board game', available: false, claimed_by: SAM.id, shareable: true,
+    min_age: 10, max_age: 14, ineligible_member_ids: [AVA.id, 'outsider-id-123'],
+  })];
+  await loadApp();
+  await become('Sam');
+  const rowOf = () => walk(env.$app).find((n) => n.tagName === 'LI' && n.textContent.startsWith('Board game'));
+  await click(buttons(rowOf(), 'Share')[0]);
+
+  const picker = walk(env.$app).find((n) => n.className === 'font-semibold' && n.textContent === 'Share Board game with').parentNode;
+  const buttonsInPicker = walk(picker).filter((n) => n.tagName === 'BUTTON' && n.textContent !== 'Cancel');
+  assert.deepEqual(buttonsInPicker.map((b) => b.textContent), ['Ava', 'Leo'], 'only household candidates listed, outsider ignored');
+
+  const avaBtn = buttons(picker, 'Ava')[0];
+  const leoBtn = buttons(picker, 'Leo')[0];
+  assert.equal(avaBtn.disabled, true, 'Ava is disabled because she is in ineligible_member_ids (even though birthday is null)');
+  assert.equal(leoBtn.disabled, false, 'Leo is enabled because he is not in ineligible_member_ids (even though birthday would be out of range)');
+  noInlineStyle();
+});
+
 test('sharing CLM-10: a shared completion is one approval item naming every member and what each gets, with Approve and Send back', async () => {
   srv.adminPinSet = true;
   let items = [{

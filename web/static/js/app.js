@@ -913,16 +913,35 @@ async function takeCard(h, quests, members, rerender, member = activeMember) {
       pinForm({ label: `PIN for ${m.name}`, submit: 'Share', onPin: (pin) => share(q, m, pin) })));
   }, $err);
 
-  const showShare = (q) => $share.replaceChildren(el('div', { class: 'p-3 bg-base-200 rounded space-y-2' },
-    el('div', { class: 'font-semibold', text: `Share ${q.name} with` }),
-    el('div', { class: 'flex flex-wrap gap-2' },
-      shareCandidates(q).map((m) => el('button', { class: 'btn btn-sm', text: m.name, onclick: pickTarget(q, m) }))),
-    el('button', { class: 'btn btn-ghost btn-sm', text: 'Cancel', onclick: (e) => { e.preventDefault(); $share.replaceChildren(); } })));
+  const showShare = (q) => {
+    const ineligible = new Set(q.ineligible_member_ids || []);
+    const reasonText = `${questRangeText(q)} only`;
+    const renderCandidate = (m) => {
+      if (ineligible.has(m.id)) {
+        return el('span', { class: 'inline-flex items-center gap-1' },
+          el('button', { class: 'btn btn-sm', text: m.name, disabled: true }),
+          el('small', { class: 'text-xs opacity-70', text: reasonText }));
+      }
+      return el('button', { class: 'btn btn-sm', text: m.name, onclick: pickTarget(q, m) });
+    };
+
+    return $share.replaceChildren(el('div', { class: 'p-3 bg-base-200 rounded space-y-2' },
+      el('div', { class: 'font-semibold', text: `Share ${q.name} with` }),
+      el('div', { class: 'flex flex-wrap gap-2' },
+        shareCandidates(q).map(renderCandidate)),
+      el('button', { class: 'btn btn-ghost btn-sm', text: 'Cancel', onclick: (e) => { e.preventDefault(); $share.replaceChildren(); } })));
+  };
 
   // Share is offered only on a shareable quest the active member holds, and
-  // only while someone in the household is not yet on it.
-  const shareButton = (q) => q.shareable && q.claimed_by === member.id && shareCandidates(q).length > 0 &&
-    el('button', { class: 'btn btn-ghost btn-xs', text: 'Share', onclick: (e) => { e.preventDefault(); showShare(q); } });
+  // only while at least one candidate is not ineligible.
+  const shareButton = (q) => {
+    if (!q.shareable || q.claimed_by !== member.id) return null;
+    const candidates = shareCandidates(q);
+    if (candidates.length === 0) return null;
+    const ineligible = new Set(q.ineligible_member_ids || []);
+    if (!candidates.some((m) => !ineligible.has(m.id))) return null;
+    return el('button', { class: 'btn btn-ghost btn-xs', text: 'Share', onclick: (e) => { e.preventDefault(); showShare(q); } });
+  };
 
   const sharedWith = (q) => {
     if (!q.shared) return null;

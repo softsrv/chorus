@@ -154,6 +154,15 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create mallory member 2: %v", err)
 	}
+	// Mallory member with an out-of-range birthday for aliceShareable:
+	malloryOutOfRange, err := familySvc.Create(ctx, mallory, mh.ID, app.FamilyMemberInput{Name: "Mallory Out Of Range"}, "")
+	if err != nil {
+		t.Fatalf("Create mallory out of range member: %v", err)
+	}
+	malloryBday := "2000-01-01"
+	if _, err := familySvc.SetBirthday(ctx, mallory, mh.ID, malloryOutOfRange.ID, &malloryBday, ""); err != nil {
+		t.Fatalf("Set mallory out of range birthday: %v", err)
+	}
 	unknownMemberID, err := uuid.NewV7()
 	if err != nil {
 		t.Fatalf("new uuid: %v", err)
@@ -162,6 +171,7 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	_, checks["share quest"] = quests.Share(ctx, mallory, h.ID, aliceShareable.ID, shareActor, app.MemberAction{MemberID: aliceKid.ID})
 	_, checks["share quest as own member"] = quests.Share(ctx, mallory, h.ID, aliceShareable.ID, app.MemberAction{MemberID: malloryMember.ID}, app.MemberAction{MemberID: aliceKid.ID})
 	_, checks["share quest to another household's member"] = quests.Share(ctx, alice, h.ID, aliceShareable.ID, shareActor, app.MemberAction{MemberID: malloryMember.ID})
+	_, checks["share quest to another household's member with out of range birthday"] = quests.Share(ctx, alice, h.ID, aliceShareable.ID, shareActor, app.MemberAction{MemberID: malloryOutOfRange.ID})
 	_, checks["share quest to unknown member"] = quests.Share(ctx, alice, h.ID, aliceShareable.ID, shareActor, app.MemberAction{MemberID: unknownMemberID})
 	_, checks["share quest via own household"] = quests.Share(ctx, mallory, mh.ID, aliceShareable.ID, app.MemberAction{MemberID: malloryMember.ID}, app.MemberAction{MemberID: malloryMember2.ID})
 	_, checks["share quest via own household with alice's members"] = quests.Share(ctx, mallory, mh.ID, aliceShareable.ID, shareActor, app.MemberAction{MemberID: aliceKid.ID})
