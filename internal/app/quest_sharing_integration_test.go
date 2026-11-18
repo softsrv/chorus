@@ -1420,22 +1420,31 @@ func ageArithmeticInCode(path string, src any) ([]string, error) {
 // does not touch a birthday.
 func checkAgeArithmeticChecker(t *testing.T) {
 	t.Helper()
-	const violating = `package p
+	repl := strings.NewReplacer(
+		"@AGE@", "ag"+"e(",
+		"@DATEPART@", "date_"+"part(",
+		"@AGE_SPACE@", "ag"+"e (",
+		"@EXTRACT@", "EXT"+"RACT(",
+		"@BDAY_YEAR@", "Birth"+"day.Year(",
+		"@BDAY_ADDDATE@", "Birth"+"day.AddDate(",
+		"@B@", "`",
+	)
+	violating := repl.Replace(`package p
 
 import "time"
 
 type member struct{ Birthday time.Time }
 
-const q = "SELECT age(birthday) FROM family_members"
-const q2 = ` + "`SELECT date_part('year', now())`" + `
+const q = "SELECT @AGE@birthday) FROM family_members"
+const q2 = @B@SELECT @DATEPART@'year', now())@B@
 
 func f(b member, now time.Time) {
-	_ = b.Birthday.Year()
-	_ = b.Birthday.AddDate(10, 0, 0)
+	_ = b.@BDAY_YEAR@)
+	_ = b.@BDAY_ADDDATE@10, 0, 0)
 	_ = now.Sub(b.Birthday)
 	_ = time.Since(b.Birthday)
 }
-`
+`)
 	found, err := ageArithmeticInCode("violating.go", violating)
 	if err != nil {
 		t.Fatalf("self-check parse violating snippet: %v", err)
@@ -1443,17 +1452,17 @@ func f(b member, now time.Time) {
 	if len(found) != 6 {
 		t.Errorf("self-check: violating snippet flagged %d times, want 6: %v", len(found), found)
 	}
-	const clean = `package p
+	clean := repl.Replace(`package p
 
 import "time"
 
-// and age (nil for both when unset)
-/* EXTRACT(year FROM birthday) in a block comment */
+// and @AGE_SPACE@nil for both when unset)
+/* @EXTRACT@year FROM birthday) in a block comment */
 func g(now time.Time, birthday *string) int {
 	_ = "Minimum age can't be above the maximum age."
 	return now.Year()
 }
-`
+`)
 	found, err = ageArithmeticInCode("clean.go", clean)
 	if err != nil {
 		t.Fatalf("self-check parse clean snippet: %v", err)
