@@ -46,12 +46,31 @@ function alertBox(kind, message) {
 
 // form builds a form from field specs and calls onSubmit(values). Errors from
 // the API are shown above the form, with per-field messages under each input.
+// A 'radio' field is a group of options ([value, label]) whose value is the
+// checked one; a 'note' field is a line of help text with no input. Fields
+// sharing a `group` are shown together in a fieldset with that legend, and
+// `show(values)` hides a field while it returns false.
 function form({ fields, submit, onSubmit, inline = false }) {
   const $error = el('div');
   const inputs = {};
   const hints = {};
+  const radioGroups = {};
   const multi = new Set(fields.filter((f) => f.type === 'multiselect').map((f) => f.name));
   const fieldRows = fields.map((f) => {
+    if (f.type === 'note') return { f, $row: el('p', { class: 'text-xs opacity-70', text: f.text }) };
+    if (f.type === 'radio') {
+      const radios = f.options.map(([value]) => el('input', {
+        type: 'radio', name: f.name, value, class: 'radio radio-sm', checked: value === f.value,
+        onclick: (e) => { for (const r of radios) r.checked = r === e.currentTarget; updateVisibility(); },
+        onchange: () => updateVisibility(),
+      }));
+      radioGroups[f.name] = radios;
+      return {
+        f,
+        $row: el('div', { role: 'radiogroup', class: 'flex flex-wrap gap-4' },
+          f.options.map(([, label], i) => el('label', { class: 'label cursor-pointer justify-start gap-2' }, radios[i], el('span', { text: label })))),
+      };
+    }
     let input;
     if (f.type === 'select') {
       input = el('select', { name: f.name, class: 'select select-bordered w-full' },
@@ -99,13 +118,30 @@ function form({ fields, submit, onSubmit, inline = false }) {
       else if (multi.has(name)) values[name] = Array.from(input.children).filter((o) => o.selected).map((o) => o.value);
       else values[name] = input.value;
     }
+    for (const [name, radios] of Object.entries(radioGroups)) values[name] = radios.find((r) => r.checked)?.value ?? '';
     return values;
   };
 
+  // layout is the form's rows for these values: hidden fields left out, and
+  // grouped fields gathered into their fieldset where the group first appears.
+  const groups = {};
+  const layout = (values) => {
+    const top = [];
+    for (const { f, $row } of fieldRows) {
+      if (f.show && !f.show(values)) continue;
+      if (!f.group) { top.push($row); continue; }
+      const $set = (groups[f.group] ||= el('fieldset', { class: 'fieldset w-full border border-base-300 rounded p-2' }));
+      if (!top.includes($set)) {
+        $set.replaceChildren(el('legend', { class: 'fieldset-legend text-sm', text: f.group }));
+        top.push($set);
+      }
+      $set.append($row);
+    }
+    return top;
+  };
+
   const updateVisibility = () => {
-    const values = getValues();
-    const visibleRows = fieldRows.filter(({ f }) => !f.show || f.show(values)).map(({ $row }) => $row);
-    $form.replaceChildren($error, ...visibleRows, $submit);
+    $form.replaceChildren($error, ...layout(getValues()), $submit);
   };
 
   const initialValues = {};
@@ -113,7 +149,7 @@ function form({ fields, submit, onSubmit, inline = false }) {
     if (f.type === 'checkbox') initialValues[f.name] = !!f.value;
     else initialValues[f.name] = f.value ?? '';
   }
-  const visibleRows = fieldRows.filter(({ f }) => !f.show || f.show(initialValues)).map(({ $row }) => $row);
+  const visibleRows = layout(initialValues);
 
   const $submit = el('button', { type: 'submit', class: 'btn btn-primary', text: submit });
   const $form = el('form', {
@@ -654,11 +690,15 @@ function confirmClick(prompt, fn) {
 // quest is in the pool, claimed_by says who holds it. A marked-done chore has
 // no holder (claimed_by is null) and rests until its cooldown ends, then returns
 // to available even if awaiting approval. The client does no date arithmetic;
-// a resting quest shows its available_at as the server sent it.
+// a resting quest shows its available_at as the server sent it. An available
+// quest whose ineligible_member_ids (the server's age check) lists the member
+// is left out of Available and kept in leftOut, so the view can say so; the
+// client never reads a birthday or works out an age. Mine is never filtered:
+// a member keeps a quest they hold whatever its range.
 function partitionQuests(items, memberId) {
-  const out = { available: [], mine: [], claimed: [], resting: [] };
+  const out = { available: [], mine: [], claimed: [], resting: [], leftOut: [] };
   for (const q of items) {
-    if (q.available) out.available.push(q);
+    if (q.available) ((q.ineligible_member_ids || []).includes(memberId) ? out.leftOut : out.available).push(q);
     else if ((q.claimed_by && q.claimed_by === memberId) || (q.participants || []).includes(memberId)) out.mine.push(q);
     else if (q.claimed_by) out.claimed.push(q);
     else out.resting.push(q);
@@ -666,16 +706,32 @@ function partitionQuests(items, memberId) {
   return out;
 }
 
+// questRangeText is the one wording of a quest's age range: 'All ages',
+// 'Ages 10–14', 'Ages 6+' or 'Up to 12'. Every view that names a range calls
+// it; a sentence that needs it lower-cased uses lowerFirst.
+function questRangeText(q) {
+  const min = q.min_age ?? null;
+  const max = q.max_age ?? null;
+  if (min === null && max === null) return 'All ages';
+  if (min !== null && max !== null) return `Ages ${min}–${max}`;
+  if (min !== null) return `Ages ${min}+`;
+  return `Up to ${max}`;
+}
+
+const lowerFirst = (s) => s.charAt(0).toLowerCase() + s.slice(1);
+
 const isAdminPinError = (err) => err instanceof ApiError && err.status === 403 &&
   (err.code === 'wrong_pin' || err.code === 'admin_pin_required');
 
 // questNotice maps an expected quest-action failure to the message shown after
-// the list reloads: a lost accept race (409 quest_taken) or a quest that is
+// the list reloads: a lost accept race (409 quest_taken), a member outside the
+// quest's age range on accept or share (409 age_restricted), or a quest that is
 // gone, outside this household or no longer pending (404).
 function questNotice(err) {
   if (!(err instanceof ApiError)) return null;
   if (err.status === 409 && err.code === 'quest_taken') return 'This quest was already taken.';
   if (err.status === 409 && err.code === 'already_participant') return 'That member is already on this quest.';
+  if (err.status === 409 && err.code === 'age_restricted') return "This quest is outside that member's age range.";
   if (err.status === 404) return 'Quest not found.';
   return null;
 }
@@ -889,6 +945,9 @@ async function takeCard(h, quests, members, rerender, member = activeMember) {
         waitingBadge(q),
         el('button', { class: 'btn btn-sm', text: 'View', onclick: (e) => { e.preventDefault(); showDetail(q); } })),
       'No quests available right now.'),
+    // A quest the server's age check leaves out for this member is named
+    // under Available, so the member knows why it is missing.
+    parts.leftOut.map((q) => el('p', { class: 'text-xs opacity-70', text: `${q.name} (${lowerFirst(questRangeText(q))}) is not listed for ${member.name}.` })),
     $detail,
     section('Mine', parts.mine, (q) => row(q,
       sharedWith(q),
@@ -1033,6 +1092,9 @@ function manageQuestsCard(h, quests, library, page, rerender) {
 
   // teamwork_bonus is sent only while Shareable is ticked; unticked, it is 0,
   // so a hidden bonus is never stored on a quest that cannot be shared.
+  // min_age and max_age are null under 'All ages', and a blank one is null
+  // (no limit on that side), never 0 or ''.
+  const toAge = (v, val) => (v.ages !== 'range' || isBlank(val) ? null : toNum(val));
   const toBody = (v) => ({
     name: v.name,
     points: toNum(v.points),
@@ -1041,14 +1103,22 @@ function manageQuestsCard(h, quests, library, page, rerender) {
     notes: v.notes,
     shareable: !!v.shareable,
     teamwork_bonus: v.shareable ? toNum(v.teamwork_bonus ?? '') : 0,
+    min_age: toAge(v, v.min_age),
+    max_age: toAge(v, v.max_age),
   });
 
+  const hasRange = (q) => (q.min_age ?? null) !== null || (q.max_age ?? null) !== null;
+  const inRange = (v) => v.ages === 'range';
   const questFields = (q = {}) => [
     { name: 'name', label: 'Name', required: true, value: q.name },
     { name: 'points', label: 'Points', type: 'number', value: q.points ?? '' },
     { name: 'repeat_days', label: 'Repeats after (days, back at midnight)', type: 'number', value: q.repeat_days ?? '' },
     { name: 'streak_bonus', label: 'Streak bonus', type: 'number', value: q.streak_bonus ?? 0 },
     { name: 'notes', label: 'Notes', type: 'textarea', value: q.notes ?? '' },
+    { name: 'ages', group: 'Ages', type: 'radio', options: [['all', 'All ages'], ['range', 'Age range']], value: hasRange(q) ? 'range' : 'all' },
+    { name: 'min_age', group: 'Ages', label: 'Minimum age', type: 'number', value: q.min_age ?? '', show: inRange },
+    { name: 'max_age', group: 'Ages', label: 'Maximum age', type: 'number', value: q.max_age ?? '', show: inRange },
+    { name: 'ages_help', group: 'Ages', type: 'note', text: 'Leave one empty for no limit on that side.', show: inRange },
     { name: 'shareable', label: 'Shareable', type: 'checkbox', value: !!q.shareable },
     { name: 'teamwork_bonus', label: 'Teamwork bonus', type: 'number', value: q.teamwork_bonus ?? 0, show: (v) => !!v.shareable },
   ];
@@ -1063,6 +1133,7 @@ function manageQuestsCard(h, quests, library, page, rerender) {
         el('div', { class: 'font-medium', text: q.name }),
         el('div', { class: 'text-xs opacity-60', text: questSummary(q) }),
         el('div', { class: 'text-xs opacity-60', text: `${q.points} points · ${q.repeat_days} day(s)` }),
+        el('div', { class: 'text-xs' }, el('strong', { text: questRangeText(q) })),
         el('div', { class: 'text-xs opacity-60', text: `Shareable ${q.shareable ? 'Yes' : 'No'} · Teamwork bonus ${q.shareable ? q.teamwork_bonus : '-'}` }),
         q.notes ? el('div', { class: 'text-xs opacity-70 mt-1', text: q.notes }) : null),
       unlocked && el('button', {
@@ -1318,6 +1389,62 @@ async function familyTab(h, $root) {
 
   const base = `/households/${h.id}/family-members`;
   const members = (await api('GET', base)).items;
+  // Birthdays come only from the admin-PIN-gated read, here on the Family
+  // tab; no other view asks for them. The age shown is the server's. A
+  // refused admin PIN locks management again (adminRequest forgot it), so
+  // the tab re-renders to its unlock form; any other failure is the birthday
+  // controls' alone and the rest of the tab still renders.
+  let birthdays = {};
+  let birthdaysError = null;
+  try {
+    birthdays = Object.fromEntries(((await adminRequest('GET', `${base}/birthdays`)).items || [])
+      .map((b) => [b.member_id, b]));
+  } catch (err) {
+    if (isAdminPinError(err)) { adminPinState.set = true; rerender(); return; }
+    console.error('birthdays', err);
+    birthdaysError = 'Could not load birthdays. Reload to try again.';
+  }
+
+  // birthdayRow is one member's birthday controls: the date input, the
+  // server's age, Save birthday and (when one is set) Clear. A save or clear
+  // re-renders the row from the reply; a refusal shows its message on the
+  // row and leaves the shown birthday and age as they were.
+  const birthdayRow = (m, b) => {
+    if (birthdaysError) return el('p', { class: 'text-error text-xs w-full', text: birthdaysError });
+    const $err = el('div', { class: 'text-error text-xs w-full' });
+    const $date = el('input', { type: 'date', name: 'birthday', class: 'input input-bordered input-sm', value: b?.birthday ?? '' });
+    const send = async (birthday) => {
+      $err.textContent = '';
+      let res;
+      try {
+        res = await adminRequest('PUT', `${base}/${m.id}/birthday`, { birthday });
+      } catch (err) {
+        if (!(err instanceof ApiError)) throw err;
+        $err.textContent = err.code === 'wrong_pin' ? 'Wrong administrator PIN.' : (err.fields.birthday || err.message);
+        $date.value = b?.birthday ?? '';
+        return;
+      }
+      $row.replaceWith(birthdayRow(m, res));
+    };
+    const $row = el('div', { class: 'flex flex-wrap items-center gap-2 w-full text-sm' },
+      el('span', { text: 'Birthday' }),
+      $date,
+      b?.birthday && b.age !== null && b.age !== undefined && el('span', { text: `(age ${b.age})` }),
+      !b?.birthday && el('small', { class: 'opacity-70', text: `Not set: ${m.name} can do every quest` }),
+      el('button', {
+        class: 'btn btn-ghost btn-xs', text: 'Save birthday',
+        onclick: action(async () => {
+          if ($date.value === '') return;
+          await send($date.value);
+        }, $err),
+      }),
+      b?.birthday && el('button', {
+        class: 'btn btn-ghost btn-xs', text: 'Clear',
+        onclick: confirmClick('Sure?', () => send(null)),
+      }),
+      $err);
+    return $row;
+  };
 
   const rows = members.map((m) => {
     const $row = el('li', { class: 'flex flex-wrap items-center gap-2 py-2 border-b border-base-300' },
@@ -1349,7 +1476,8 @@ async function familyTab(h, $root) {
       el('button', {
         class: 'btn btn-ghost btn-xs text-error', text: 'Remove',
         onclick: confirmClick('Sure?', async () => { await adminRequest('DELETE', `${base}/${m.id}`); rerender(); }),
-      }));
+      }),
+      birthdayRow(m, birthdays[m.id]));
     return $row;
   });
 
@@ -1373,6 +1501,7 @@ async function familyTab(h, $root) {
       rows.length
         ? el('ul', {}, rows)
         : el('p', { class: 'opacity-70', text: 'No family members yet. Add one to get started.' }),
+      rows.length > 0 && el('p', {}, el('small', { class: 'opacity-70', text: 'Birthdays are only shown here, behind your admin PIN.' })),
       el('div', { class: 'divider my-0' }),
       addForm),
     el('div', { class: 'h-4' }),
