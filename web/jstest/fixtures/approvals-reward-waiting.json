@@ -26,7 +26,10 @@
   "approveError422": {
     "error": {
       "code": "insufficient_points",
-      "message": "Can't approve Pizza night for Alex: Alex has 90 points and it costs 150. Nothing was taken."
+      "message": "Can't approve Pizza night for Alex: Alex has 90 points and it costs 150. Nothing was taken.",
+      "fields": {
+        "points": "Can't approve Pizza night for Alex: Alex has 90 points and it costs 150. Nothing was taken."
+      }
     }
   }
 }

@@ -1984,7 +1984,7 @@ test('CLM-18: a 422 answer to reward approve shows message inline and keeps the 
     ],
   }];
   const msg = "Can't approve Pizza night for Alex: Alex has 90 points and it costs 150. Nothing was taken.";
-  srv.extra[`POST ${HP}/reward-redemptions/red-pizza/approve`] = () => [422, { error: { code: 'insufficient_points', message: msg } }];
+  srv.extra[`POST ${HP}/reward-redemptions/red-pizza/approve`] = () => [422, { error: { code: 'insufficient_points', message: msg, fields: { points: msg } } }];
 
   await loadApp();
   await unlockAdmin('9999');
@@ -1996,9 +1996,31 @@ test('CLM-18: a 422 answer to reward approve shows message inline and keeps the 
   await click(buttons(lis()[0], 'Approve')[0]);
 
   assert.match(approvals().textContent, new RegExp(msg));
+  assert.match(approvals().textContent, /Nothing was taken\./);
   assert.equal(lis().length, 1);
   assert.equal(buttons(lis()[0], 'Approve').length, 1);
   assert.equal(buttons(lis()[0], 'Reject').length, 1);
+});
+
+test('CLM-18: a 422 on reward approve shows the reason from fields.points, not a generic message', async () => {
+  srv.adminPinSet = true;
+  srv.pending = () => [200, { items: [] }];
+  srv.pendingRewards = () => [200, {
+    items: [
+      { id: 'red-pizza', household_id: H, member_id: 'm-alex', member_name: 'Alex', reward_id: 'r-pizza', description: 'Pizza night', cost: 150, status: 'pending', requested_at: '2025-01-03T12:00:00Z' },
+    ],
+  }];
+  const msg = "Can't approve Pizza night for Alex: Alex has 90 points and it costs 150. Nothing was taken.";
+  srv.extra[`POST ${HP}/reward-redemptions/red-pizza/approve`] = () => [422, { error: { code: 'validation_failed', message: 'One or more fields are invalid.', fields: { points: msg } } }];
+
+  await loadApp();
+  await unlockAdmin('9999');
+
+  const approvals = () => walk(env.$app).find((n) => n.tagName === 'H3' && n.textContent === 'Approvals').parentNode;
+  await click(buttons(walk(approvals()).filter((n) => n.tagName === 'LI')[0], 'Approve')[0]);
+
+  assert.match(approvals().textContent, /Nothing was taken\./);
+  assert.doesNotMatch(approvals().textContent, /One or more fields are invalid/);
 });
 
 test('CLM-19: a 403 wrong_pin on reward approve/reject invokes wrongAdminPin and keeps the row', async () => {

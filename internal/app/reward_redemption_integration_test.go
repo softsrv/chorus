@@ -5,7 +5,6 @@ package app_test
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -236,15 +235,12 @@ func TestIntegration_RewardRedemption(t *testing.T) {
 			t.Fatalf("AdjustPoints: %v", err)
 		}
 		_, _, err := w.rewards.Approve(w.ctx, w.admin, w.h.ID, red.ID, "")
-		var vErr *app.ValidationError
-		if !errors.As(err, &vErr) {
-			t.Fatalf("short approve: %v, want ValidationError", err)
+		var ipErr *app.InsufficientPointsError
+		if !errors.As(err, &ipErr) {
+			t.Fatalf("short approve: %v, want InsufficientPointsError", err)
 		}
-		msg := vErr.Fields["points"]
-		for _, want := range []string{"Dee", "70", "100", "Movie night"} {
-			if !strings.Contains(msg, want) {
-				t.Errorf("short approve message %q does not name %q", msg, want)
-			}
+		if want := "Can't approve Movie night for Dee: Dee has 70 points and it costs 100. Nothing was taken."; err.Error() != want {
+			t.Errorf("short approve message = %q, want %q", err.Error(), want)
 		}
 		if total, rows, _, _, _ := w.state(dee); total != 70 || rows != 0 {
 			t.Errorf("after short approve: total %d, reward awards %d; want 70, 0", total, rows)

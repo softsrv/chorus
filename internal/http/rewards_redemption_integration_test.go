@@ -36,7 +36,8 @@ type redemptionJSON struct {
 // the short request (422), the member and admin pending lists, approve (the
 // member at the new total), reject, decided requests (404), another
 // household's request (404), and the admin PIN (403 admin_pin_required and
-// wrong_pin, nothing changed).
+// wrong_pin, nothing changed), and approval refused when the member is now
+// short (422 insufficient_points with the reason as message).
 func TestAPI_RewardRedemption(t *testing.T) {
 	s := newTestServer(t)
 	admin := s.signUp("redeemadmin")
@@ -180,6 +181,25 @@ func TestAPI_RewardRedemption(t *testing.T) {
 	s.expect(http.StatusNotFound, "POST", redeem(game.ID), other.AccessToken, samBody, nil)
 	if points() != 20 {
 		t.Errorf("points after outsider attempts = %d, want 20", points())
+	}
+
+	// Short at approval: Sam drops to 10, Game time costs 20. The 422 carries
+	// the reason as its message (and on points); nothing moves and the
+	// request stays pending.
+	s.expectWithHeaders(http.StatusOK, "POST", hp+"/family-members/"+sam.ID.String()+"/points-adjustments",
+		admin.AccessToken, adminPin, map[string]any{"points": -10}, nil)
+	var shortApprove apiError
+	s.expectWithHeaders(http.StatusUnprocessableEntity, "POST", hp+"/reward-redemptions/"+pend.ID.String()+"/approve",
+		admin.AccessToken, adminPin, nil, &shortApprove)
+	const wantMsg = "Can't approve Game time for Sam: Sam has 10 points and it costs 20. Nothing was taken."
+	if shortApprove.Error.Code != "insufficient_points" || shortApprove.Error.Message != wantMsg || shortApprove.Error.Fields["points"] != wantMsg {
+		t.Errorf("short approve = %+v, want insufficient_points with %q", shortApprove, wantMsg)
+	}
+	if err := s.pool.QueryRow(t.Context(), "SELECT status FROM reward_redemptions WHERE id = $1", pend.ID).Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status != "pending" || points() != 10 {
+		t.Errorf("after short approve: status %q points %d, want pending, 10", status, points())
 	}
 }
 

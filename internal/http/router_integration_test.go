@@ -188,8 +188,9 @@ func (s *testServer) signUp(name string) tokens {
 
 type apiError struct {
 	Error struct {
-		Code   string            `json:"code"`
-		Fields map[string]string `json:"fields"`
+		Code    string            `json:"code"`
+		Message string            `json:"message"`
+		Fields  map[string]string `json:"fields"`
 	} `json:"error"`
 }
 

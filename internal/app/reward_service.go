@@ -291,8 +291,8 @@ func (s *RewardService) ListPending(ctx context.Context, userID, householdID uui
 // moves no points and writes no history row. It returns the approved
 // request and the member at the new total.
 //
-// A member whose points are now below the cost is refused with a
-// ValidationError on "points" naming the member, their points and the cost:
+// A member whose points are now below the cost is refused with an
+// InsufficientPointsError naming the member, their points and the cost:
 // nothing changes and the request stays pending, so it can still be
 // rejected. A request that is not pending (approved, rejected or cancelled
 // meanwhile, including by a concurrent approval) or not in this household
@@ -320,10 +320,9 @@ func (s *RewardService) Approve(ctx context.Context, userID, householdID, redemp
 		return db.RewardRedemption{}, db.FamilyMember{}, fmt.Errorf("get family member: %w", err)
 	}
 	if member.Points < red.Cost {
-		return db.RewardRedemption{}, db.FamilyMember{}, &ValidationError{Fields: map[string]string{
-			"points": fmt.Sprintf("Can't approve %s for %s: %s has %d points and it costs %d. Nothing was taken.",
-				red.Description, member.Name, member.Name, member.Points, red.Cost),
-		}}
+		return db.RewardRedemption{}, db.FamilyMember{}, &InsufficientPointsError{
+			Reward: red.Description, Member: member.Name, Points: member.Points, Cost: red.Cost,
+		}
 	}
 	approved, err := notFoundIfNoRows(qtx.ApproveRewardRedemption(ctx, db.ApproveRewardRedemptionParams{HouseholdID: householdID, ID: redemptionID}))
 	if err != nil {

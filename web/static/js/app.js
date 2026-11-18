@@ -1143,7 +1143,8 @@ async function approvalsCard(h, members, rerender) {
     } catch (err) {
       if (isAdminPinError(err)) { wrongAdminPin(); return; }
       if (err instanceof ApiError && err.status === 422) {
-        $err.replaceChildren(alertBox('error', err.message));
+        // The server's reason (e.g. "... Nothing was taken.") is on points.
+        $err.replaceChildren(alertBox('error', err.fields?.points || err.message));
         return;
       }
       throw err;
