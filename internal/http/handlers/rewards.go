@@ -3,7 +3,6 @@ package handlers
 import (
 	"context"
 	"encoding/json"
-	"math"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -217,37 +216,20 @@ func (h *RewardHandler) MemberPendingRedemptions(w http.ResponseWriter, r *http.
 
 // RewardHistory lists one member's approved redemptions, newest approval
 // first. The member's PIN travels in X-Member-PIN, or the admin's in
-// X-Admin-PIN. ?limit= is clamped to 1..100 (default 50) and ?offset= to
-// 0..MaxInt32, as points-history does; a non-integer is a 422.
+// X-Admin-PIN. ?limit= and ?offset= page it by historyPage, the rule
+// points-history uses.
 // GET /api/v1/households/{householdID}/family-members/{memberID}/reward-history
 func (h *RewardHandler) RewardHistory(w http.ResponseWriter, r *http.Request) {
 	hid, mid, ok := parseMemberIDs(w, r)
 	if !ok {
 		return
 	}
-	limit, err := queryInt(r, "limit", defaultPageSize)
+	limit, offset, err := historyPage(r)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
-	offset, err := queryInt(r, "offset", 0)
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	if limit < 1 {
-		limit = 1
-	} else if limit > 100 {
-		limit = 100
-	}
-	// Clamped as a plain int before the int32 conversion, so an oversized
-	// offset reads past the end (an empty page) instead of wrapping.
-	if offset < 0 {
-		offset = 0
-	} else if offset > math.MaxInt32 {
-		offset = math.MaxInt32
-	}
-	rows, err := h.svc.RewardHistory(r.Context(), currentUser(r), hid, mid, r.Header.Get("X-Member-PIN"), r.Header.Get("X-Admin-PIN"), int32(limit), int32(offset))
+	rows, err := h.svc.RewardHistory(r.Context(), currentUser(r), hid, mid, r.Header.Get("X-Member-PIN"), r.Header.Get("X-Admin-PIN"), limit, offset)
 	if err != nil {
 		writeError(w, r, err)
 		return

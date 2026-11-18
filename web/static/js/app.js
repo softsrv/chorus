@@ -1109,18 +1109,25 @@ async function approvalsCard(h, members, rerender) {
   if (!managementUnlocked()) {
     return wrap(el('p', { class: 'text-sm opacity-70', text: 'Enter the admin PIN to review approvals.' }), unlockForm());
   }
-  let pending, pendingRewards;
-  try {
-    const [qRes, rRes] = await Promise.all([
-      adminRequest('GET', `/households/${h.id}/quests/pending`),
-      adminRequest('GET', `/households/${h.id}/reward-redemptions/pending`),
-    ]);
-    pending = qRes.items || [];
-    pendingRewards = rRes.items || [];
-  } catch (err) {
-    if (!isAdminPinError(err)) throw err;
+  // The two lists load independently: a failed reward-requests read is shown
+  // in place of the reward rows and never hides the quest completions.
+  const [qRead, rRead] = await Promise.allSettled([
+    adminRequest('GET', `/households/${h.id}/quests/pending`),
+    adminRequest('GET', `/households/${h.id}/reward-redemptions/pending`),
+  ]);
+  if ([qRead, rRead].some((s) => s.status === 'rejected' && isAdminPinError(s.reason))) {
     wrongAdminPin();
     return wrap();
+  }
+  if (qRead.status === 'rejected') throw qRead.reason;
+  const pending = qRead.value.items || [];
+  let pendingRewards = [];
+  let rewardsError = null;
+  if (rRead.status === 'fulfilled') {
+    pendingRewards = rRead.value.items || [];
+  } else {
+    console.error(rRead.reason);
+    rewardsError = alertBox('error', `Could not load reward requests: ${rRead.reason?.message || rRead.reason}`);
   }
 
   const act = (verb, q) => action(async () => {
@@ -1143,7 +1150,15 @@ async function approvalsCard(h, members, rerender) {
     } catch (err) {
       if (isAdminPinError(err)) { wrongAdminPin(); return; }
       if (err instanceof ApiError && err.status === 422) {
-        $err.replaceChildren(alertBox('error', err.message));
+        // The server's reason (e.g. "... Nothing was taken.") is on points.
+        $err.replaceChildren(alertBox('error', err.fields?.points || err.message));
+        return;
+      }
+      // Already decided (here or in another session), cancelled when the
+      // member left, or gone: reload the list so the stale row leaves, and
+      // say why, as the quest path does.
+      if (err instanceof ApiError && err.status === 404) {
+        rerender('That reward request is no longer waiting for approval.');
         return;
       }
       throw err;
@@ -1183,16 +1198,16 @@ async function approvalsCard(h, members, rerender) {
     el('button', { class: 'btn btn-ghost btn-xs', text: 'Reject', onclick: actReward('reject', r) })));
 
   const hasItems = rows.length > 0 || rewardRows.length > 0;
-  if (!hasItems) {
+  if (!hasItems && !rewardsError) {
     return wrap(el('p', { class: 'text-sm opacity-70', text: 'Nothing waiting for approval.' }));
   }
 
   const sections = [];
   if (rows.length > 0) sections.push(el('ul', {}, rows));
-  if (rewardRows.length > 0) {
+  if (rewardRows.length > 0 || rewardsError) {
     sections.push(el('div', { class: 'space-y-1' },
       el('h4', { class: 'font-semibold text-sm opacity-80 mt-2', text: 'Reward requests' }),
-      el('ul', {}, rewardRows)));
+      rewardsError || el('ul', {}, rewardRows)));
   }
 
   return wrap(...sections);
@@ -1424,7 +1439,9 @@ async function rewardsTab(h, $root, notice = null) {
       headers: { 'X-Member-PIN': activeMember.pin ?? '' },
     }).catch((err) => {
       if (memberActionFailed(err)) return null;
-      return { items: [] };
+      // Unknown pending state: say so, and offer no Redeem (one may be waiting).
+      console.error(err);
+      return { failed: err };
     }) : Promise.resolve({ items: [] }),
   ]);
   if (isMember && !activeMember) return;
@@ -1432,6 +1449,7 @@ async function rewardsTab(h, $root, notice = null) {
   const memberList = membersRes?.items || membersRes || [];
   const currentMember = isMember ? (memberList.find((m) => m.id === activeMember.id) || activeMember) : null;
   const memberPoints = currentMember ? (currentMember.points ?? 0) : 0;
+  const pendingUnknown = Boolean(pendingRes?.failed);
   const pendingItems = pendingRes?.items || [];
   const pendingRewardIds = new Set(pendingItems.map((p) => p.reward_id));
 
@@ -1444,6 +1462,9 @@ async function rewardsTab(h, $root, notice = null) {
 
   const $notice = el('div');
   if (notice) $notice.replaceChildren(alertBox('info', notice));
+  const $pendingErr = pendingUnknown
+    ? alertBox('error', `Could not load your waiting requests, so Redeem is off for now: ${pendingRes.failed?.message || pendingRes.failed}`)
+    : null;
 
   const rows = rewards.map((r) => {
     const $rowErr = el('div');
@@ -1456,12 +1477,15 @@ async function rewardsTab(h, $root, notice = null) {
         return;
       }
       const enough = memberPoints >= r.cost;
-      if (enough) {
-        $actionArea.append(el('button', {
+      if (pendingUnknown) {
+        $actionArea.append(el('button', { class: 'btn btn-sm', disabled: true, text: 'Redeem' }));
+      } else if (enough) {
+        const $btn = el('button', {
           class: 'btn btn-sm btn-primary',
           text: 'Redeem',
           onclick: async () => {
             $rowErr.replaceChildren();
+            $btn.disabled = true;
             try {
               const body = activeMemberAction();
               await api('POST', `${base}/${r.id}/redeem`, body);
@@ -1469,16 +1493,24 @@ async function rewardsTab(h, $root, notice = null) {
               renderActionArea();
               $notice.replaceChildren(alertBox('info', `${r.description} requested — waiting for approval. Your points stay at ${memberPoints} until then.`));
             } catch (err) {
+              $btn.disabled = false;
               if (memberActionFailed(err)) return;
               if (err instanceof ApiError && err.status === 422) {
                 const msg = err.fields?.points || err.message;
                 $rowErr.replaceChildren(el('div', { class: 'text-error text-xs mt-1', text: msg }));
                 return;
               }
-              throw err;
+              // Gone (deleted by the admin): reload the list and say why.
+              if (err instanceof ApiError && err.status === 404) {
+                rerender(`${r.description} is no longer available.`);
+                return;
+              }
+              console.error(err);
+              $rowErr.replaceChildren(el('div', { class: 'text-error text-xs mt-1', text: `Could not request ${r.description}: ${err.message || err}` }));
             }
           },
-        }));
+        });
+        $actionArea.append($btn);
       } else {
         $actionArea.append(
           el('button', { class: 'btn btn-sm', disabled: true, text: 'Redeem' }),
@@ -1549,6 +1581,7 @@ async function rewardsTab(h, $root, notice = null) {
   $root.replaceChildren(card(null,
     el('h3', { class: 'font-semibold', text: 'Rewards' }),
     $notice,
+    $pendingErr,
     rows.length
       ? el('ul', {}, rows)
       : el('p', { class: 'opacity-70 py-2', text: 'No rewards yet. Add one below or browse the library for ideas.' }),

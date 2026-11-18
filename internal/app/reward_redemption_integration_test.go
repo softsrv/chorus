@@ -5,7 +5,6 @@ package app_test
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -41,6 +40,14 @@ func newRedeemWorld(t *testing.T, prefix string) *redeemWorld {
 	if err != nil {
 		t.Fatalf("Create household: %v", err)
 	}
+	// Deleting the household cascades to its members, their points awards
+	// and their reward requests. A 'reward' points award left behind would
+	// make 000020's down refuse, so a rerun's migrate roundtrip would fail.
+	t.Cleanup(func() {
+		if _, err := pool.Exec(context.Background(), "DELETE FROM households WHERE id = $1", h.ID); err != nil {
+			t.Errorf("delete household %s: %v", h.ID, err)
+		}
+	})
 	return &redeemWorld{t: t, ctx: ctx, pool: pool, family: app.NewFamilyService(q, pool, 10),
 		rewards: app.NewRewardService(q, pool), admin: admin, h: h}
 }
@@ -228,6 +235,48 @@ func TestIntegration_RewardRedemption(t *testing.T) {
 		}
 	})
 
+	t.Run("a repeat request racing a reject never answers not found", func(t *testing.T) {
+		fay := w.member("Fay", 500)
+		movie := w.reward("Movie night", 100)
+		for round := range 20 {
+			red, _, err := w.rewards.RequestRedemption(w.ctx, w.admin, w.h.ID, movie.ID, app.MemberAction{MemberID: fay.ID, PIN: "1234"})
+			if err != nil {
+				t.Fatalf("round %d: first request: %v", round, err)
+			}
+			var reqErr, rejErr error
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				_, _, reqErr = w.rewards.RequestRedemption(w.ctx, w.admin, w.h.ID, movie.ID, app.MemberAction{MemberID: fay.ID, PIN: "1234"})
+			}()
+			go func() { defer wg.Done(); _, rejErr = w.rewards.Reject(w.ctx, w.admin, w.h.ID, red.ID, "") }()
+			wg.Wait()
+			if reqErr != nil {
+				t.Errorf("round %d: repeat request racing a reject: %v, want the existing or a fresh request", round, reqErr)
+			}
+			if rejErr != nil {
+				t.Errorf("round %d: reject: %v", round, rejErr)
+			}
+			var pending int
+			if err := w.pool.QueryRow(w.ctx, `SELECT count(*) FROM reward_redemptions
+				WHERE household_id = $1 AND member_id = $2 AND reward_id = $3 AND status = 'pending'`, w.h.ID, fay.ID, movie.ID).Scan(&pending); err != nil {
+				t.Fatalf("count pending: %v", err)
+			}
+			if pending > 1 {
+				t.Errorf("round %d: %d pending requests for one reward, want at most 1", round, pending)
+			}
+			// Clear any fresh request so the next round starts from one.
+			if _, err := w.pool.Exec(w.ctx, `UPDATE reward_redemptions SET status = 'rejected', decided_at = NOW()
+				WHERE household_id = $1 AND member_id = $2 AND status = 'pending'`, w.h.ID, fay.ID); err != nil {
+				t.Fatalf("clear pending: %v", err)
+			}
+		}
+		if total, rows, _, _, _ := w.state(fay); total != 500 || rows != 0 {
+			t.Errorf("after the races: total %d, reward awards %d; want 500, 0", total, rows)
+		}
+	})
+
 	t.Run("approval refused when the member is now short; reject still works", func(t *testing.T) {
 		dee := w.member("Dee", 120)
 		movie := w.reward("Movie night", 100)
@@ -236,15 +285,12 @@ func TestIntegration_RewardRedemption(t *testing.T) {
 			t.Fatalf("AdjustPoints: %v", err)
 		}
 		_, _, err := w.rewards.Approve(w.ctx, w.admin, w.h.ID, red.ID, "")
-		var vErr *app.ValidationError
-		if !errors.As(err, &vErr) {
-			t.Fatalf("short approve: %v, want ValidationError", err)
+		var ipErr *app.InsufficientPointsError
+		if !errors.As(err, &ipErr) {
+			t.Fatalf("short approve: %v, want InsufficientPointsError", err)
 		}
-		msg := vErr.Fields["points"]
-		for _, want := range []string{"Dee", "70", "100", "Movie night"} {
-			if !strings.Contains(msg, want) {
-				t.Errorf("short approve message %q does not name %q", msg, want)
-			}
+		if want := "Can't approve Movie night for Dee: Dee has 70 points and it costs 100. Nothing was taken."; err.Error() != want {
+			t.Errorf("short approve message = %q, want %q", err.Error(), want)
 		}
 		if total, rows, _, _, _ := w.state(dee); total != 70 || rows != 0 {
 			t.Errorf("after short approve: total %d, reward awards %d; want 70, 0", total, rows)

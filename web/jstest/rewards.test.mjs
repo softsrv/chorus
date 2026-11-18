@@ -140,6 +140,9 @@ async function becomeSam(pin = '1234') {
 async function becomeAnn() {
   await click(buttons(env.$app, 'Switch member')[0]);
   await click(buttonStarting(env.$app, 'Ann'));
+  // Ann has no PIN: picking her enters her member view at once.
+  assert.match(text(), /Viewing as: Ann/, 'member view entered');
+  assert.equal(buttons(env.$app, 'Administrator view').length, 1, 'member view offers the way back');
 }
 
 test('CLM-1: rewards list description and cost; add POSTs {description, cost}; Edit PUTs; Delete on the second click', async () => {
@@ -372,13 +375,59 @@ test('CLM-16: a 422 answer shows inline message and keeps Redeem button; wrong_p
   await click(buttons(rowOf('Movie night'), 'Redeem')[0]);
   assert.match(rowOf('Movie night').textContent, /Not enough points/);
   assert.equal(buttons(rowOf('Movie night'), 'Redeem').length, 1);
+  assert.equal(buttons(rowOf('Movie night'), 'Redeem')[0].disabled, false, 'Redeem stays enabled after a 422');
   assert.doesNotMatch(rowOf('Movie night').textContent, /Pending approval/);
+  assert.match(text(), /Viewing as: Sam/);
 
-  // wrong_pin answers
+  // wrong_pin answers: memberActionFailed drops the member back to the
+  // administrator's view and says the PIN is no longer correct.
   srv.extra[`POST ${HP}/rewards/r-movie/redeem`] = () => err(403, 'wrong_pin', 'Wrong PIN.');
   await click(buttons(rowOf('Movie night'), 'Redeem')[0]);
   assert.equal(signedOut, 0);
-  assert.ok(buttonStarting(env.$app, 'Switch member') || buttonStarting(env.$app, 'Administrator view'));
+  assert.match(text(), /Viewing as: Administrator/, 'member cleared back to the administrator view');
+  assert.equal(buttons(env.$app, 'Administrator view').length, 0);
+  assert.match(document.body.textContent, /That PIN is no longer correct\. Pick the member again\./);
+  assert.doesNotMatch(text(), /Pending approval/);
+});
+
+test('1.1/2: a failing member pending read shows an inline error and offers no enabled Redeem', async () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/rewards-member-enough.json', import.meta.url), 'utf8'));
+  for (const [status, code] of [[500, 'internal'], [429, 'rate_limited']]) {
+    srv.members = fixture.members;
+    srv.rewards = fixture.rewards;
+    srv.memberPendingRewards = () => err(status, code, 'Server trouble.');
+    await loadApp();
+    await becomeSam();
+    await openRewards();
+    assert.match(text(), /Viewing as: Sam/);
+    assert.match(text(), /Could not load your waiting requests/, `inline error on ${status}`);
+    const redeem = buttons(env.$app, 'Redeem');
+    assert.equal(redeem.length, fixture.rewards.length);
+    assert.ok(redeem.every((b) => b.disabled), `no enabled Redeem on ${status}`);
+  }
+});
+
+test('1.1/2: a Redeem answered 404 reloads with a notice; 500 shows an inline row error and keeps Redeem', async () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/rewards-member-enough.json', import.meta.url), 'utf8'));
+  srv.members = fixture.members;
+  srv.rewards = fixture.rewards;
+  srv.extra[`POST ${HP}/rewards/r-movie/redeem`] = () => [500, { error: { code: 'internal', message: 'Server trouble.' } }];
+  await loadApp();
+  await becomeSam();
+  await openRewards();
+
+  await click(buttons(rowOf('Movie night'), 'Redeem')[0]);
+  assert.match(rowOf('Movie night').textContent, /Could not request Movie night: Server trouble\./);
+  assert.equal(buttons(rowOf('Movie night'), 'Redeem')[0].disabled, false);
+  assert.doesNotMatch(rowOf('Movie night').textContent, /Pending approval/);
+
+  srv.extra[`POST ${HP}/rewards/r-movie/redeem`] = () => {
+    srv.rewards = srv.rewards.filter((r) => r.id !== 'r-movie');
+    return err(404, 'not_found', 'Not found.');
+  };
+  await click(buttons(rowOf('Movie night'), 'Redeem')[0]);
+  assert.match(text(), /Movie night is no longer available\./);
+  assert.equal(rowOf('Movie night'), undefined, 'deleted reward left the list');
 });
 
 test('CLM-21: empty list in member view shows empty state text and zero Redeem buttons', async () => {
@@ -387,6 +436,7 @@ test('CLM-21: empty list in member view shows empty state text and zero Redeem b
   await loadApp();
   await becomeAnn();
   await openRewards();
+  assert.match(text(), /Viewing as: Ann/, 'still in the member view on Rewards');
   assert.ok(text().includes(EMPTY));
   assert.equal(buttons(env.$app, 'Redeem').length, 0);
 });
@@ -400,6 +450,52 @@ function rewardsSource(src) {
   return src.slice(start, end);
 }
 
+// The rewards section's write surface. Redeem is the one member write; every
+// other word for spending is still refused, and any request path under a
+// single reward other than edit/delete, from-library and redeem is a finding.
+const SPEND = /spend|\bbuy\b|claim|purchase/i;
+const REWARD_PATHS = /`\$\{base\}\/[^`]*`/g;
+const ALLOWED_PATHS = new Set(['`${base}/${r.id}`', '`${base}/from-library`', '`${base}/${r.id}/redeem`']);
+
+function spendFindings(section) {
+  const out = [];
+  if (SPEND.test(section)) out.push('spend wording');
+  for (const m of section.match(REWARD_PATHS) || []) if (!ALLOWED_PATHS.has(m)) out.push(m);
+  return out;
+}
+
+test('CLM-5: the rewards UI writes only create, edit, delete, from-library and the member-view redeem', () => {
+  const section = rewardsSource(APP_SRC);
+  assert.deepEqual(spendFindings(section), []);
+  // The admin writes are exactly reward management as it was.
+  const writes = section.match(/adminRequest\('(POST|PUT|DELETE)', [^,)]+/g) || [];
+  assert.deepEqual(writes.sort(), [
+    "adminRequest('DELETE', `${base}/${r.id}`",
+    "adminRequest('POST', `${base}/from-library`",
+    "adminRequest('POST', base",
+    "adminRequest('PUT', `${base}/${r.id}`",
+  ]);
+  // The plain api() writes are the admin-PIN verify and the member's redeem.
+  assert.deepEqual((section.match(/\bapi\('(POST|PUT|DELETE)', [^,)]+/g) || []).sort(), [
+    "api('POST', `${base}/${r.id}/redeem`",
+    "api('POST', `/households/${h.id}/admin-pin/verify`",
+  ]);
+  // Redeem is posted only from renderActionArea, which runs only in member view.
+  const areaStart = section.indexOf('const renderActionArea = ');
+  const areaEnd = section.indexOf('\n    };', areaStart);
+  assert.ok(areaStart >= 0 && areaEnd > areaStart, 'renderActionArea not found');
+  const redeemAt = section.indexOf("api('POST', `${base}/${r.id}/redeem`");
+  assert.ok(redeemAt > areaStart && redeemAt < areaEnd, 'redeem POST lives in renderActionArea');
+  const outside = section.slice(0, areaStart) + section.slice(areaEnd);
+  assert.deepEqual(outside.match(/renderActionArea\(\)/g), ['renderActionArea()'], 'called once outside itself');
+  assert.match(outside, /if \(isMember\) \{\s*renderActionArea\(\);/, 'that one call is gated on member view');
+  // The check fails on a planted spend word, route or admin write.
+  assert.notDeepEqual(spendFindings(section.replace("text: 'Edit'", "text: 'Buy'")), []);
+  assert.notDeepEqual(spendFindings(`${section}adminRequest('POST', \`\${base}/\${r.id}/use\`)`), []);
+  const planted = `${section}adminRequest('POST', \`\${base}/\${r.id}/redeem\`)`;
+  assert.notDeepEqual((planted.match(/adminRequest\('(POST|PUT|DELETE)', [^,)]+/g) || []).length, writes.length);
+});
+
 const HTML_SINKS = /innerHTML|insertAdjacentHTML|outerHTML|style:|style=|<script/i;
 
 test('CLM-7: the rewards UI inserts text only — no innerHTML, inline style or script', () => {
@@ -411,7 +507,7 @@ test('CLM-7: the rewards UI inserts text only — no innerHTML, inline style or 
 
 function rewardHistorySource(src) {
   const fnStart = src.indexOf('function rewardHistoryTable(');
-  if (fnStart < 0) return null;
+  assert.ok(fnStart >= 0, 'rewardHistoryTable not found in app.js');
   // Read until next function or section divider
   const fnEnd = src.indexOf('\nfunction ', fnStart + 1);
   const end = fnEnd >= 0 ? fnEnd : src.length;
@@ -420,13 +516,8 @@ function rewardHistorySource(src) {
 
 test('CLM-11: reward history inserts text only — no innerHTML, inline style or script', () => {
   const section = rewardHistorySource(APP_SRC);
-  if (section === null) {
-    // Another unit is adding rewardHistoryTable; verify extractor fails if present with sinks
-    const dummy = "function rewardHistoryTable() { return el('p', { text: 'No rewards redeemed yet' }); }";
-    assert.equal(HTML_SINKS.exec(dummy), null);
-    assert.ok(HTML_SINKS.test(dummy.replace("text: 'No rewards redeemed yet'", "innerHTML: 'sink'")), 'check fails on planted innerHTML');
-    return;
-  }
+  assert.match(section, /No rewards redeemed yet/, 'read the real rewardHistoryTable body');
+  assert.throws(() => rewardHistorySource('function other() {}'), /rewardHistoryTable not found/, 'a missing function fails the check');
   assert.equal(HTML_SINKS.exec(section), null);
   assert.ok(HTML_SINKS.test(`${section}el('div', { innerHTML: 'danger' })`), 'check fails on a planted sink');
 });
