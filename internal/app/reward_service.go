@@ -7,7 +7,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/softsrv/chorus/internal/db"
 )
@@ -28,12 +27,12 @@ type RewardInput struct {
 // request's cost snapshot.
 type RewardService struct {
 	q    *db.Queries
-	pool *pgxpool.Pool
+	pool pgxBeginner
 }
 
 // NewRewardService constructs a RewardService. pool runs the approval and
 // rejection transactions.
-func NewRewardService(q *db.Queries, pool *pgxpool.Pool) *RewardService {
+func NewRewardService(q *db.Queries, pool pgxBeginner) *RewardService {
 	return &RewardService{q: q, pool: pool}
 }
 
