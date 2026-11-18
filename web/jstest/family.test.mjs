@@ -67,7 +67,7 @@ const unlock = async (pin) => {
   await submit($pin.parentNode.parentNode);
 };
 const historyCalls = (id) => calls.filter((c) => c.method === 'GET' && c.path === `${HP}/family-members/${id}/points-history`);
-const h3s = () => walk(env.$app).filter((n) => n.tagName === 'H3').map((n) => n.textContent);
+const h3s = () => walk(env.$app).filter((n) => n.tagName === 'H3' && !['New household', 'Admin PIN'].includes(n.textContent)).map((n) => n.textContent);
 
 test('admin points history CLM-1: History opens the member view with heading, Back, and the history table in API order', async () => {
   await loadApp();
@@ -76,7 +76,8 @@ test('admin points history CLM-1: History opens the member view with heading, Ba
 
   await click(buttons(env.$app, 'History')[0]);
   assert.deepEqual(h3s(), ['Maya — 42 points']);
-  assert.equal(walk(env.$app).filter((n) => n.tagName === 'LI').length, 0, 'family list replaced');
+  assert.equal(buttons(env.$app, 'History').length, 0, 'family list replaced');
+  assert.equal(buttons(env.$app, 'Rename').length, 0, 'family list replaced');
   assert.equal(buttons(env.$app, 'Add member').length, 0, 'family list replaced');
   const back = buttons(env.$app, 'Back to family');
   assert.equal(back.length, 1);
@@ -84,7 +85,7 @@ test('admin points history CLM-1: History opens the member view with heading, Ba
   const historyNode = sectionNode(env.$app, 'Points history');
   assert.ok(historyNode, 'Points history section exists');
   // Heading, then Back, then the history, in that order.
-  const order = walk(env.$app).filter((n) => n.tagName === 'H3' || n.tagName === 'H4' || n === back[0]);
+  const order = walk(env.$app).filter((n) => (n.tagName === 'H3' && n.textContent.includes('points')) || n.tagName === 'H4' || n === back[0]);
   assert.deepEqual(order.map((n) => n.tagName), ['H3', 'BUTTON', 'H4']);
 
   const ths = walk(historyNode).filter((n) => n.tagName === 'TH').map((n) => n.textContent);
@@ -112,10 +113,12 @@ test('admin points history CLM-1: a history answer that arrives after Back is no
     if (url.endsWith('/points-history')) await new Promise((r) => { release = r; });
     return realFetch(url, init);
   };
-  await click(buttons(env.$app, 'History')[0]);
+  const opening = click(buttons(env.$app, 'History')[0]);
+  await settle();
   assert.match(sectionNode(env.$app, 'Points history').textContent, /Loading points history/);
   await click(buttons(env.$app, 'Back to family')[0]);
   release();
+  await opening;
   await settle();
   globalThis.fetch = realFetch;
   assert.deepEqual(h3s(), ['Family']);
