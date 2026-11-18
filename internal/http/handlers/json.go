@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"mime"
 	"net/http"
 	"strconv"
@@ -161,6 +162,26 @@ func queryInt(r *http.Request, name string, def int) (int, error) {
 		return 0, &app.ValidationError{Fields: map[string]string{name: "must be an integer"}}
 	}
 	return n, nil
+}
+
+// historyPage is the one paging rule of the history reads (points history,
+// reward history): ?limit= defaults to defaultPageSize and is clamped to
+// 1..100; ?offset= defaults to 0 and is clamped to 0..MaxInt32. Both are
+// clamped as plain ints before the int32 conversion, so an oversized offset
+// reads past the end (an empty page) instead of wrapping into another page.
+// A non-integer is a ValidationError (422).
+func historyPage(r *http.Request) (limit, offset int32, err error) {
+	l, err := queryInt(r, "limit", defaultPageSize)
+	if err != nil {
+		return 0, 0, err
+	}
+	o, err := queryInt(r, "offset", 0)
+	if err != nil {
+		return 0, 0, err
+	}
+	l = min(max(l, 1), 100)
+	o = min(max(o, 0), math.MaxInt32)
+	return int32(l), int32(o), nil
 }
 
 // queryTime parses a required RFC 3339 query parameter.

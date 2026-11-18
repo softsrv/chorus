@@ -40,6 +40,14 @@ func newRedeemWorld(t *testing.T, prefix string) *redeemWorld {
 	if err != nil {
 		t.Fatalf("Create household: %v", err)
 	}
+	// Deleting the household cascades to its members, their points awards
+	// and their reward requests. A 'reward' points award left behind would
+	// make 000020's down refuse, so a rerun's migrate roundtrip would fail.
+	t.Cleanup(func() {
+		if _, err := pool.Exec(context.Background(), "DELETE FROM households WHERE id = $1", h.ID); err != nil {
+			t.Errorf("delete household %s: %v", h.ID, err)
+		}
+	})
 	return &redeemWorld{t: t, ctx: ctx, pool: pool, family: app.NewFamilyService(q, pool, 10),
 		rewards: app.NewRewardService(q, pool), admin: admin, h: h}
 }
@@ -224,6 +232,48 @@ func TestIntegration_RewardRedemption(t *testing.T) {
 		}
 		if total, rows, sum, _, _ := w.state(cara); total != 20 || rows != 1 || sum != -100 {
 			t.Errorf("after concurrent approvals: total %d, reward awards %d sum %d; want 20, 1, -100", total, rows, sum)
+		}
+	})
+
+	t.Run("a repeat request racing a reject never answers not found", func(t *testing.T) {
+		fay := w.member("Fay", 500)
+		movie := w.reward("Movie night", 100)
+		for round := range 20 {
+			red, _, err := w.rewards.RequestRedemption(w.ctx, w.admin, w.h.ID, movie.ID, app.MemberAction{MemberID: fay.ID, PIN: "1234"})
+			if err != nil {
+				t.Fatalf("round %d: first request: %v", round, err)
+			}
+			var reqErr, rejErr error
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				_, _, reqErr = w.rewards.RequestRedemption(w.ctx, w.admin, w.h.ID, movie.ID, app.MemberAction{MemberID: fay.ID, PIN: "1234"})
+			}()
+			go func() { defer wg.Done(); _, rejErr = w.rewards.Reject(w.ctx, w.admin, w.h.ID, red.ID, "") }()
+			wg.Wait()
+			if reqErr != nil {
+				t.Errorf("round %d: repeat request racing a reject: %v, want the existing or a fresh request", round, reqErr)
+			}
+			if rejErr != nil {
+				t.Errorf("round %d: reject: %v", round, rejErr)
+			}
+			var pending int
+			if err := w.pool.QueryRow(w.ctx, `SELECT count(*) FROM reward_redemptions
+				WHERE household_id = $1 AND member_id = $2 AND reward_id = $3 AND status = 'pending'`, w.h.ID, fay.ID, movie.ID).Scan(&pending); err != nil {
+				t.Fatalf("count pending: %v", err)
+			}
+			if pending > 1 {
+				t.Errorf("round %d: %d pending requests for one reward, want at most 1", round, pending)
+			}
+			// Clear any fresh request so the next round starts from one.
+			if _, err := w.pool.Exec(w.ctx, `UPDATE reward_redemptions SET status = 'rejected', decided_at = NOW()
+				WHERE household_id = $1 AND member_id = $2 AND status = 'pending'`, w.h.ID, fay.ID); err != nil {
+				t.Fatalf("clear pending: %v", err)
+			}
+		}
+		if total, rows, _, _, _ := w.state(fay); total != 500 || rows != 0 {
+			t.Errorf("after the races: total %d, reward awards %d; want 500, 0", total, rows)
 		}
 	})
 

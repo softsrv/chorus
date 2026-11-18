@@ -31,6 +31,18 @@ type redemptionJSON struct {
 	MemberName  string     `json:"member_name"`
 }
 
+// deleteHouseholdAfter deletes the household when the test ends; the delete
+// cascades to its members, points awards and reward requests. A 'reward'
+// points award left behind would make 000020's down refuse, so a rerun of
+// make test-integration would fail in its migrate roundtrip.
+func (s *testServer) deleteHouseholdAfter(id uuid.UUID) {
+	s.t.Cleanup(func() {
+		if _, err := s.pool.Exec(context.Background(), "DELETE FROM households WHERE id = $1", id); err != nil {
+			s.t.Errorf("delete household %s: %v", id, err)
+		}
+	})
+}
+
 // TestAPI_RewardRedemption drives redemption through the router against
 // Postgres: redeem (201, points untouched, a repeat answers the same request),
 // the short request (422), the member and admin pending lists, approve (the
@@ -44,6 +56,7 @@ func TestAPI_RewardRedemption(t *testing.T) {
 	var h struct{ ID uuid.UUID }
 	s.expect(http.StatusCreated, "POST", "/api/v1/households", admin.AccessToken,
 		map[string]string{"name": "Redeem Home", "timezone": "UTC"}, &h)
+	s.deleteHouseholdAfter(h.ID)
 	hp := "/api/v1/households/" + h.ID.String()
 
 	type memberJSON struct {
@@ -214,6 +227,7 @@ func TestAPI_RewardHistory(t *testing.T) {
 	var h struct{ ID uuid.UUID }
 	s.expect(http.StatusCreated, "POST", "/api/v1/households", admin.AccessToken,
 		map[string]string{"name": "History Home", "timezone": "UTC"}, &h)
+	s.deleteHouseholdAfter(h.ID)
 	hp := "/api/v1/households/" + h.ID.String()
 
 	var sam struct{ ID uuid.UUID }
@@ -422,6 +436,7 @@ func TestAPI_RewardHistoryHasItsOwnPINBudget(t *testing.T) {
 	var h struct{ ID uuid.UUID }
 	ts.expect(http.StatusCreated, "POST", "/api/v1/households", u.AccessToken,
 		map[string]string{"name": "Reward History RL Home", "timezone": "UTC"}, &h)
+	ts.deleteHouseholdAfter(h.ID)
 	hp := "/api/v1/households/" + h.ID.String()
 
 	var m struct{ ID uuid.UUID }

@@ -171,26 +171,45 @@ func validateReward(in RewardInput) (validReward, error) {
 // nothing is written. A reward not in the household (or a member not in it)
 // is ErrNotFound. When the member already has this reward pending, that
 // request is returned and created is false: no second row is written.
+//
+// The insert and the read of the existing request are two statements, so
+// the admin may decide that request between them. Its slot is then free and
+// the whole request runs once more, re-reading the member's points (an
+// approval lowered them) and inserting a fresh pending request. A second
+// miss is an error, never ErrNotFound.
 func (s *RewardService) RequestRedemption(ctx context.Context, userID, householdID, rewardID uuid.UUID, act MemberAction) (redemption db.RewardRedemption, created bool, err error) {
 	if _, err := getHousehold(ctx, s.q, userID, householdID); err != nil {
 		return db.RewardRedemption{}, false, err
 	}
+	for range 2 {
+		row, created, decided, err := s.requestOnce(ctx, householdID, rewardID, act)
+		if err != nil || !decided {
+			return row, created, err
+		}
+	}
+	return db.RewardRedemption{}, false, fmt.Errorf("request redemption: the pending request for this reward was decided twice while asking")
+}
+
+// requestOnce is one attempt of RequestRedemption. decided reports that the
+// insert met a pending request which was decided before it could be read:
+// nothing was written and the caller may try once more.
+func (s *RewardService) requestOnce(ctx context.Context, householdID, rewardID uuid.UUID, act MemberAction) (redemption db.RewardRedemption, created, decided bool, err error) {
 	member, err := VerifyMemberPin(ctx, s.q, householdID, act.MemberID, act.PIN)
 	if err != nil {
-		return db.RewardRedemption{}, false, err
+		return db.RewardRedemption{}, false, false, err
 	}
 	reward, err := notFoundIfNoRows(s.q.GetHouseholdReward(ctx, db.GetHouseholdRewardParams{HouseholdID: householdID, ID: rewardID}))
 	if err != nil {
-		return db.RewardRedemption{}, false, err
+		return db.RewardRedemption{}, false, false, err
 	}
 	if member.Points < reward.Cost {
-		return db.RewardRedemption{}, false, &ValidationError{Fields: map[string]string{
+		return db.RewardRedemption{}, false, false, &ValidationError{Fields: map[string]string{
 			"points": fmt.Sprintf("%s has %d points — %s costs %d.", member.Name, member.Points, reward.Description, reward.Cost),
 		}}
 	}
 	id, err := uuid.NewV7()
 	if err != nil {
-		return db.RewardRedemption{}, false, fmt.Errorf("generate redemption id: %w", err)
+		return db.RewardRedemption{}, false, false, fmt.Errorf("generate redemption id: %w", err)
 	}
 	row, err := s.q.CreateRewardRedemption(ctx, db.CreateRewardRedemptionParams{
 		ID:          id,
@@ -202,22 +221,26 @@ func (s *RewardService) RequestRedemption(ctx context.Context, userID, household
 	})
 	switch {
 	case err == nil:
-		return row, true, nil
+		return row, true, false, nil
 	case isForeignKeyViolation(err):
 		// The member or the reward was removed since it was read.
-		return db.RewardRedemption{}, false, ErrNotFound
+		return db.RewardRedemption{}, false, false, ErrNotFound
 	case !errors.Is(err, pgx.ErrNoRows):
-		return db.RewardRedemption{}, false, fmt.Errorf("create redemption: %w", err)
+		return db.RewardRedemption{}, false, false, fmt.Errorf("create redemption: %w", err)
 	}
 	// ON CONFLICT DO NOTHING: the member already has this reward pending.
-	existing, err := notFoundIfNoRows(s.q.GetMemberPendingRedemptionForReward(ctx, db.GetMemberPendingRedemptionForRewardParams{
+	existing, err := s.q.GetMemberPendingRedemptionForReward(ctx, db.GetMemberPendingRedemptionForRewardParams{
 		HouseholdID: householdID, MemberID: member.ID, RewardID: &reward.ID,
-	}))
-	if err != nil {
-		// Decided between the insert and this read: the caller may ask again.
-		return db.RewardRedemption{}, false, err
+	})
+	switch {
+	case err == nil:
+		return existing, false, false, nil
+	case errors.Is(err, pgx.ErrNoRows):
+		// Decided between the insert and this read: the slot is free again.
+		return db.RewardRedemption{}, false, true, nil
+	default:
+		return db.RewardRedemption{}, false, false, fmt.Errorf("read pending redemption: %w", err)
 	}
-	return existing, false, nil
 }
 
 // ListMemberPending returns the member's requests waiting for approval,
