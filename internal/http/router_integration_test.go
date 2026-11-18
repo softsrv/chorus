@@ -1622,6 +1622,35 @@ func TestAPI_FamilyMembersAndAdminPin(t *testing.T) {
 	// Session token still works afterwards
 	s.expect(http.StatusOK, "GET", "/api/v1/me", u.AccessToken, nil, nil)
 
+	// Points history: with no admin PIN set, the household admin reads the
+	// PIN'd member's history with no PIN header at all; the member PIN still
+	// reads it too.
+	awardID := uuid.New()
+	if _, err := db.New(s.pool).InsertPointsAward(context.Background(), db.InsertPointsAwardParams{
+		ID: awardID, HouseholdID: h.ID, MemberID: m2.ID, Kind: "quest", Reason: "Feed the cat", Points: 5,
+		EarnedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	}); err != nil {
+		t.Fatalf("insert points award: %v", err)
+	}
+	m2HistPath := "/api/v1/households/" + h.ID.String() + "/family-members/" + m2.ID.String() + "/points-history"
+	type histItems struct {
+		Items []struct {
+			ID     uuid.UUID `json:"id"`
+			Reason string    `json:"reason"`
+			Points int       `json:"points"`
+		} `json:"items"`
+	}
+	var adminNoPinHist histItems
+	s.expect(http.StatusOK, "GET", m2HistPath, u.AccessToken, nil, &adminNoPinHist)
+	if len(adminNoPinHist.Items) != 1 || adminNoPinHist.Items[0].ID != awardID || adminNoPinHist.Items[0].Reason != "Feed the cat" {
+		t.Errorf("admin history with no admin PIN set: got %+v, want award %v", adminNoPinHist.Items, awardID)
+	}
+	var memberPinHist histItems
+	s.expectWithHeaders(http.StatusOK, "GET", m2HistPath, u.AccessToken, map[string]string{"X-Member-PIN": "1234"}, nil, &memberPinHist)
+	if len(memberPinHist.Items) != 1 || memberPinHist.Items[0].ID != awardID {
+		t.Errorf("member PIN history: got %+v, want award %v", memberPinHist.Items, awardID)
+	}
+
 	// Set invalid PINs: 123, 12345, abcd -> 422 field pin
 	for _, badPin := range []string{"123", "12345", "abcd"} {
 		var vErr apiError
@@ -1682,6 +1711,30 @@ func TestAPI_FamilyMembersAndAdminPin(t *testing.T) {
 	}
 
 	// With admin PIN set:
+	// Points history with no PIN header, or a wrong X-Admin-PIN, is refused
+	// with 403 wrong_pin and no items; the right X-Admin-PIN reads it.
+	for name, hdr := range map[string]map[string]string{
+		"missing admin PIN": nil,
+		"wrong admin PIN":   {"X-Admin-PIN": "0000"},
+	} {
+		var histErr struct {
+			apiError
+			Items json.RawMessage `json:"items"`
+		}
+		s.expectWithHeaders(http.StatusForbidden, "GET", m2HistPath, u.AccessToken, hdr, nil, &histErr)
+		if histErr.Error.Code != "wrong_pin" {
+			t.Errorf("history with %s: code %q, want wrong_pin", name, histErr.Error.Code)
+		}
+		if histErr.Items != nil {
+			t.Errorf("history with %s returned items: %s", name, histErr.Items)
+		}
+	}
+	var adminPinHist histItems
+	s.expectWithHeaders(http.StatusOK, "GET", m2HistPath, u.AccessToken, map[string]string{"X-Admin-PIN": "4321"}, nil, &adminPinHist)
+	if len(adminPinHist.Items) != 1 || adminPinHist.Items[0].ID != awardID {
+		t.Errorf("history with right admin PIN: got %+v, want award %v", adminPinHist.Items, awardID)
+	}
+
 	// Create without header -> 403 admin_pin_required
 	s.expect(http.StatusForbidden, "POST", "/api/v1/households/"+h.ID.String()+"/family-members", u.AccessToken,
 		map[string]string{"name": "GatedKid"}, &errResp)
@@ -1893,9 +1946,9 @@ func TestAPI_PointsHistoryHasItsOwnPINBudget(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	// PIN budget: member create + quest create + one accept + one wrong
-	// history PIN. History budget: three correct reads + the wrong one.
-	const pinLimit = 4
+	// PIN budget: member create + quest create + admin PIN set + one accept +
+	// one wrong history PIN. History budget: four correct reads + the wrong one.
+	const pinLimit = 5
 	handler := internalhttp.NewRouter(ctx, internalhttp.RouterConfig{
 		Queries: q, Pool: pool, AuthSvc: authSvc,
 		UserSvc:      app.NewUserService(q),
@@ -1921,6 +1974,10 @@ func TestAPI_PointsHistoryHasItsOwnPINBudget(t *testing.T) {
 	var quest struct{ ID uuid.UUID }
 	ts.expect(http.StatusCreated, "POST", hp+"/quests", u.AccessToken,
 		map[string]string{"name": "Mow Lawn"}, &quest)
+	// An admin PIN is set so the caller (the household admin) cannot read
+	// the history without one: with none set, the admin needs no PIN at all.
+	ts.expect(http.StatusOK, "PUT", hp+"/admin-pin", u.AccessToken,
+		map[string]string{"pin": "4321"}, nil)
 
 	histPath := hp + "/family-members/" + m.ID.String() + "/points-history"
 	pinHdr := map[string]string{"X-Member-PIN": "1234"}
