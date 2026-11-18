@@ -4,9 +4,32 @@ package systest
 
 import (
 	"net/http"
+	"os"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
+
+const (
+	scriptPath     = "/static/js/app.js"
+	stylesheetPath = "/static/css/dist/app.css"
+)
+
+// staticRef matches every src="/static/..." and href="/static/..." on a page.
+var staticRef = regexp.MustCompile(`(?:src|href)="(/static/[^"]+)"`)
+
+// stylesheetBuilt reports whether the app under test embeds the generated
+// stylesheet. The image always does (its Dockerfile runs Tailwind before
+// building). The binary TestMain builds from this checkout embeds it only if
+// web/static/css/dist/app.css exists here (`make tailwind`).
+func stylesheetBuilt() bool {
+	if os.Getenv("SYSTEST_IMAGE") != "" {
+		return true
+	}
+	_, err := os.Stat("../web/static/css/dist/app.css")
+	return err == nil
+}
 
 // TestSystem_CoreFlow drives the started app the way a new user does,
 // against a migrated database with nothing seeded: health and readiness, the
@@ -33,20 +56,46 @@ func TestSystem_CoreFlow(t *testing.T) {
 	})
 
 	t.Run("web client", func(t *testing.T) {
-		// The app runs from an empty directory, so these come from the
-		// embedded filesystem. The generated stylesheet is built only inside
-		// the Dockerfile, so it is not asserted here.
+		// The app runs from an empty directory, so every asset comes from
+		// the embedded filesystem of the binary or image under test.
 		index := app.do("GET", "/", "", nil).expect(t, "GET /", http.StatusOK)
 		page := string(index.Body)
 		if !strings.Contains(page, "<title>Chorus</title>") {
 			t.Fatalf("GET / is not the app's page:\n%s", page)
 		}
-		if !strings.Contains(page, `src="/static/js/app.js"`) {
-			t.Fatalf("GET / does not reference /static/js/app.js:\n%s", page)
+
+		// Every /static asset the page links must be linked and must load.
+		linked := map[string]bool{}
+		for _, m := range staticRef.FindAllStringSubmatch(page, -1) {
+			linked[m[1]] = true
 		}
-		js := app.do("GET", "/static/js/app.js", "", nil).expect(t, "GET /static/js/app.js", http.StatusOK)
-		if len(js.Body) == 0 {
-			t.Fatal("GET /static/js/app.js returned an empty body")
+		for _, want := range []string{scriptPath, stylesheetPath} {
+			if !linked[want] {
+				t.Fatalf("GET / does not reference %s:\n%s", want, page)
+			}
+		}
+		paths := make([]string, 0, len(linked))
+		for p := range linked {
+			paths = append(paths, p)
+		}
+		sort.Strings(paths)
+
+		for _, p := range paths {
+			if p == stylesheetPath && !stylesheetBuilt() {
+				// Binary mode from a checkout where `make tailwind` never
+				// ran: the stylesheet is gitignored and generated, so this
+				// binary does not embed it. The image always builds it, and
+				// every image job runs this test with the assertion on.
+				t.Logf("%s not asserted: binary built without the generated stylesheet (run `make tailwind` to include it)", p)
+				continue
+			}
+			r := app.do("GET", p, "", nil).expect(t, "GET "+p, http.StatusOK)
+			if len(r.Body) == 0 {
+				t.Fatalf("GET %s returned an empty body", p)
+			}
+			if p == stylesheetPath && !strings.HasPrefix(r.Header.Get("Content-Type"), "text/css") {
+				t.Fatalf("GET %s Content-Type = %q, want text/css", p, r.Header.Get("Content-Type"))
+			}
 		}
 	})
 

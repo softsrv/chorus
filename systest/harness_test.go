@@ -66,9 +66,6 @@ type appProc struct {
 // capture SMTP server of its own, and no GOOGLE_* variable.
 func startApp(t *testing.T, opts appOpts) *appProc {
 	t.Helper()
-	if skipReason != "" {
-		t.Skip(skipReason)
-	}
 
 	mail := newSMTPCapture(t)
 	port := freePort(t)
