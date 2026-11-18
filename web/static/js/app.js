@@ -24,6 +24,11 @@ function el(tag, props = {}, ...children) {
     if (v === undefined || v === null || v === false) continue;
     if (k === 'class') node.className = v;
     else if (k === 'text') node.textContent = v;
+    else if (k === 'disabled') {
+      node.disabled = Boolean(v);
+      if (v) node.setAttribute('disabled', '');
+      else delete node.attributes['disabled'];
+    }
     else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
     else if (k in node && typeof v !== 'string') node[k] = v;
     else node.setAttribute(k, v === true ? '' : v);
@@ -1046,9 +1051,10 @@ function approvalNotice(q, res) {
   return `Approved '${q.name}' for ${joinNames(who.map((m) => m.member_name))}: +${who[0].points} points and +${bonus} teamwork bonus each, ${list}`;
 }
 
-// approvalsCard is the administrator's list of quests marked done. Loading,
-// approving and sending back carry X-Admin-PIN (adminRequest). A 403 for the
-// admin PIN says so, leaves the list as it was and never signs anyone out.
+// approvalsCard is the administrator's list of quests marked done and pending
+// reward redemptions. Loading, approving, sending back and rejecting carry
+// X-Admin-PIN (adminRequest). A 403 for the admin PIN says so, leaves the list
+// as it was and never signs anyone out.
 async function approvalsCard(h, members, rerender) {
   const $err = el('div');
   const unlockForm = () => pinForm({
@@ -1069,9 +1075,14 @@ async function approvalsCard(h, members, rerender) {
   if (!managementUnlocked()) {
     return wrap(el('p', { class: 'text-sm opacity-70', text: 'Enter the admin PIN to review approvals.' }), unlockForm());
   }
-  let pending;
+  let pending, pendingRewards;
   try {
-    pending = (await adminRequest('GET', `/households/${h.id}/quests/pending`)).items || [];
+    const [qRes, rRes] = await Promise.all([
+      adminRequest('GET', `/households/${h.id}/quests/pending`),
+      adminRequest('GET', `/households/${h.id}/reward-redemptions/pending`),
+    ]);
+    pending = qRes.items || [];
+    pendingRewards = rRes.items || [];
   } catch (err) {
     if (!isAdminPinError(err)) throw err;
     wrongAdminPin();
@@ -1090,6 +1101,20 @@ async function approvalsCard(h, members, rerender) {
       throw err;
     }
     rerender(approvalNotice(q, res));
+  }, $err);
+
+  const actReward = (verb, r) => action(async () => {
+    try {
+      await adminRequest('POST', `/households/${h.id}/reward-redemptions/${r.id}/${verb}`, {});
+    } catch (err) {
+      if (isAdminPinError(err)) { wrongAdminPin(); return; }
+      if (err instanceof ApiError && err.status === 422) {
+        $err.replaceChildren(alertBox('error', err.message));
+        return;
+      }
+      throw err;
+    }
+    rerender();
   }, $err);
 
   // A shared completion names everyone on it and what each will receive:
@@ -1115,9 +1140,28 @@ async function approvalsCard(h, members, rerender) {
     el('button', { class: 'btn btn-success btn-xs', text: 'Approve', onclick: act('approve', q) }),
     el('button', { class: 'btn btn-ghost btn-xs', text: 'Send back', onclick: act('reject', q) })));
 
-  return wrap(rows.length
-    ? el('ul', {}, rows)
-    : el('p', { class: 'text-sm opacity-70', text: 'Nothing waiting for approval.' }));
+  const rewardRows = pendingRewards.map((r) => el('li', { class: 'flex flex-wrap items-center gap-2 py-2 border-b border-base-300' },
+    el('div', { class: 'flex-1 min-w-0' },
+      el('div', { class: 'font-medium', text: r.member_name }),
+      el('div', { class: 'text-xs opacity-60', text: `Reward: ${r.description}` }),
+      el('div', { class: 'text-xs', text: signedPoints(-r.cost) })),
+    el('button', { class: 'btn btn-success btn-xs', text: 'Approve', onclick: actReward('approve', r) }),
+    el('button', { class: 'btn btn-ghost btn-xs', text: 'Reject', onclick: actReward('reject', r) })));
+
+  const hasItems = rows.length > 0 || rewardRows.length > 0;
+  if (!hasItems) {
+    return wrap(el('p', { class: 'text-sm opacity-70', text: 'Nothing waiting for approval.' }));
+  }
+
+  const sections = [];
+  if (rows.length > 0) sections.push(el('ul', {}, rows));
+  if (rewardRows.length > 0) {
+    sections.push(el('div', { class: 'space-y-1' },
+      el('h4', { class: 'font-semibold text-sm opacity-80 mt-2', text: 'Reward requests' }),
+      el('ul', {}, rewardRows)));
+  }
+
+  return wrap(...sections);
 }
 
 // manageQuestsCard lists every quest with the admin's add, edit, delete and
@@ -1327,21 +1371,36 @@ function rewardCost(val) {
   return Number.isNaN(n) ? val : n;
 }
 
-// rewardsTab lists the household's rewards as description and cost. Rewards are
-// a list only: no control here changes anyone's points. Add, edit, delete and
-// library Add show while management is unlocked, and every write carries
-// X-Admin-PIN (adminRequest).
-async function rewardsTab(h, $root) {
-  const rerender = () => { $root.replaceChildren(); rewardsTab(h, $root).catch((err) => showError($root, err)); };
+// rewardsTab lists the household's rewards. In the member view, members can
+// redeem rewards if they have enough points, creating a request waiting for
+// admin approval. In the administrator view, rewards are managed (add, edit,
+// delete, copy from library) while management is unlocked with the admin PIN.
+async function rewardsTab(h, $root, notice = null) {
+  const rerender = (newNotice = null) => { $root.replaceChildren(); rewardsTab(h, $root, newNotice).catch((err) => showError($root, err)); };
   const visible = managementVisible();
   const unlocked = visible && managementUnlocked();
+  const isMember = Boolean(activeMember);
   const base = `/households/${h.id}/rewards`;
 
-  const [page, library] = await Promise.all([
+  const [page, library, membersRes, pendingRes] = await Promise.all([
     api('GET', base),
-    visible ? api('GET', '/reward-library') : { items: [] },
+    visible ? api('GET', '/reward-library') : Promise.resolve({ items: [] }),
+    isMember ? api('GET', `/households/${h.id}/family-members`) : Promise.resolve({ items: [] }),
+    isMember ? api('GET', `/households/${h.id}/family-members/${activeMember.id}/reward-redemptions/pending`, undefined, {
+      headers: { 'X-Member-PIN': activeMember.pin ?? '' },
+    }).catch((err) => {
+      if (memberActionFailed(err)) return null;
+      return { items: [] };
+    }) : Promise.resolve({ items: [] }),
   ]);
+  if (isMember && !activeMember) return;
   const rewards = page.items || [];
+  const memberList = membersRes?.items || membersRes || [];
+  const currentMember = isMember ? (memberList.find((m) => m.id === activeMember.id) || activeMember) : null;
+  const memberPoints = currentMember ? (currentMember.points ?? 0) : 0;
+  const pendingItems = pendingRes?.items || [];
+  const pendingRewardIds = new Set(pendingItems.map((p) => p.reward_id));
+
   const costText = (r) => `${r.cost} points`;
   const toBody = (v) => ({ description: v.description, cost: rewardCost(v.cost) });
   const rewardFields = (r = {}) => [
@@ -1349,11 +1408,56 @@ async function rewardsTab(h, $root) {
     { name: 'cost', label: 'Cost (points)', type: 'number', value: r.cost ?? '' },
   ];
 
+  const $notice = el('div');
+  if (notice) $notice.replaceChildren(alertBox('info', notice));
+
   const rows = rewards.map((r) => {
-    const $row = el('li', { class: 'flex flex-wrap items-center gap-2 py-2 border-b border-base-300' },
-      el('div', { class: 'flex-1 min-w-0' },
-        el('div', { class: 'font-medium', text: r.description }),
-        el('div', { class: 'text-xs opacity-60', text: costText(r) })),
+    const $rowErr = el('div');
+    const $actionArea = el('div', { class: 'flex items-center gap-2' });
+
+    const renderActionArea = () => {
+      $actionArea.replaceChildren();
+      if (pendingRewardIds.has(r.id)) {
+        $actionArea.append(el('span', { class: 'badge badge-sm badge-warning', text: 'Pending approval' }));
+        return;
+      }
+      const enough = memberPoints >= r.cost;
+      if (enough) {
+        $actionArea.append(el('button', {
+          class: 'btn btn-sm btn-primary',
+          text: 'Redeem',
+          onclick: async () => {
+            $rowErr.replaceChildren();
+            try {
+              const body = activeMemberAction();
+              await api('POST', `${base}/${r.id}/redeem`, body);
+              pendingRewardIds.add(r.id);
+              renderActionArea();
+              $notice.replaceChildren(alertBox('info', `${r.description} requested — waiting for approval. Your points stay at ${memberPoints} until then.`));
+            } catch (err) {
+              if (memberActionFailed(err)) return;
+              if (err instanceof ApiError && err.status === 422) {
+                const msg = err.fields?.points || err.message;
+                $rowErr.replaceChildren(el('div', { class: 'text-error text-xs mt-1', text: msg }));
+                return;
+              }
+              throw err;
+            }
+          },
+        }));
+      } else {
+        $actionArea.append(
+          el('button', { class: 'btn btn-sm', disabled: true, text: 'Redeem' }),
+          el('span', { class: 'text-xs opacity-70', text: `Need ${r.cost - memberPoints} more points` }),
+        );
+      }
+    };
+
+    if (isMember) {
+      renderActionArea();
+    }
+
+    const adminButtons = [
       unlocked && el('button', {
         class: 'btn btn-ghost btn-xs', text: 'Edit',
         onclick: () => $row.replaceWith(el('li', { class: 'py-2' }, form({
@@ -1364,7 +1468,18 @@ async function rewardsTab(h, $root) {
       unlocked && el('button', {
         class: 'btn btn-ghost btn-xs text-error', text: 'Delete',
         onclick: confirmClick('Sure?', async () => { await adminRequest('DELETE', `${base}/${r.id}`); rerender(); }),
-      }));
+      }),
+    ];
+
+    const $row = el('li', { class: 'py-2 border-b border-base-300' },
+      el('div', { class: 'flex flex-wrap items-center gap-2' },
+        el('div', { class: 'flex-1 min-w-0' },
+          el('div', { class: 'font-medium', text: r.description }),
+          el('div', { class: 'text-xs opacity-60', text: costText(r) })),
+        isMember ? $actionArea : adminButtons,
+      ),
+      $rowErr,
+    );
     return $row;
   });
 
@@ -1399,6 +1514,7 @@ async function rewardsTab(h, $root) {
 
   $root.replaceChildren(card(null,
     el('h3', { class: 'font-semibold', text: 'Rewards' }),
+    $notice,
     rows.length
       ? el('ul', {}, rows)
       : el('p', { class: 'opacity-70 py-2', text: 'No rewards yet. Add one below or browse the library for ideas.' }),

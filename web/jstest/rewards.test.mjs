@@ -38,7 +38,7 @@ const LIBRARY = [
 const err = (status, code, message = code, fields) => [status, { error: { code, message, ...(fields ? { fields } : {}) } }];
 
 function routes() {
-  return {
+  const r = {
     'POST /auth/refresh': () => [200, {
       access_token: 'at', refresh_token: 'rt',
       user: { id: 'u1', email: 'p@example.com', display_name: 'Parent', email_verified: true },
@@ -50,7 +50,9 @@ function routes() {
     'GET /quest-library': () => [200, { items: [] }],
     [`GET ${HP}/family-members`]: () => [200, { items: srv.members }],
     [`POST ${HP}/family-members/m-a/verify`]: () => [204, null],
+    [`POST ${HP}/family-members/m-sam/verify`]: (r) => (r.body.pin === '1234' ? [204, null] : err(403, 'wrong_pin', 'Wrong PIN.')),
     [`GET ${HP}/quests/pending`]: () => [200, { items: [] }],
+    [`GET ${HP}/reward-redemptions/pending`]: (r) => (srv.pendingRewards ? srv.pendingRewards(r) : [200, { items: [] }]),
     [`GET ${HP}/rewards`]: () => [200, { items: srv.rewards }],
     'GET /reward-library': () => [200, { items: LIBRARY }],
     [`POST ${HP}/rewards`]: (r) => {
@@ -72,6 +74,20 @@ function routes() {
     },
     ...srv.extra,
   };
+  return new Proxy(r, {
+    get(target, prop) {
+      if (prop in target) return target[prop];
+      if (typeof prop === 'string') {
+        if (prop.startsWith(`GET ${HP}/family-members/`) && prop.endsWith('/reward-redemptions/pending')) {
+          return (req) => (srv.memberPendingRewards ? srv.memberPendingRewards(req) : [200, { items: srv.pendingRedemptions || [] }]);
+        }
+        if (prop.startsWith(`POST ${HP}/rewards/`) && prop.endsWith('/redeem')) {
+          return (req) => (srv.redeem ? srv.redeem(req) : [201, { id: 'red-1', reward_id: prop.split('/')[3], status: 'pending' }]);
+        }
+      }
+      return undefined;
+    },
+  });
 }
 
 beforeEach(() => {
@@ -84,6 +100,7 @@ beforeEach(() => {
     adminPin: '9999',
     rewards: [reward()],
     members: [{ id: 'm-a', household_id: H, name: 'Ann', has_pin: false, points: 0 }],
+    pendingRedemptions: [],
     extra: {},
   };
   calls = installFetch(new Proxy({}, { get: (_, k) => routes()[k] }));
@@ -108,6 +125,21 @@ async function unlockAdminInRewards(pin) {
   const $pin = walk(env.$app).find((n) => n.tagName === 'INPUT' && n.name === 'pin');
   $pin.value = pin;
   await submit($pin.parentNode.parentNode);
+}
+
+async function becomeSam(pin = '1234') {
+  await click(buttons(env.$app, 'Switch member')[0]);
+  await click(buttonStarting(env.$app, 'Sam'));
+  const $pin = walk(env.$app).find((n) => n.tagName === 'INPUT' && n.name === 'pin');
+  if ($pin) {
+    $pin.value = pin;
+    await submit($pin.parentNode.parentNode);
+  }
+}
+
+async function becomeAnn() {
+  await click(buttons(env.$app, 'Switch member')[0]);
+  await click(buttonStarting(env.$app, 'Ann'));
 }
 
 test('CLM-1: rewards list description and cost; add POSTs {description, cost}; Edit PUTs; Delete on the second click', async () => {
@@ -253,6 +285,111 @@ test('CLM-6: member view is read-only; the admin view unlocks with the PIN and e
   assert.equal(sessionStorage.getItem(REFRESH_KEY), 'rt');
 });
 
+test('CLM-13: in member view, Redeem button shown per reward row, enabled iff points >= cost, else disabled with Need N more points', async () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/rewards-member-enough.json', import.meta.url), 'utf8'));
+  srv.members = fixture.members;
+  srv.rewards = fixture.rewards;
+  srv.pendingRedemptions = fixture.pendingRedemptions;
+
+  await loadApp();
+  await becomeSam();
+  await openRewards();
+
+  const redeemButtons = buttons(env.$app, 'Redeem');
+  assert.equal(redeemButtons.length, 3, 'exactly three Redeem buttons');
+
+  const movieRow = rowOf('Movie night');
+  const movieBtn = buttons(movieRow, 'Redeem')[0];
+  assert.equal(movieBtn.disabled, false);
+
+  const screenRow = rowOf('Extra screen time');
+  const screenBtn = buttons(screenRow, 'Redeem')[0];
+  assert.equal(screenBtn.disabled, false);
+
+  const pizzaRow = rowOf('Pizza night');
+  const pizzaBtn = buttons(pizzaRow, 'Redeem')[0];
+  assert.equal(pizzaBtn.disabled, true);
+  assert.match(pizzaRow.textContent, /Need 30 more points/);
+  assert.match(pizzaRow.textContent, /150 points/);
+});
+
+test('CLM-14: admin view renders no Redeem button and makes no redeem or member pending requests', async () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/rewards-member-enough.json', import.meta.url), 'utf8'));
+  srv.rewards = fixture.rewards;
+
+  await loadApp();
+  await openRewards();
+
+  assert.equal(buttons(env.$app, 'Redeem').length, 0);
+  assert.equal(calls.filter((c) => c.path.includes('/redeem') || c.path.includes('/reward-redemptions')).length, 0);
+});
+
+test('CLM-15: clicking Redeem POSTs {member_id, pin}, renders Pending approval badge, notice above list, points unchanged; pre-existing pending renders badge', async () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/rewards-member-enough.json', import.meta.url), 'utf8'));
+  srv.members = fixture.members;
+  srv.rewards = fixture.rewards;
+  srv.pendingRedemptions = fixture.pendingRedemptions;
+
+  await loadApp();
+  await becomeSam();
+  await openRewards();
+
+  const movieRow = rowOf('Movie night');
+  const movieBtn = buttons(movieRow, 'Redeem')[0];
+  await click(movieBtn);
+
+  const post = calls.find((c) => c.method === 'POST' && c.path === `${HP}/rewards/r-movie/redeem`);
+  assert.ok(post, 'redeem POST made');
+  assert.deepEqual(post.body, { member_id: 'm-sam', pin: '1234' });
+
+  assert.equal(buttons(rowOf('Movie night'), 'Redeem').length, 0, 'Redeem button replaced');
+  assert.match(rowOf('Movie night').textContent, /Pending approval/);
+  assert.match(text(), /Movie night requested — waiting for approval\. Your points stay at 120 until then\./);
+  assert.match(text(), /120 points/);
+
+  // (b) Loads with pending-route stub returning that reward renders badge
+  const pendingFixture = JSON.parse(readFileSync(new URL('./fixtures/rewards-member-pending.json', import.meta.url), 'utf8'));
+  srv.pendingRedemptions = pendingFixture.pendingRedemptions;
+  await loadApp();
+  await becomeSam();
+  await openRewards();
+
+  assert.equal(buttons(rowOf('Movie night'), 'Redeem').length, 0);
+  assert.match(rowOf('Movie night').textContent, /Pending approval/);
+});
+
+test('CLM-16: a 422 answer shows inline message and keeps Redeem button; wrong_pin invokes memberActionFailed', async () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/rewards-member-enough.json', import.meta.url), 'utf8'));
+  srv.members = fixture.members;
+  srv.rewards = fixture.rewards;
+
+  srv.extra[`POST ${HP}/rewards/r-movie/redeem`] = () => [422, { error: { code: 'insufficient_points', message: 'Not enough points' } }];
+  await loadApp();
+  await becomeSam();
+  await openRewards();
+
+  await click(buttons(rowOf('Movie night'), 'Redeem')[0]);
+  assert.match(rowOf('Movie night').textContent, /Not enough points/);
+  assert.equal(buttons(rowOf('Movie night'), 'Redeem').length, 1);
+  assert.doesNotMatch(rowOf('Movie night').textContent, /Pending approval/);
+
+  // wrong_pin answers
+  srv.extra[`POST ${HP}/rewards/r-movie/redeem`] = () => err(403, 'wrong_pin', 'Wrong PIN.');
+  await click(buttons(rowOf('Movie night'), 'Redeem')[0]);
+  assert.equal(signedOut, 0);
+  assert.ok(buttonStarting(env.$app, 'Switch member') || buttonStarting(env.$app, 'Administrator view'));
+});
+
+test('CLM-21: empty list in member view shows empty state text and zero Redeem buttons', async () => {
+  const EMPTY = 'No rewards yet. Add one below or browse the library for ideas.';
+  srv.rewards = [];
+  await loadApp();
+  await becomeAnn();
+  await openRewards();
+  assert.ok(text().includes(EMPTY));
+  assert.equal(buttons(env.$app, 'Redeem').length, 0);
+});
+
 // The rewardsTab source, from its definition to the next section divider.
 const APP_SRC = readFileSync(new URL('../static/js/app.js', import.meta.url), 'utf8');
 function rewardsSource(src) {
@@ -261,38 +398,6 @@ function rewardsSource(src) {
   assert.ok(start >= 0 && end > start, 'rewardsTab section not found');
   return src.slice(start, end);
 }
-
-const SPEND = /redeem|spend|\bbuy\b|claim|purchase/i;
-// Any request path under a single reward other than ${base}/${r.id} and
-// ${base}/from-library (e.g. .../rewards/${r.id}/redeem) is a non-list write.
-const REWARD_PATHS = /`\$\{base\}\/[^`]*`/g;
-const ALLOWED_PATHS = new Set(['`${base}/${r.id}`', '`${base}/from-library`']);
-
-function spendFindings(section) {
-  const out = [];
-  if (SPEND.test(section)) out.push('spend wording');
-  for (const m of section.match(REWARD_PATHS) || []) if (!ALLOWED_PATHS.has(m)) out.push(m);
-  return out;
-}
-
-test('CLM-5: the rewards UI offers no redeem, buy, claim or spend, and posts only create and from-library', () => {
-  const section = rewardsSource(APP_SRC);
-  assert.deepEqual(spendFindings(section), []);
-  // Only the create, edit, delete and from-library writes exist.
-  const writes = section.match(/adminRequest\('(POST|PUT|DELETE)', [^,)]+/g) || [];
-  assert.deepEqual(writes.sort(), [
-    "adminRequest('DELETE', `${base}/${r.id}`",
-    "adminRequest('POST', `${base}/from-library`",
-    "adminRequest('POST', base",
-    "adminRequest('PUT', `${base}/${r.id}`",
-  ]);
-  // The one plain api() write is the admin-PIN verify, never a reward route.
-  assert.deepEqual(section.match(/\bapi\('(POST|PUT|DELETE)', [^,)]+/g) || [],
-    ["api('POST', `/households/${h.id}/admin-pin/verify`"]);
-  // The check fails on a planted control and on a planted spend route.
-  assert.notDeepEqual(spendFindings(section.replace("text: 'Edit'", "text: 'Redeem'")), []);
-  assert.notDeepEqual(spendFindings(`${section}adminRequest('POST', \`\${base}/\${r.id}/use\`)`), []);
-});
 
 const HTML_SINKS = /innerHTML|insertAdjacentHTML|outerHTML|style:|style=|<script/i;
 
