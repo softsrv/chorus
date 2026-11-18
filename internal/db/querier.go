@@ -324,7 +324,9 @@ type Querier interface {
 	// The holder of a shareable quest adds another member of the household to
 	// it. One statement: the quest must be in this household, shareable and held
 	// by the acting member, and the target must be a household member other than
-	// the actor who is not on the quest yet; otherwise nothing is written. The
+	// the actor who is not on the quest yet and is within the quest's age range
+	// (quest_age_eligible, in the household's timezone: no birthday or no limits
+	// always pass); otherwise nothing is written. The
 	// first share also records the holder, joined at the time they accepted, so
 	// the holder stays the earliest member. Returns the member ids it added.
 	ShareQuest(ctx context.Context, arg ShareQuestParams) ([]uuid.UUID, error)

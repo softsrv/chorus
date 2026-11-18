@@ -145,17 +145,20 @@ FROM mine m
 WHERE q.household_id = m.household_id AND q.id = m.id
 RETURNING q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes,
           q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at,
-          q.created_at, q.updated_at, q.shareable, q.teamwork_bonus, q.streak_bonus;
+          q.created_at, q.updated_at, q.shareable, q.teamwork_bonus, q.streak_bonus,
+          q.min_age, q.max_age;
 
 -- name: ShareQuest :many
 -- The holder of a shareable quest adds another member of the household to
 -- it. One statement: the quest must be in this household, shareable and held
 -- by the acting member, and the target must be a household member other than
--- the actor who is not on the quest yet; otherwise nothing is written. The
+-- the actor who is not on the quest yet and is within the quest's age range
+-- (quest_age_eligible, in the household's timezone: no birthday or no limits
+-- always pass); otherwise nothing is written. The
 -- first share also records the holder, joined at the time they accepted, so
 -- the holder stays the earliest member. Returns the member ids it added.
 WITH quest AS (
-    SELECT q.household_id, q.id, q.claimed_at
+    SELECT q.household_id, q.id, q.claimed_at, q.min_age, q.max_age
     FROM household_quests q
     WHERE q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id)
       AND q.shareable AND q.claimed_by = sqlc.arg(member_id)::uuid
@@ -165,8 +168,11 @@ WITH quest AS (
 ), target AS (
     SELECT m.id
     FROM family_members m
+    JOIN households h ON h.id = m.household_id
+    CROSS JOIN quest qa
     WHERE m.household_id = sqlc.arg(household_id) AND m.id = sqlc.arg(target_member_id)::uuid
       AND m.id <> sqlc.arg(member_id)::uuid
+      AND quest_age_eligible(m.birthday, h.timezone, qa.min_age, qa.max_age)
       AND NOT EXISTS (
           SELECT 1 FROM household_quest_participants p
           WHERE p.household_id = sqlc.arg(household_id) AND p.quest_id = sqlc.arg(id)
@@ -443,7 +449,8 @@ WITH done AS (
 )
 SELECT d.id, d.household_id, d.library_id, d.name, d.points, d.repeat_days, d.notes,
        d.claimed_by, d.claimed_at, d.done_at, d.completed_at, d.available_at,
-       d.created_at, d.updated_at, d.shareable, d.teamwork_bonus, d.streak_bonus
+       d.created_at, d.updated_at, d.shareable, d.teamwork_bonus, d.streak_bonus,
+       d.min_age, d.max_age
 FROM done d;
 
 -- name: GetMemberQuestStreak :one

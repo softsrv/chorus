@@ -16,7 +16,7 @@ const addMemberPoints = `-- name: AddMemberPoints :one
 UPDATE family_members
 SET points = points + $3, updated_at = NOW()
 WHERE household_id = $1 AND id = $2
-RETURNING id, household_id, name, pin_hash, points, created_at, updated_at
+RETURNING id, household_id, name, pin_hash, points, created_at, updated_at, birthday
 `
 
 type AddMemberPointsParams struct {
@@ -36,6 +36,7 @@ func (q *Queries) AddMemberPoints(ctx context.Context, arg AddMemberPointsParams
 		&i.Points,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Birthday,
 	)
 	return i, err
 }
@@ -43,7 +44,7 @@ func (q *Queries) AddMemberPoints(ctx context.Context, arg AddMemberPointsParams
 const createFamilyMember = `-- name: CreateFamilyMember :one
 INSERT INTO family_members (id, household_id, name, pin_hash, points, created_at, updated_at)
 VALUES ($1, $2, $3, $4, 0, NOW(), NOW())
-RETURNING id, household_id, name, pin_hash, points, created_at, updated_at
+RETURNING id, household_id, name, pin_hash, points, created_at, updated_at, birthday
 `
 
 type CreateFamilyMemberParams struct {
@@ -69,6 +70,7 @@ func (q *Queries) CreateFamilyMember(ctx context.Context, arg CreateFamilyMember
 		&i.Points,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Birthday,
 	)
 	return i, err
 }
@@ -122,7 +124,7 @@ func (q *Queries) GetAdminPin(ctx context.Context, householdID uuid.UUID) (House
 }
 
 const getFamilyMember = `-- name: GetFamilyMember :one
-SELECT id, household_id, name, pin_hash, points, created_at, updated_at FROM family_members
+SELECT id, household_id, name, pin_hash, points, created_at, updated_at, birthday FROM family_members
 WHERE household_id = $1 AND id = $2
 `
 
@@ -142,13 +144,14 @@ func (q *Queries) GetFamilyMember(ctx context.Context, arg GetFamilyMemberParams
 		&i.Points,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Birthday,
 	)
 	return i, err
 }
 
 const listFamilyMembers = `-- name: ListFamilyMembers :many
 
-SELECT id, household_id, name, pin_hash, points, created_at, updated_at FROM family_members
+SELECT id, household_id, name, pin_hash, points, created_at, updated_at, birthday FROM family_members
 WHERE household_id = $1
 ORDER BY name, id
 `
@@ -174,6 +177,7 @@ func (q *Queries) ListFamilyMembers(ctx context.Context, householdID uuid.UUID) 
 			&i.Points,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Birthday,
 		); err != nil {
 			return nil, err
 		}
@@ -210,7 +214,7 @@ const renameFamilyMember = `-- name: RenameFamilyMember :one
 UPDATE family_members
 SET name = $3, updated_at = NOW()
 WHERE household_id = $1 AND id = $2
-RETURNING id, household_id, name, pin_hash, points, created_at, updated_at
+RETURNING id, household_id, name, pin_hash, points, created_at, updated_at, birthday
 `
 
 type RenameFamilyMemberParams struct {
@@ -230,6 +234,7 @@ func (q *Queries) RenameFamilyMember(ctx context.Context, arg RenameFamilyMember
 		&i.Points,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Birthday,
 	)
 	return i, err
 }
@@ -238,7 +243,7 @@ const setFamilyMemberPin = `-- name: SetFamilyMemberPin :one
 UPDATE family_members
 SET pin_hash = $3, updated_at = NOW()
 WHERE household_id = $1 AND id = $2
-RETURNING id, household_id, name, pin_hash, points, created_at, updated_at
+RETURNING id, household_id, name, pin_hash, points, created_at, updated_at, birthday
 `
 
 type SetFamilyMemberPinParams struct {
@@ -258,6 +263,7 @@ func (q *Queries) SetFamilyMemberPin(ctx context.Context, arg SetFamilyMemberPin
 		&i.Points,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Birthday,
 	)
 	return i, err
 }
