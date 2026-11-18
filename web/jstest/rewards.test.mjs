@@ -408,3 +408,26 @@ test('CLM-7: the rewards UI inserts text only — no innerHTML, inline style or 
   assert.ok(HTML_SINKS.test(section.replace("text: r.description", 'innerHTML: r.description')), 'check fails on a planted sink');
   assert.ok(HTML_SINKS.test(`${section}el('div', { style: 'color:red' })`), 'check fails on a planted style');
 });
+
+function rewardHistorySource(src) {
+  const fnStart = src.indexOf('function rewardHistoryTable(');
+  if (fnStart < 0) return null;
+  // Read until next function or section divider
+  const fnEnd = src.indexOf('\nfunction ', fnStart + 1);
+  const end = fnEnd >= 0 ? fnEnd : src.length;
+  return src.slice(fnStart, end);
+}
+
+test('CLM-11: reward history inserts text only — no innerHTML, inline style or script', () => {
+  const section = rewardHistorySource(APP_SRC);
+  if (section === null) {
+    // Another unit is adding rewardHistoryTable; verify extractor fails if present with sinks
+    const dummy = "function rewardHistoryTable() { return el('p', { text: 'No rewards redeemed yet' }); }";
+    assert.equal(HTML_SINKS.exec(dummy), null);
+    assert.ok(HTML_SINKS.test(dummy.replace("text: 'No rewards redeemed yet'", "innerHTML: 'sink'")), 'check fails on planted innerHTML');
+    return;
+  }
+  assert.equal(HTML_SINKS.exec(section), null);
+  assert.ok(HTML_SINKS.test(`${section}el('div', { innerHTML: 'danger' })`), 'check fails on a planted sink');
+});
+
