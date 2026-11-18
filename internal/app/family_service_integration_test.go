@@ -199,6 +199,157 @@ func TestIntegration_FamilyMemberValidation(t *testing.T) {
 	}
 }
 
+// TestIntegration_FamilyMemberBirthday covers SetBirthday and ListBirthdays
+// (CLM-4, CLM-5): set and clear round-trip, the age is quest_member_age in
+// the household's timezone, bad dates are a 422 on birthday that saves
+// nothing, and both are gated by the admin PIN.
+func TestIntegration_FamilyMemberBirthday(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	households := app.NewHouseholdService(q, pool)
+	familySvc := app.NewFamilyService(q, pool, 10)
+	ctx := context.Background()
+
+	admin := registerVerified(t, pool, authSvc, mailer, "bdayadmin").User.ID
+	const tz = "Pacific/Kiritimati" // UTC+14: its today is often not UTC's
+	h, err := households.Create(ctx, admin, app.HouseholdInput{Name: "Birthday Home", Timezone: tz})
+	if err != nil {
+		t.Fatalf("Create household: %v", err)
+	}
+	sam, err := familySvc.Create(ctx, admin, h.ID, app.FamilyMemberInput{Name: "Sam"}, "")
+	if err != nil {
+		t.Fatalf("create Sam: %v", err)
+	}
+	ava, err := familySvc.Create(ctx, admin, h.ID, app.FamilyMemberInput{Name: "Ava"}, "")
+	if err != nil {
+		t.Fatalf("create Ava: %v", err)
+	}
+
+	stored := func(id uuid.UUID) string {
+		t.Helper()
+		var s *string
+		if err := pool.QueryRow(ctx, "SELECT to_char(birthday, 'YYYY-MM-DD') FROM family_members WHERE id = $1", id).Scan(&s); err != nil {
+			t.Fatalf("read birthday: %v", err)
+		}
+		if s == nil {
+			return ""
+		}
+		return *s
+	}
+	// The age the database's one rule gives, in the household's timezone.
+	sqlAge := func(birthday string) int32 {
+		t.Helper()
+		var age int32
+		if err := pool.QueryRow(ctx, "SELECT quest_member_age($1::date, $2)", birthday, tz).Scan(&age); err != nil {
+			t.Fatalf("quest_member_age: %v", err)
+		}
+		return age
+	}
+
+	// Set: stored, returned, with the SQL age.
+	bd := "2015-04-02"
+	got, err := familySvc.SetBirthday(ctx, admin, h.ID, sam.ID, &bd, "")
+	if err != nil {
+		t.Fatalf("SetBirthday: %v", err)
+	}
+	if got.MemberID != sam.ID || got.Birthday == nil || *got.Birthday != bd {
+		t.Fatalf("SetBirthday = %+v, want Sam %s", got, bd)
+	}
+	if got.Age == nil || *got.Age != sqlAge(bd) {
+		t.Errorf("SetBirthday age = %v, want %d", got.Age, sqlAge(bd))
+	}
+	if s := stored(sam.ID); s != bd {
+		t.Errorf("stored birthday = %q, want %q", s, bd)
+	}
+
+	// Today in the household's timezone is allowed (age 0); tomorrow is not.
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		t.Fatalf("load tz: %v", err)
+	}
+	now := time.Now().In(loc)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	todayS := today.Format(time.DateOnly)
+	if b, err := familySvc.SetBirthday(ctx, admin, h.ID, ava.ID, &todayS, ""); err != nil {
+		t.Errorf("birthday today in %s: %v", tz, err)
+	} else if b.Age == nil || *b.Age != 0 {
+		t.Errorf("birthday today age = %v, want 0", b.Age)
+	}
+
+	// List: one item per member, the cleared one with null birthday and age.
+	if _, err := familySvc.SetBirthday(ctx, admin, h.ID, ava.ID, nil, ""); err != nil {
+		t.Fatalf("clear Ava: %v", err)
+	}
+	if s := stored(ava.ID); s != "" {
+		t.Errorf("Ava birthday after clear = %q, want unset", s)
+	}
+	list, err := familySvc.ListBirthdays(ctx, admin, h.ID, "")
+	if err != nil {
+		t.Fatalf("ListBirthdays: %v", err)
+	}
+	byID := map[uuid.UUID]app.MemberBirthday{}
+	for _, b := range list {
+		byID[b.MemberID] = b
+	}
+	if len(list) != 2 {
+		t.Fatalf("ListBirthdays = %+v, want 2 items", list)
+	}
+	if b := byID[ava.ID]; b.Birthday != nil || b.Age != nil {
+		t.Errorf("Ava = %+v, want null birthday and age", b)
+	}
+	if b := byID[sam.ID]; b.Birthday == nil || *b.Birthday != bd || b.Age == nil || *b.Age != sqlAge(bd) {
+		t.Errorf("Sam = %+v, want %s age %d", b, bd, sqlAge(bd))
+	}
+
+	// Bad dates: 422 on birthday, nothing saved.
+	tomorrow := today.AddDate(0, 0, 1).Format(time.DateOnly)
+	for _, bad := range []string{tomorrow, "", "2015-02-30", "2015-13-01", "02/04/2015", "2015-4-2", "not a date"} {
+		var vErr *app.ValidationError
+		_, err := familySvc.SetBirthday(ctx, admin, h.ID, sam.ID, &bad, "")
+		if !errors.As(err, &vErr) || vErr.Fields["birthday"] == "" {
+			t.Errorf("birthday %q: expected ValidationError on birthday, got %v", bad, err)
+		}
+	}
+	if s := stored(sam.ID); s != bd {
+		t.Errorf("birthday after refused sets = %q, want %q", s, bd)
+	}
+
+	// An unknown member is not found.
+	if _, err := familySvc.SetBirthday(ctx, admin, h.ID, uuid.New(), &bd, ""); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("unknown member: %v, want ErrNotFound", err)
+	}
+
+	// With an admin PIN set: missing is ErrAdminPinRequired, wrong ErrWrongPIN,
+	// and neither reads or changes anything.
+	if err := familySvc.SetAdminPin(ctx, admin, h.ID, "2468", ""); err != nil {
+		t.Fatalf("SetAdminPin: %v", err)
+	}
+	other := "2010-01-01"
+	if _, err := familySvc.SetBirthday(ctx, admin, h.ID, sam.ID, &other, ""); !errors.Is(err, app.ErrAdminPinRequired) {
+		t.Errorf("SetBirthday no PIN: %v, want ErrAdminPinRequired", err)
+	}
+	if _, err := familySvc.SetBirthday(ctx, admin, h.ID, sam.ID, nil, "1111"); !errors.Is(err, app.ErrWrongPIN) {
+		t.Errorf("SetBirthday wrong PIN: %v, want ErrWrongPIN", err)
+	}
+	if s := stored(sam.ID); s != bd {
+		t.Errorf("birthday after PIN refusals = %q, want %q", s, bd)
+	}
+	if _, err := familySvc.ListBirthdays(ctx, admin, h.ID, ""); !errors.Is(err, app.ErrAdminPinRequired) {
+		t.Errorf("ListBirthdays no PIN: %v, want ErrAdminPinRequired", err)
+	}
+	if _, err := familySvc.ListBirthdays(ctx, admin, h.ID, "1111"); !errors.Is(err, app.ErrWrongPIN) {
+		t.Errorf("ListBirthdays wrong PIN: %v, want ErrWrongPIN", err)
+	}
+	if b, err := familySvc.SetBirthday(ctx, admin, h.ID, sam.ID, &other, "2468"); err != nil || b.Birthday == nil || *b.Birthday != other {
+		t.Errorf("SetBirthday right PIN: %+v %v", b, err)
+	}
+	if l, err := familySvc.ListBirthdays(ctx, admin, h.ID, "2468"); err != nil || len(l) != 2 {
+		t.Errorf("ListBirthdays right PIN: %+v %v", l, err)
+	}
+}
+
 func TestIntegration_FamilyMemberIsolation(t *testing.T) {
 	pool := testDB(t)
 	mailer := &captureMailer{}

@@ -354,6 +354,86 @@ func (s *FamilyService) ClearPin(ctx context.Context, userID, householdID, membe
 	return toMember(m), nil
 }
 
+// MemberBirthday is a member's birthday as only the admin sees it: Birthday is
+// YYYY-MM-DD and Age the member's whole years today in the household's
+// timezone, worked out by the database (quest_member_age, the same rule the
+// quest age checks use). Both are nil when no birthday is set. It is never
+// part of Member, so no member or quest read carries it.
+type MemberBirthday struct {
+	MemberID uuid.UUID
+	Birthday *string
+	Age      *int32
+}
+
+func toMemberBirthday(id uuid.UUID, birthday pgtype.Date, age int32) MemberBirthday {
+	out := MemberBirthday{MemberID: id}
+	if birthday.Valid {
+		s := birthday.Time.Format(time.DateOnly)
+		out.Birthday = &s
+		out.Age = &age
+	}
+	return out
+}
+
+// SetBirthday sets a family member's birthday (YYYY-MM-DD), or clears it when
+// birthday is nil. Requires admin role and admin PIN if set. A birthday that
+// is not a real date, or is after today in the household's timezone, is a
+// ValidationError on "birthday"; a member of another household is
+// ErrNotFound.
+func (s *FamilyService) SetBirthday(ctx context.Context, userID, householdID, memberID uuid.UUID, birthday *string, adminPin string) (MemberBirthday, error) {
+	h, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin)
+	if err != nil {
+		return MemberBirthday{}, err
+	}
+
+	date := pgtype.Date{}
+	if birthday != nil {
+		loc, err := time.LoadLocation(h.Timezone)
+		if err != nil {
+			return MemberBirthday{}, fmt.Errorf("load household timezone %q: %w", h.Timezone, err)
+		}
+		now := time.Now().In(loc)
+		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+		var v validator
+		d := v.birthday(*birthday, today)
+		if err := v.err(); err != nil {
+			return MemberBirthday{}, err
+		}
+		date = pgtype.Date{Time: d, Valid: true}
+	}
+
+	row, err := s.q.SetFamilyMemberBirthday(ctx, db.SetFamilyMemberBirthdayParams{
+		Birthday:    date,
+		HouseholdID: householdID,
+		ID:          memberID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return MemberBirthday{}, ErrNotFound
+		}
+		return MemberBirthday{}, fmt.Errorf("set member birthday: %w", err)
+	}
+	return toMemberBirthday(row.ID, row.Birthday, row.Age), nil
+}
+
+// ListBirthdays returns every member of the household with their birthday
+// and age (nil for both when unset). Requires admin role and admin PIN if
+// set; non-members get ErrNotFound.
+func (s *FamilyService) ListBirthdays(ctx context.Context, userID, householdID uuid.UUID, adminPin string) ([]MemberBirthday, error) {
+	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.ListFamilyMemberBirthdays(ctx, householdID)
+	if err != nil {
+		return nil, fmt.Errorf("list member birthdays: %w", err)
+	}
+	out := make([]MemberBirthday, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, toMemberBirthday(r.ID, r.Birthday, r.Age))
+	}
+	return out, nil
+}
+
 // VerifyMemberPin verifies a member's PIN within a household.
 // It verifies that memberID belongs to householdID (returning ErrNotFound if not).
 // If the member has a PIN set, pin must match its bcrypt hash; empty or mismatch returns ErrWrongPIN.

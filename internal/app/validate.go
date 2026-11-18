@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -82,6 +83,21 @@ func (v *validator) intField(field string, f NumberField, def, minVal int32) int
 		return int32(f.Value)
 	}
 	return def
+}
+
+// birthday checks s is a real calendar date written YYYY-MM-DD that is not
+// after today (a UTC-midnight date the caller worked out in the household's
+// timezone; today itself is allowed). It returns the date at UTC midnight.
+func (v *validator) birthday(s string, today time.Time) time.Time {
+	d, err := time.Parse(time.DateOnly, s)
+	if err != nil {
+		v.fail("birthday", "must be a valid date (YYYY-MM-DD)")
+		return time.Time{}
+	}
+	if d.After(today) {
+		v.fail("birthday", "can't be in the future")
+	}
+	return d
 }
 
 // pin validates that s is exactly 4 ASCII digits.
