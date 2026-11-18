@@ -1217,7 +1217,7 @@ test('sharing CLM-6: no Share on a quest that is not shareable, one held by some
   assert.equal(calls.filter((c) => c.path.endsWith('/share')).length, 0);
 });
 
-test('sharing CLM-8: share picker lists every candidate including out-of-range; shareButton absent when every candidate is out of range', async () => {
+test('sharing CLM-8 / 1.1/3: share picker lists every candidate including out-of-range; Share still offered when every candidate is out of range, and the picker shows each disabled with its reason', async () => {
   srv.members.push({ id: 'm-c', household_id: H, name: 'Cat', has_pin: false, points: 0 });
   // Ann holds a shareable quest where Cat is ineligible.
   srv.quests = [quest({
@@ -1234,13 +1234,24 @@ test('sharing CLM-8: share picker lists every candidate including out-of-range; 
   const offered = walk(picker).filter((n) => n.tagName === 'BUTTON' && n.textContent !== 'Cancel').map((n) => n.textContent);
   assert.deepEqual(offered, ['Ben', 'Cat'], 'lists every non-participant including ineligible member Cat');
 
-  // If every candidate is ineligible, shareButton is absent.
+  // Every candidate ineligible: Share is still offered, and the picker shows
+  // each member disabled with the reason; nothing is sent.
   srv.quests = [quest({
     id: 'q1', name: 'Clean living room', available: false, claimed_by: 'm-a', shareable: true,
     min_age: 10, max_age: 14, ineligible_member_ids: ['m-b', 'm-c'],
   })];
   await become('Ann');
-  assert.equal(buttons(rowOf(), 'Share').length, 0, 'shareButton absent when every candidate is ineligible');
+  assert.equal(buttons(rowOf(), 'Share').length, 1, 'Share offered even when every candidate is ineligible');
+  await click(buttons(rowOf(), 'Share')[0]);
+  const allOut = walk(env.$app).find((n) => n.className === 'font-semibold' && n.textContent === 'Share Clean living room with').parentNode;
+  const allOutButtons = walk(allOut).filter((n) => n.tagName === 'BUTTON' && n.textContent !== 'Cancel');
+  assert.deepEqual(allOutButtons.map((n) => n.textContent), ['Ben', 'Cat'], 'every out-of-range member is listed');
+  assert.ok(allOutButtons.every((n) => n.disabled), 'every out-of-range member is disabled');
+  const reasons = walk(allOut).filter((n) => n.tagName === 'SMALL').map((n) => n.textContent);
+  assert.deepEqual(reasons, ['Ages 10\u201314 only', 'Ages 10\u201314 only']);
+  const before = calls.filter((c) => c.path === `${HP}/quests/q1/share`).length;
+  for (const b of allOutButtons) await click(b);
+  assert.equal(calls.filter((c) => c.path === `${HP}/quests/q1/share`).length, before, 'a disabled member sends nothing');
 
   // If nobody is ineligible, Share button shows.
   srv.quests = [quest({
