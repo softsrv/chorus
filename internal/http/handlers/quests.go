@@ -48,7 +48,8 @@ func NewQuestHandler(svc questServicer) *QuestHandler {
 // questRequest is the body for create and update. Update is a full
 // replacement (PUT). points, repeat_days, teamwork_bonus and streak_bonus stay
 // raw so a wrong-typed value is reported as its own field error alongside the others.
-// An absent shareable is false.
+// An absent shareable is false. min_age and max_age are raw too; absent or
+// null is no limit on that side.
 type questRequest struct {
 	Name          string          `json:"name"`
 	Points        json.RawMessage `json:"points"`
@@ -57,6 +58,8 @@ type questRequest struct {
 	Shareable     *bool           `json:"shareable"`
 	TeamworkBonus json.RawMessage `json:"teamwork_bonus"`
 	StreakBonus   json.RawMessage `json:"streak_bonus"`
+	MinAge        json.RawMessage `json:"min_age"`
+	MaxAge        json.RawMessage `json:"max_age"`
 }
 
 func (req questRequest) toInput() app.QuestInput {
@@ -68,6 +71,8 @@ func (req questRequest) toInput() app.QuestInput {
 		Shareable:     req.Shareable != nil && *req.Shareable,
 		TeamworkBonus: numberField(req.TeamworkBonus),
 		StreakBonus:   numberField(req.StreakBonus),
+		MinAge:        numberField(req.MinAge),
+		MaxAge:        numberField(req.MaxAge),
 	}
 }
 

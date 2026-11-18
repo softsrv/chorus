@@ -89,6 +89,7 @@ type FamilyMember struct {
 	Points      int32              `json:"points"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	Birthday    pgtype.Date        `json:"birthday"`
 }
 
 type GoogleCalendarConnection struct {
@@ -180,6 +181,8 @@ type HouseholdQuest struct {
 	Shareable     bool               `json:"shareable"`
 	TeamworkBonus int32              `json:"teamwork_bonus"`
 	StreakBonus   int32              `json:"streak_bonus"`
+	MinAge        pgtype.Int4        `json:"min_age"`
+	MaxAge        pgtype.Int4        `json:"max_age"`
 }
 
 type HouseholdQuestParticipant struct {

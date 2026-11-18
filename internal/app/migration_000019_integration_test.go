@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// TestIntegration_AdminPointsMigration proves CLM-2 at the schema: with 000018
+// TestIntegration_AdminPointsMigration proves CLM-2 at the schema: with 000019
 // applied an admin row may be negative, a negative quest row is rejected, and
 // down refuses while an admin row exists and succeeds once none do. Everything
 // runs in one transaction that is rolled back, with a savepoint around each
@@ -19,8 +19,8 @@ import (
 func TestIntegration_AdminPointsMigration(t *testing.T) {
 	pool := testDB(t)
 	ctx := context.Background()
-	upSQL := readMigration(t, "000018_admin_points_adjustments.up.sql")
-	downSQL := readMigration(t, "000018_admin_points_adjustments.down.sql")
+	upSQL := readMigration(t, "000019_admin_points_adjustments.up.sql")
+	downSQL := readMigration(t, "000019_admin_points_adjustments.down.sql")
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {

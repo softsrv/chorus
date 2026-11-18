@@ -119,6 +119,8 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 		respond.Error(w, http.StatusConflict, "quest_taken", "This quest has already been taken.")
 	case errors.Is(err, app.ErrAlreadyParticipant):
 		respond.Error(w, http.StatusConflict, "already_participant", "That member is already on this quest.")
+	case errors.Is(err, app.ErrAgeRestricted):
+		respond.Error(w, http.StatusConflict, "age_restricted", "This quest is outside that member's age range.")
 	default:
 		slog.ErrorContext(r.Context(), "unhandled error",
 			"request_id", middleware.GetRequestID(r.Context()),

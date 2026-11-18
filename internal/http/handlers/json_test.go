@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -100,5 +101,29 @@ func TestWriteError_PIN(t *testing.T) {
 				t.Errorf("code: got %q, want %q", body.Error.Code, tc.wantCode)
 			}
 		})
+	}
+}
+
+// TestWriteError_AgeRestricted pins the answer to an accept or share for a
+// member outside the quest's age range: 409 age_restricted with its message.
+func TestWriteError_AgeRestricted(t *testing.T) {
+	t.Parallel()
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	rr := httptest.NewRecorder()
+
+	writeError(rr, req, fmt.Errorf("accept: %w", app.ErrAgeRestricted))
+
+	if rr.Code != http.StatusConflict {
+		t.Errorf("status: got %d, want %d", rr.Code, http.StatusConflict)
+	}
+	var body respond.ErrorBody
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != "age_restricted" {
+		t.Errorf("code: got %q, want age_restricted", body.Error.Code)
+	}
+	if body.Error.Message != "This quest is outside that member's age range." {
+		t.Errorf("message: got %q", body.Error.Message)
 	}
 }
