@@ -2073,3 +2073,33 @@ test('CLM-20: approvals card empty state accounts for both quest and redemption 
   assert.match(approvals2().textContent, /Reward requests/);
 });
 
+test('1.1/8: a 404 on reward approve or reject (already decided or cancelled) reloads the card with a notice and the stale row leaves', async () => {
+  for (const verb of ['approve', 'reject']) {
+    srv.adminPinSet = true;
+    srv.pending = () => [200, { items: [] }];
+    let redemptions = [
+      { id: 'red-1', household_id: H, member_id: 'm-sam', member_name: 'Sam', reward_id: 'r-movie', description: 'Movie night', cost: 100, status: 'pending', requested_at: '2025-01-03T12:00:00Z' },
+    ];
+    srv.pendingRewards = () => [200, { items: redemptions }];
+    srv.extra[`POST ${HP}/reward-redemptions/red-1/${verb}`] = () => {
+      // Decided in another session (or cancelled when the member left).
+      redemptions = [];
+      return err(404, 'not_found', 'Not found.');
+    };
+
+    await loadApp();
+    await unlockAdmin('9999');
+
+    const approvals = () => walk(env.$app).find((n) => n.tagName === 'H3' && n.textContent === 'Approvals').parentNode;
+    const lis = () => walk(approvals()).filter((n) => n.tagName === 'LI');
+    assert.equal(lis().length, 1, `${verb}: the request is listed`);
+
+    await click(buttons(lis()[0], verb === 'approve' ? 'Approve' : 'Reject')[0]);
+
+    assert.match(text(), /That reward request is no longer waiting for approval\./, `${verb}: notice shown`);
+    assert.equal(lis().length, 0, `${verb}: stale row gone after the reload`);
+    assert.match(approvals().textContent, /Nothing waiting for approval\./);
+    assert.equal(sessionStorage.getItem(REFRESH_KEY), 'rt');
+    delete srv.extra[`POST ${HP}/reward-redemptions/red-1/${verb}`];
+  }
+});

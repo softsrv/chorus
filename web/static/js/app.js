@@ -1147,6 +1147,13 @@ async function approvalsCard(h, members, rerender) {
         $err.replaceChildren(alertBox('error', err.fields?.points || err.message));
         return;
       }
+      // Already decided (here or in another session), cancelled when the
+      // member left, or gone: reload the list so the stale row leaves, and
+      // say why, as the quest path does.
+      if (err instanceof ApiError && err.status === 404) {
+        rerender('That reward request is no longer waiting for approval.');
+        return;
+      }
       throw err;
     }
     rerender();

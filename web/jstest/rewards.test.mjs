@@ -400,6 +400,52 @@ function rewardsSource(src) {
   return src.slice(start, end);
 }
 
+// The rewards section's write surface. Redeem is the one member write; every
+// other word for spending is still refused, and any request path under a
+// single reward other than edit/delete, from-library and redeem is a finding.
+const SPEND = /spend|\bbuy\b|claim|purchase/i;
+const REWARD_PATHS = /`\$\{base\}\/[^`]*`/g;
+const ALLOWED_PATHS = new Set(['`${base}/${r.id}`', '`${base}/from-library`', '`${base}/${r.id}/redeem`']);
+
+function spendFindings(section) {
+  const out = [];
+  if (SPEND.test(section)) out.push('spend wording');
+  for (const m of section.match(REWARD_PATHS) || []) if (!ALLOWED_PATHS.has(m)) out.push(m);
+  return out;
+}
+
+test('CLM-5: the rewards UI writes only create, edit, delete, from-library and the member-view redeem', () => {
+  const section = rewardsSource(APP_SRC);
+  assert.deepEqual(spendFindings(section), []);
+  // The admin writes are exactly reward management as it was.
+  const writes = section.match(/adminRequest\('(POST|PUT|DELETE)', [^,)]+/g) || [];
+  assert.deepEqual(writes.sort(), [
+    "adminRequest('DELETE', `${base}/${r.id}`",
+    "adminRequest('POST', `${base}/from-library`",
+    "adminRequest('POST', base",
+    "adminRequest('PUT', `${base}/${r.id}`",
+  ]);
+  // The plain api() writes are the admin-PIN verify and the member's redeem.
+  assert.deepEqual((section.match(/\bapi\('(POST|PUT|DELETE)', [^,)]+/g) || []).sort(), [
+    "api('POST', `${base}/${r.id}/redeem`",
+    "api('POST', `/households/${h.id}/admin-pin/verify`",
+  ]);
+  // Redeem is posted only from renderActionArea, which runs only in member view.
+  const areaStart = section.indexOf('const renderActionArea = ');
+  const areaEnd = section.indexOf('\n    };', areaStart);
+  assert.ok(areaStart >= 0 && areaEnd > areaStart, 'renderActionArea not found');
+  const redeemAt = section.indexOf("api('POST', `${base}/${r.id}/redeem`");
+  assert.ok(redeemAt > areaStart && redeemAt < areaEnd, 'redeem POST lives in renderActionArea');
+  const outside = section.slice(0, areaStart) + section.slice(areaEnd);
+  assert.deepEqual(outside.match(/renderActionArea\(\)/g), ['renderActionArea()'], 'called once outside itself');
+  assert.match(outside, /if \(isMember\) \{\s*renderActionArea\(\);/, 'that one call is gated on member view');
+  // The check fails on a planted spend word, route or admin write.
+  assert.notDeepEqual(spendFindings(section.replace("text: 'Edit'", "text: 'Buy'")), []);
+  assert.notDeepEqual(spendFindings(`${section}adminRequest('POST', \`\${base}/\${r.id}/use\`)`), []);
+  const planted = `${section}adminRequest('POST', \`\${base}/\${r.id}/redeem\`)`;
+  assert.notDeepEqual((planted.match(/adminRequest\('(POST|PUT|DELETE)', [^,)]+/g) || []).length, writes.length);
+});
+
 const HTML_SINKS = /innerHTML|insertAdjacentHTML|outerHTML|style:|style=|<script/i;
 
 test('CLM-7: the rewards UI inserts text only — no innerHTML, inline style or script', () => {
@@ -411,7 +457,7 @@ test('CLM-7: the rewards UI inserts text only — no innerHTML, inline style or 
 
 function rewardHistorySource(src) {
   const fnStart = src.indexOf('function rewardHistoryTable(');
-  if (fnStart < 0) return null;
+  assert.ok(fnStart >= 0, 'rewardHistoryTable not found in app.js');
   // Read until next function or section divider
   const fnEnd = src.indexOf('\nfunction ', fnStart + 1);
   const end = fnEnd >= 0 ? fnEnd : src.length;
@@ -420,13 +466,8 @@ function rewardHistorySource(src) {
 
 test('CLM-11: reward history inserts text only — no innerHTML, inline style or script', () => {
   const section = rewardHistorySource(APP_SRC);
-  if (section === null) {
-    // Another unit is adding rewardHistoryTable; verify extractor fails if present with sinks
-    const dummy = "function rewardHistoryTable() { return el('p', { text: 'No rewards redeemed yet' }); }";
-    assert.equal(HTML_SINKS.exec(dummy), null);
-    assert.ok(HTML_SINKS.test(dummy.replace("text: 'No rewards redeemed yet'", "innerHTML: 'sink'")), 'check fails on planted innerHTML');
-    return;
-  }
+  assert.match(section, /No rewards redeemed yet/, 'read the real rewardHistoryTable body');
+  assert.throws(() => rewardHistorySource('function other() {}'), /rewardHistoryTable not found/, 'a missing function fails the check');
   assert.equal(HTML_SINKS.exec(section), null);
   assert.ok(HTML_SINKS.test(`${section}el('div', { innerHTML: 'danger' })`), 'check fails on a planted sink');
 });
