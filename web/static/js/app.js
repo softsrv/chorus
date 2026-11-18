@@ -361,8 +361,12 @@ let activeMember = null; // { id, name, pin } after a successful verify
 let adminPin = null; // the admin PIN once entered, sent as X-Admin-PIN
 let adminPinState = { householdId: null, set: false }; // GET .../admin-pin
 // memberHistory is the active member's points history, read once per member
-// selection: { member (the activeMember object it was read for), items, error }.
+// selection (and again after an admin adjusts that member's points on the
+// Family tab): { member (the activeMember object it was read for), ready }.
 let memberHistory = null;
+// memberBarPoints re-reads the active member's total into the member bar
+// drawn last (set by memberBar); null before one is drawn.
+let memberBarPoints = null;
 // familyView marks the Family tab's member view in flight; a points-history
 // answer for a view the admin has since left is not rendered.
 let familyView = null;
@@ -573,7 +577,10 @@ function memberBar(h) {
   const $who = el('span', { class: 'text-sm flex-1', text: `Viewing as: ${activeMember ? activeMember.name : 'Administrator'}` });
   // The active member's points come from the server on every render (never
   // computed here), so an approval shows up the next time the view is drawn.
-  if (activeMember) {
+  // memberBarPoints re-reads them on demand, for a write made outside the
+  // member's own actions (an admin adjustment on the Family tab).
+  const showPoints = () => {
+    if (!activeMember) return;
     const shown = activeMember;
     api('GET', `/households/${h.id}/family-members`)
       .then((r) => {
@@ -581,7 +588,9 @@ function memberBar(h) {
         if (m && activeMember === shown) $who.textContent = `Viewing as: ${m.name} · ${m.points} points`;
       })
       .catch((err) => console.error('member points', err)); // the name alone stays; the tab surfaces API errors
-  }
+  };
+  memberBarPoints = showPoints;
+  showPoints();
 
   const become = (m, pin) => {
     activeMember = { id: m.id, name: m.name, pin };
@@ -1400,6 +1409,12 @@ async function familyTab(h, $root) {
         $save.disabled = true;
         try {
           const updated = await adminRequest('POST', `${base}/${m.id}/points-adjustments`, body);
+          // The member's own card caches its history once per pick: drop it,
+          // and re-read the member bar's total, so the card shows this change.
+          if (activeMember?.id === m.id) {
+            memberHistory = null;
+            memberBarPoints?.();
+          }
           if (familyView !== view) return;
           await showMember(updated);
         } catch (err) {

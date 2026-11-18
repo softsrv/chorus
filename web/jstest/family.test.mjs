@@ -42,6 +42,7 @@ function routes() {
   for (const m of srv.members) {
     r[`GET ${HP}/family-members/${m.id}/points-history`] = (q) => srv.history(q, m);
     r[`POST ${HP}/family-members/${m.id}/points-adjustments`] = (q) => srv.adjust(q, m);
+    r[`POST ${HP}/family-members/${m.id}/verify`] = (q) => ((q.body.pin || '') === '' && !m.has_pin ? [204, null] : err(403, 'wrong_pin'));
   }
   return r;
 }
@@ -380,4 +381,31 @@ test('admin points: a wrong_pin on save locks the tab again', async () => {
   fill({ points: 1 });
   await submit(adjustForm());
   assert.match(text(), /Enter the admin PIN to manage the family\./);
+});
+
+test('admin points 2.1/7: after an adjustment to the active member, their quest card history, header and picker show the new total', async () => {
+  applyingServer(noHistory);
+  await loadApp();
+  const startingWith = (prefix) => walk(env.$app).find((n) => n.tagName === 'BUTTON' && n.textContent.startsWith(prefix));
+  await click(buttons(env.$app, 'Switch member')[0]);
+  await click(startingWith('Leo'));
+  await settle();
+  assert.match(text(), /Viewing as: Leo · 0 points/);
+  assert.match(sectionNode(env.$app, 'Points history').textContent, /No points yet/);
+  assert.equal(historyCalls('m-leo').length, 1, 'the card read the history once');
+
+  await openFamily();
+  await click(buttons(env.$app, 'History')[0]);
+  fill({ points: 7, dir: 'add', reason: 'helped grandma' });
+  await submit(adjustForm());
+  await settle();
+  assert.deepEqual(h3s(), ['Leo — 7 points']);
+  assert.match(text(), /Viewing as: Leo · 7 points/, 'member bar total re-read after the save');
+
+  await click(walk(env.$app).find((n) => n.tagName === 'A' && n.textContent === 'Quests'));
+  await settle();
+  assert.deepEqual(historyRows().map((r) => [r[1], r[2]]), [['+7', 'helped grandma (from admin)']]);
+  assert.match(text(), /Viewing as: Leo · 7 points/);
+  await click(buttons(env.$app, 'Switch member')[0]);
+  assert.ok(startingWith('Leo · 7 points'), 'picker shows the new total');
 });
