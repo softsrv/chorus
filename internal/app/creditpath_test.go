@@ -11,8 +11,8 @@ import (
 	"testing"
 )
 
-// TestCreditPoints_SingleCaller verifies CLM-9: in non-test service code,
-// AddMemberPoints must only be referenced inside creditPoints.
+// TestCreditPoints_SingleCaller verifies CLM-9 and CLM-13: in non-test service code,
+// AddMemberPoints must only be referenced inside creditPoints (including for AdjustPoints).
 func TestCreditPoints_SingleCaller(t *testing.T) {
 	t.Parallel()
 

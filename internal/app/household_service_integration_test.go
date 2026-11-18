@@ -331,6 +331,64 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	_, checks["points history own household foreign member"] = familySvc.PointsHistory(ctx, alice, h.ID, malloryMember.ID, "", "", 10, 0)
 	_, checks["points history foreign household own member"] = familySvc.PointsHistory(ctx, alice, mh.ID, aliceMember.ID, "1234", "", 10, 0)
 	_, checks["points history nonexistent member"] = familySvc.PointsHistory(ctx, alice, h.ID, uuid.New(), "1234", "", 10, 0)
+	// The same four with no admin PIN set on either household and no PIN at
+	// all, so the no-PIN admin fallback is reachable: every caller below is
+	// the admin of some household, and none may reach the member's history.
+	for hh, owner := range map[uuid.UUID]uuid.UUID{h.ID: alice, mh.ID: mallory} {
+		if set, err := familySvc.AdminPinSet(ctx, owner, hh); err != nil || set {
+			t.Fatalf("admin PIN set on %v before no-PIN isolation checks = %v, %v; want false", hh, set, err)
+		}
+	}
+	_, checks["points history outsider user, no PINs"] = familySvc.PointsHistory(ctx, mallory, h.ID, aliceMember.ID, "", "", 10, 0)
+	_, checks["points history own household foreign member, no PINs"] = familySvc.PointsHistory(ctx, alice, h.ID, malloryMember.ID, "", "", 10, 0)
+	_, checks["points history foreign household own member, no PINs"] = familySvc.PointsHistory(ctx, alice, mh.ID, aliceMember.ID, "", "", 10, 0)
+	_, checks["points history nonexistent member, no PINs"] = familySvc.PointsHistory(ctx, alice, h.ID, uuid.New(), "", "", 10, 0)
+	_, checks["points history foreign member via own household as admin, no PINs"] = familySvc.PointsHistory(ctx, mallory, mh.ID, aliceMember.ID, "", "", 10, 0)
+	// Admin points adjustment isolation: a valid adjustment by an outsider, on
+	// a foreign member, under a foreign household or for an unknown member is
+	// ErrNotFound, and nothing is written for either household's members.
+	countAwards := func(memberID uuid.UUID) int {
+		t.Helper()
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM points_awards WHERE member_id = $1`, memberID).Scan(&n); err != nil {
+			t.Fatalf("count points_awards for %s: %v", memberID, err)
+		}
+		return n
+	}
+	adjustMembers := []uuid.UUID{aliceMember.ID, malloryMember.ID}
+	pointsBefore := map[uuid.UUID]int32{}
+	awardsBefore := map[uuid.UUID]int{}
+	for _, id := range adjustMembers {
+		owner, hh := alice, h.ID
+		if id == malloryMember.ID {
+			owner, hh = mallory, mh.ID
+		}
+		m, err := familySvc.Get(ctx, owner, hh, id)
+		if err != nil {
+			t.Fatalf("get member %s before adjustments: %v", id, err)
+		}
+		pointsBefore[id], awardsBefore[id] = m.Points, countAwards(id)
+	}
+	adjust := app.AdjustPointsInput{Points: num(5), Reason: "smuggled"}
+	_, checks["adjust points outsider user"] = familySvc.AdjustPoints(ctx, mallory, h.ID, aliceMember.ID, adjust, "")
+	_, checks["adjust points own household foreign member"] = familySvc.AdjustPoints(ctx, alice, h.ID, malloryMember.ID, adjust, "")
+	_, checks["adjust points foreign household own member"] = familySvc.AdjustPoints(ctx, alice, mh.ID, aliceMember.ID, adjust, "")
+	_, checks["adjust points nonexistent member"] = familySvc.AdjustPoints(ctx, alice, h.ID, uuid.New(), adjust, "")
+	_, checks["adjust points foreign member via own household as admin"] = familySvc.AdjustPoints(ctx, mallory, mh.ID, aliceMember.ID, adjust, "")
+	_, checks["adjust points outsider user, removal"] = familySvc.AdjustPoints(ctx, mallory, h.ID, aliceMember.ID, app.AdjustPointsInput{Points: num(-5)}, "")
+	for _, id := range adjustMembers {
+		owner, hh := alice, h.ID
+		if id == malloryMember.ID {
+			owner, hh = mallory, mh.ID
+		}
+		m, err := familySvc.Get(ctx, owner, hh, id)
+		if err != nil || m.Points != pointsBefore[id] {
+			t.Errorf("member %s points after refused adjustments = %+v, %v; want %d", id, m, err, pointsBefore[id])
+		}
+		if n := countAwards(id); n != awardsBefore[id] {
+			t.Errorf("member %s points_awards after refused adjustments = %d; want %d", id, n, awardsBefore[id])
+		}
+	}
 	// Reward isolation: every reward operation by an outsider is ErrNotFound,
 	// and Alice's reward id smuggled under Mallory's own household fails too.
 	rewardLibrary, err := rewards.ListLibrary(ctx)
@@ -613,17 +671,14 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	if len(aliceHistAdmin) != 1 || aliceHistAdmin[0].ID != aliceAwardID {
 		t.Errorf("alice admin PIN points history mismatch: got %+v, want award %v", aliceHistAdmin, aliceAwardID)
 	}
-	if err := familySvc.ClearAdminPin(ctx, alice, h.ID, "5555"); err != nil {
-		t.Fatalf("ClearAdminPin for alice: %v", err)
-	}
-
-	// Wrong PIN -> ErrWrongPIN and no rows returned.
+	// With an admin PIN set, a wrong member PIN plus a missing or wrong admin
+	// PIN -> ErrWrongPIN and no rows returned.
 	wrongHist, err := familySvc.PointsHistory(ctx, alice, h.ID, aliceMember.ID, "0000", "", 50, 0)
 	if !errors.Is(err, app.ErrWrongPIN) {
-		t.Errorf("wrong member PIN points history: expected ErrWrongPIN, got %v", err)
+		t.Errorf("wrong member PIN, missing admin PIN points history: expected ErrWrongPIN, got %v", err)
 	}
 	if len(wrongHist) != 0 {
-		t.Errorf("wrong member PIN points history returned rows: %+v", wrongHist)
+		t.Errorf("wrong member PIN, missing admin PIN points history returned rows: %+v", wrongHist)
 	}
 	wrongHist2, err := familySvc.PointsHistory(ctx, alice, h.ID, aliceMember.ID, "0000", "0000", 50, 0)
 	if !errors.Is(err, app.ErrWrongPIN) {
@@ -631,6 +686,44 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	}
 	if len(wrongHist2) != 0 {
 		t.Errorf("wrong member and admin PIN points history returned rows: %+v", wrongHist2)
+	}
+	if err := familySvc.ClearAdminPin(ctx, alice, h.ID, "5555"); err != nil {
+		t.Fatalf("ClearAdminPin for alice: %v", err)
+	}
+
+	// No admin PIN set: the household admin reads a PIN'd member's history
+	// with no member PIN, and with a wrong one, whatever the member's PIN.
+	if set, err := familySvc.AdminPinSet(ctx, alice, h.ID); err != nil || set {
+		t.Fatalf("admin PIN set before no-PIN admin read = %v, %v; want false", set, err)
+	}
+	for _, memberPin := range []string{"", "0000"} {
+		adminNoPinHist, err := familySvc.PointsHistory(ctx, alice, h.ID, aliceMember.ID, memberPin, "", 50, 0)
+		if err != nil {
+			t.Fatalf("admin PointsHistory with no admin PIN set (member PIN %q): %v", memberPin, err)
+		}
+		if len(adminNoPinHist) != 1 || adminNoPinHist[0].ID != aliceAwardID {
+			t.Errorf("admin no-PIN points history (member PIN %q) mismatch: got %+v, want award %v", memberPin, adminNoPinHist, aliceAwardID)
+		}
+	}
+
+	// A non-admin caller with a wrong member PIN gets ErrWrongPIN, never
+	// ErrForbidden; the right member PIN still reads. The service never makes
+	// a non-admin login, so the role is flipped in the database and restored.
+	if _, err := pool.Exec(ctx, "UPDATE household_members SET role = 'member' WHERE household_id = $1 AND user_id = $2", h.ID, alice); err != nil {
+		t.Fatalf("demote alice: %v", err)
+	}
+	nonAdminHist, err := familySvc.PointsHistory(ctx, alice, h.ID, aliceMember.ID, "0000", "", 50, 0)
+	if !errors.Is(err, app.ErrWrongPIN) || errors.Is(err, app.ErrForbidden) {
+		t.Errorf("non-admin wrong member PIN points history: expected ErrWrongPIN, got %v", err)
+	}
+	if len(nonAdminHist) != 0 {
+		t.Errorf("non-admin wrong member PIN points history returned rows: %+v", nonAdminHist)
+	}
+	if got, err := familySvc.PointsHistory(ctx, alice, h.ID, aliceMember.ID, "1234", "", 50, 0); err != nil || len(got) != 1 {
+		t.Errorf("non-admin right member PIN points history = %+v, %v; want 1 award", got, err)
+	}
+	if _, err := pool.Exec(ctx, "UPDATE household_members SET role = 'admin' WHERE household_id = $1 AND user_id = $2", h.ID, alice); err != nil {
+		t.Fatalf("restore alice admin: %v", err)
 	}
 
 	// A DB fault inside PIN verification (after getHousehold and the member
@@ -664,7 +757,7 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	adminFaultSvc := app.NewFamilyService(db.New(adminFault), pool, 10)
 	nonPinAdminHist, err := adminFaultSvc.PointsHistory(ctx, alice, h.ID, aliceMember.ID, "0000", "5555", 50, 0)
 	if adminFault.calls < 1 {
-		t.Fatalf("admin-path fault never reached VerifyAdminPin: err %v", err)
+		t.Fatalf("admin-path fault never reached the admin PIN check: err %v", err)
 	}
 	if err == nil {
 		t.Errorf("PointsHistory with admin verify fault: expected error, got nil")

@@ -11,6 +11,7 @@ import {
   installBrowser, installFetch, loadApp, settle, walk, buttons, buttonStarting,
   click, submit, section, sectionNode,
 } from './harness.mjs';
+import * as memberCardAdminRows from './fixtures/member-card-admin-rows.fixture.mjs';
 import {
   MEMBERS, SAM, AVA, LEO, RANGE_QUESTS, FEED_CAT, MOW_LAWN, READ_CHAPTER, WATER_PLANTS, TIDY_ROOM, RAKE_LEAVES,
   BIRTHDAYS, MIN_ABOVE_MAX, RANGE_422, ageQuest,
@@ -479,6 +480,34 @@ test('CLM-10: takeCard fetches points-history with X-Member-PIN and renders tabl
   assert.equal(rowData[1][2], 'Feed the cat');
   assert.equal(rowData[2][1], '+10');
   assert.equal(rowData[2][2], 'Clean sweep');
+});
+
+test('admin points CLM-3/CLM-12: the member card shows admin rows signed with (from admin), read-only, and the new total in header and picker', async () => {
+  srv.members = memberCardAdminRows.members;
+  srv.history = memberCardAdminRows.pointsHistory['m-maya'];
+  srv.extra[`POST ${HP}/family-members/m-maya/verify`] = (r) => (r.body.pin === '4321' ? [204, null] : err(403, 'wrong_pin'));
+  await loadApp();
+  await click(buttons(env.$app, 'Switch member')[0]);
+  assert.ok(buttonStarting(env.$app, 'Maya · 42 points'), 'picker shows the adjusted total');
+  await click(buttonStarting(env.$app, 'Maya'));
+  const $pin = walk(env.$app).find((n) => n.tagName === 'INPUT' && n.name === 'pin');
+  $pin.value = '4321';
+  await submit($pin.parentNode.parentNode);
+
+  const histCall = calls.find((c) => c.path === `${HP}/family-members/m-maya/points-history`);
+  assert.equal(histCall.headers['X-Member-PIN'], '4321');
+  assert.match(text(), /Viewing as: Maya · 42 points/);
+
+  const historyNode = sectionNode(env.$app, 'Points history');
+  const trs = walk(historyNode).filter((n) => n.tagName === 'TBODY').flatMap((b) => walk(b).filter((n) => n.tagName === 'TR'));
+  const rowData = trs.map((tr) => walk(tr).filter((n) => n.tagName === 'TD').map((td) => td.textContent));
+  assert.deepEqual(rowData.map((r) => [r[1], r[2]]), [
+    ['+10', 'helped grandma (from admin)'],
+    ['-5', 'left toys out (from admin)'],
+    ['+5', 'Quest: Feed the cat'],
+  ]);
+  assert.ok(!historyNode.textContent.includes('(admin adjustment)'), 'member card uses its own label');
+  assert.equal(walk(historyNode).filter((n) => ['FORM', 'INPUT', 'BUTTON'].includes(n.tagName)).length, 0, 'history is read-only');
 });
 
 test('a failing points-history read keeps the quest lists and actions; the error shows in the history section', async () => {

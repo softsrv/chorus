@@ -48,7 +48,7 @@ test:
 
 # Web client unit tests: app.js against a minimal DOM and a stubbed fetch.
 test-js:
-	node --test web/jstest/quests.test.mjs web/jstest/rewards.test.mjs web/jstest/combos.test.mjs
+	node --test web/jstest/quests.test.mjs web/jstest/rewards.test.mjs web/jstest/combos.test.mjs web/jstest/family.test.mjs
 
 # Integration tests run against TEST_DATABASE_URL (the chorus_test database).
 test-integration: migrate-test migrate-roundtrip-test

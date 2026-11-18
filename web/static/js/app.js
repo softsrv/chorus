@@ -397,8 +397,15 @@ let activeMember = null; // { id, name, pin } after a successful verify
 let adminPin = null; // the admin PIN once entered, sent as X-Admin-PIN
 let adminPinState = { householdId: null, set: false }; // GET .../admin-pin
 // memberHistory is the active member's points history, read once per member
-// selection: { member (the activeMember object it was read for), items, error }.
+// selection (and again after an admin adjusts that member's points on the
+// Family tab): { member (the activeMember object it was read for), ready }.
 let memberHistory = null;
+// memberBarPoints re-reads the active member's total into the member bar
+// drawn last (set by memberBar); null before one is drawn.
+let memberBarPoints = null;
+// familyView marks the Family tab's member view in flight; a points-history
+// answer for a view the admin has since left is not rendered.
+let familyView = null;
 
 // clearMemberState returns to the administrator's view with nothing unlocked.
 function clearMemberState() {
@@ -406,6 +413,7 @@ function clearMemberState() {
   adminPin = null;
   adminPinState = { householdId: null, set: false };
   memberHistory = null;
+  familyView = null;
 }
 
 // activeMemberAction is the one accessor member actions (accept, abandon, mark
@@ -605,7 +613,10 @@ function memberBar(h) {
   const $who = el('span', { class: 'text-sm flex-1', text: `Viewing as: ${activeMember ? activeMember.name : 'Administrator'}` });
   // The active member's points come from the server on every render (never
   // computed here), so an approval shows up the next time the view is drawn.
-  if (activeMember) {
+  // memberBarPoints re-reads them on demand, for a write made outside the
+  // member's own actions (an admin adjustment on the Family tab).
+  const showPoints = () => {
+    if (!activeMember) return;
     const shown = activeMember;
     api('GET', `/households/${h.id}/family-members`)
       .then((r) => {
@@ -613,7 +624,9 @@ function memberBar(h) {
         if (m && activeMember === shown) $who.textContent = `Viewing as: ${m.name} · ${m.points} points`;
       })
       .catch((err) => console.error('member points', err)); // the name alone stays; the tab surfaces API errors
-  }
+  };
+  memberBarPoints = showPoints;
+  showPoints();
 
   const become = (m, pin) => {
     activeMember = { id: m.id, name: m.name, pin };
@@ -984,21 +997,37 @@ async function takeCard(h, quests, members, rerender, member = activeMember) {
         waitingBadge(q)), ''),
     el('div', { class: 'space-y-1' },
       el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Points history' }),
-      historyError ? alertBox('error', historyError) : history.length
-        ? el('table', { class: 'table table-sm' },
-            el('thead', {}, el('tr', {},
-              el('th', { text: 'Date' }),
-              el('th', { text: 'Points' }),
-              el('th', { text: 'Reason' }),
-            )),
-            el('tbody', {}, history.map((item) => el('tr', {},
-              el('td', { text: fmtDate(item.earned_at) }),
-              el('td', { text: `+${item.points}` }),
-              el('td', { text: item.reason }),
-            ))),
-          )
-        : el('p', { class: 'text-xs opacity-60', text: 'No points yet. Points you earn will show up here.' }),
+      historyError ? alertBox('error', historyError) : pointsHistoryTable(history, 'No points yet. Points you earn will show up here.', { adminLabel: '(from admin)' }),
     ));
+}
+
+// pointsHistoryTable renders the member's or admin's view of points awards:
+// the Date/Points/Reason table, or an empty paragraph when there are none.
+// Points are signed ('+N', or '-N' for an admin removal). opts.adminLabel is
+// appended to the reason of each admin adjustment (kind 'admin'): the Family
+// tab says '(admin adjustment)', the member's own card '(from admin)'.
+function pointsHistoryTable(history, emptyText, opts = {}) {
+  if (!history || history.length === 0) {
+    return el('p', { class: 'text-xs opacity-60', text: emptyText });
+  }
+  const reasonOf = (item) => (item.kind === 'admin' && opts.adminLabel ? `${item.reason} ${opts.adminLabel}` : item.reason);
+  return el('table', { class: 'table table-sm' },
+    el('thead', {}, el('tr', {},
+      el('th', { text: 'Date' }),
+      el('th', { text: 'Points' }),
+      el('th', { text: 'Reason' }),
+    )),
+    el('tbody', {}, history.map((item) => el('tr', {},
+      el('td', { text: fmtDate(item.earned_at) }),
+      el('td', { text: signedPoints(item.points) }),
+      el('td', { text: reasonOf(item) }),
+    ))),
+  );
+}
+
+// signedPoints shows a points amount with its sign: '+5', '+0', '-5'.
+function signedPoints(n) {
+  return n < 0 ? String(n) : `+${n}`;
 }
 
 // approvalNotice is the plain-text notice after an approval that paid
@@ -1404,6 +1433,7 @@ async function familyTab(h, $root) {
     return;
   }
 
+  familyView = null; // any member view still loading is now stale
   const base = `/households/${h.id}/family-members`;
   const members = (await api('GET', base)).items;
   // Birthdays come only from the admin-PIN-gated read, here on the Family
@@ -1463,12 +1493,108 @@ async function familyTab(h, $root) {
     return $row;
   };
 
+  // showMember swaps the family list for one member's view: heading, Back,
+  // the slot for the adjust-points form, then the points history read with
+  // the admin's headers. A late answer for a view the admin already left is
+  // dropped; a failed read shows an inline error inside the history section.
+  const showMember = async (m) => {
+    const view = {};
+    familyView = view;
+    const heading = () => el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Points history' });
+    const $history = el('div', { class: 'space-y-1' },
+      heading(), el('p', { class: 'text-xs opacity-60', text: 'Loading points history…' }));
+    $root.replaceChildren(card(null,
+      el('h3', { class: 'font-semibold', text: `${m.name} — ${m.points} points` }),
+      el('div', {}, el('button', { class: 'btn btn-ghost btn-xs', text: 'Back to family', onclick: () => rerender() })),
+      adjustPointsForm(m, view),
+      $history));
+    let content;
+    try {
+      const res = await adminRequest('GET', `${base}/${m.id}/points-history`);
+      content = pointsHistoryTable(res.items, 'No points history yet.', { adminLabel: '(admin adjustment)' });
+    } catch (err) {
+      if (familyView !== view) return;
+      if (err instanceof ApiError && (err.code === 'wrong_pin' || err.code === 'admin_pin_required')) {
+        rerender(); // adminRequest forgot the PIN: the tab locks again
+        return;
+      }
+      console.error('points history', err);
+      content = alertBox('error', 'Could not load points history. Reload to try again.');
+    }
+    if (familyView !== view) return;
+    $history.replaceChildren(heading(), content);
+  };
+
+  // adjustPointsForm is the member view's 'Adjust points' fieldset: an amount,
+  // Add (default) or Remove, an optional reason. Save POSTs the signed amount;
+  // on 200 the view reopens with the member the API returned (new total, new
+  // history). A field error (422) shows as an inline alert between the
+  // direction and the reason, keeping what was entered.
+  const adjustPointsForm = (m, view) => {
+    const $points = el('input', { type: 'number', name: 'points', min: '1', step: '1', class: 'input input-bordered input-sm w-24' });
+    const $add = el('input', { type: 'radio', name: 'direction', value: 'add', class: 'radio radio-sm', checked: true });
+    const $remove = el('input', { type: 'radio', name: 'direction', value: 'remove', class: 'radio radio-sm' });
+    const $reason = el('input', { type: 'text', name: 'reason', maxlength: '200', class: 'input input-bordered input-sm w-full' });
+    const $alert = el('div');
+    const $save = el('button', { type: 'submit', class: 'btn btn-primary btn-sm', text: 'Save' });
+    const showAlert = (message) => $alert.replaceChildren(el('p', { role: 'alert', class: 'text-error text-xs', text: message }));
+    return el('form', {
+      class: 'space-y-2',
+      onsubmit: async (e) => {
+        e.preventDefault();
+        $alert.replaceChildren();
+        const raw = String($points.value).trim();
+        if (!/^\d+$/.test(raw) || Number(raw) === 0) {
+          showAlert('Points must be a whole number above 0.');
+          return;
+        }
+        const amount = Number(raw);
+        const body = { points: $remove.checked ? -amount : amount, reason: $reason.value };
+        $save.disabled = true;
+        try {
+          const updated = await adminRequest('POST', `${base}/${m.id}/points-adjustments`, body);
+          // The member's own card caches its history once per pick: drop it,
+          // and re-read the member bar's total, so the card shows this change.
+          if (activeMember?.id === m.id) {
+            memberHistory = null;
+            memberBarPoints?.();
+          }
+          if (familyView !== view) return;
+          await showMember(updated);
+        } catch (err) {
+          if (familyView !== view) return;
+          if (err instanceof ApiError && (err.code === 'wrong_pin' || err.code === 'admin_pin_required')) {
+            rerender(); // adminRequest forgot the PIN: the tab locks again
+            return;
+          }
+          if (!(err instanceof ApiError)) console.error('adjust points', err);
+          const fields = err instanceof ApiError ? Object.values(err.fields) : [];
+          showAlert(fields.length ? fields.join(' ') : (err.message || String(err)));
+        } finally {
+          $save.disabled = false;
+        }
+      },
+    }, el('fieldset', { class: 'space-y-2' },
+      el('legend', { class: 'font-semibold text-sm', text: 'Adjust points' }),
+      el('div', { class: 'flex flex-wrap items-center gap-3' },
+        el('label', { class: 'flex items-center gap-2' }, el('span', { class: 'text-sm', text: 'Points' }), $points),
+        el('label', { class: 'flex items-center gap-1' }, $add, el('span', { class: 'text-sm', text: 'Add' })),
+        el('label', { class: 'flex items-center gap-1' }, $remove, el('span', { class: 'text-sm', text: 'Remove' }))),
+      $alert,
+      el('label', { class: 'block' }, el('span', { class: 'text-sm', text: 'Reason' }), $reason),
+      $save));
+  };
+
   const rows = members.map((m) => {
     const $row = el('li', { class: 'flex flex-wrap items-center gap-2 py-2 border-b border-base-300' },
       el('div', { class: 'flex-1 min-w-0' },
         el('div', { text: m.name }),
         el('div', { class: 'text-xs opacity-60', text: `${m.points} points` })),
       el('span', { class: 'badge badge-sm', text: m.has_pin ? 'PIN' : 'No PIN' }),
+      el('button', {
+        class: 'btn btn-ghost btn-xs', text: 'History',
+        onclick: () => showMember(m).catch((err) => showError($root, err)),
+      }),
       el('button', {
         class: 'btn btn-ghost btn-xs', text: 'Rename',
         onclick: () => $row.replaceWith(el('li', { class: 'py-2' }, form({

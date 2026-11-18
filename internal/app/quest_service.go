@@ -761,15 +761,19 @@ const (
 	awardKindQuest  = "quest"
 	awardKindCombo  = "combo"
 	awardKindStreak = "streak"
+	// awardKindAdmin is an admin's manual adjustment; its points are signed.
+	awardKindAdmin = "admin"
 )
 
 // streakBonusFrom is the streak count from which an approval pays the
 // quest's streak bonus: the 3rd completion in a row and every one after.
 const streakBonusFrom = 3
 
-// creditPoints is the single path that adds points to a family member: it
-// adds points to the member's total and writes the points_awards history row
-// that explains them, both on q, which must be bound to the caller's
+// creditPoints is the single path that changes a family member's points: it
+// adds the signed delta points to the member's total (negative only for an
+// admin adjustment, whose caller checks the total stays at or above 0) and
+// writes the points_awards history row that explains it, both on q, which
+// must be bound to the caller's
 // transaction so that the credit, its history and the caller's own writes
 // commit or roll back together. earnedAt is the moment the award was earned.
 func creditPoints(ctx context.Context, q *db.Queries, householdID, memberID uuid.UUID, kind, reason string, points int32, earnedAt pgtype.Timestamptz) (db.FamilyMember, error) {

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"net/http"
 	"time"
@@ -24,6 +25,7 @@ type familyServicer interface {
 	ListBirthdays(ctx context.Context, userID, householdID uuid.UUID, adminPin string) ([]app.MemberBirthday, error)
 	Verify(ctx context.Context, userID, householdID, memberID uuid.UUID, pin string) (app.Member, error)
 	PointsHistory(ctx context.Context, userID, householdID, memberID uuid.UUID, memberPin, adminPin string, limit, offset int32) ([]app.PointsAward, error)
+	AdjustPoints(ctx context.Context, userID, householdID, memberID uuid.UUID, in app.AdjustPointsInput, adminPin string) (app.Member, error)
 	AdminPinSet(ctx context.Context, userID, householdID uuid.UUID) (bool, error)
 	SetAdminPin(ctx context.Context, userID, householdID uuid.UUID, newPin, currentAdminPin string) error
 	ClearAdminPin(ctx context.Context, userID, householdID uuid.UUID, currentAdminPin string) error
@@ -103,6 +105,13 @@ type adminPinRequest struct {
 
 type adminPinStatusResponse struct {
 	Set bool `json:"set"`
+}
+
+// pointsAdjustmentRequest is the body of an admin points adjustment. points
+// stays raw so a wrong-typed value is reported as a field error on points.
+type pointsAdjustmentRequest struct {
+	Points json.RawMessage `json:"points"`
+	Reason string          `json:"reason"`
 }
 
 func parseHouseholdID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
@@ -415,4 +424,27 @@ func (h *FamilyMemberHandler) PointsHistory(w http.ResponseWriter, r *http.Reque
 	respond.JSON(w, http.StatusOK, listResponse[pointsAwardJSON]{
 		Items: mapSlice(awards, toPointsAward),
 	})
+}
+
+// AdjustPoints adds or removes an admin's points for a member and returns
+// the member at the new total.
+// POST /api/v1/households/{householdID}/family-members/{memberID}/points-adjustments
+func (h *FamilyMemberHandler) AdjustPoints(w http.ResponseWriter, r *http.Request) {
+	hid, mid, ok := parseMemberIDs(w, r)
+	if !ok {
+		return
+	}
+	var req pointsAdjustmentRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	m, err := h.svc.AdjustPoints(r.Context(), currentUser(r), hid, mid, app.AdjustPointsInput{
+		Points: numberField(req.Points),
+		Reason: req.Reason,
+	}, r.Header.Get("X-Admin-PIN"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, toMemberResponse(m))
 }
