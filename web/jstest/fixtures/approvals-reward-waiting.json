@@ -1,0 +1,35 @@
+{
+  "completions": [
+    {
+      "completion_id": "c1",
+      "quest_id": "q1",
+      "name": "Empty the dishwasher",
+      "points": 10,
+      "member_id": "m-alex",
+      "member_name": "Alex",
+      "done_at": "2025-01-03T00:00:00Z"
+    }
+  ],
+  "rewardRedemptions": [
+    {
+      "id": "red-1",
+      "household_id": "h1",
+      "member_id": "m-sam",
+      "member_name": "Sam",
+      "reward_id": "r-movie",
+      "description": "Movie night",
+      "cost": 100,
+      "status": "pending",
+      "requested_at": "2025-01-03T12:00:00Z"
+    }
+  ],
+  "approveError422": {
+    "error": {
+      "code": "insufficient_points",
+      "message": "Can't approve Pizza night for Alex: Alex has 90 points and it costs 150. Nothing was taken.",
+      "fields": {
+        "points": "Can't approve Pizza night for Alex: Alex has 90 points and it costs 150. Nothing was taken."
+      }
+    }
+  }
+}

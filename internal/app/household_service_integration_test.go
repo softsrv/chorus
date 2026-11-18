@@ -31,7 +31,7 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	households := app.NewHouseholdService(q, pool)
 	quests := app.NewQuestService(q, pool)
 	familySvc := app.NewFamilyService(q, pool, 10)
-	rewards := app.NewRewardService(q)
+	rewards := app.NewRewardService(q, pool)
 	combos := app.NewComboService(q, pool)
 	ctx := context.Background()
 
@@ -406,6 +406,58 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	checks["delete reward via own household"] = rewards.Delete(ctx, mallory, mh.ID, aliceReward.ID, "")
 	if own, err := rewards.List(ctx, mallory, mh.ID); err != nil || len(own) != 0 {
 		t.Errorf("mallory's own reward list shows other households' rewards: %+v, %v", own, err)
+	}
+
+	// Redemption isolation: Alice's member has a pending request for Alice's
+	// reward. Every redemption operation by an outsider is ErrNotFound, and
+	// Alice's reward, member or request id smuggled through Mallory's own
+	// household fails too. The points are lent only for the request (nothing
+	// is taken until approval) and handed back, so the checks below still see
+	// Alice's member at 0.
+	if _, err := q.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: h.ID, ID: aliceMember.ID, Delta: aliceReward.Cost}); err != nil {
+		t.Fatalf("lend points to alice member: %v", err)
+	}
+	aliceRedemption, created, err := rewards.RequestRedemption(ctx, alice, h.ID, aliceReward.ID, app.MemberAction{MemberID: aliceMember.ID, PIN: "1234"})
+	if err != nil || !created {
+		t.Fatalf("alice member requests redemption: created=%v, %v", created, err)
+	}
+	if _, err := q.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: h.ID, ID: aliceMember.ID, Delta: -aliceReward.Cost}); err != nil {
+		t.Fatalf("hand back lent points: %v", err)
+	}
+	_, _, checks["request redemption"] = rewards.RequestRedemption(ctx, mallory, h.ID, aliceReward.ID, app.MemberAction{MemberID: aliceMember.ID, PIN: "1234"})
+	_, _, checks["request redemption as own member"] = rewards.RequestRedemption(ctx, mallory, h.ID, aliceReward.ID, app.MemberAction{MemberID: malloryMember.ID})
+	_, checks["list member pending redemptions"] = rewards.ListMemberPending(ctx, mallory, h.ID, aliceMember.ID, "1234", "")
+	_, checks["list pending redemptions"] = rewards.ListPending(ctx, mallory, h.ID, "")
+	_, checks["reward history outsider user"] = rewards.RewardHistory(ctx, mallory, h.ID, aliceMember.ID, "1234", "", 10, 0)
+	_, checks["reward history own household foreign member"] = rewards.RewardHistory(ctx, alice, h.ID, malloryMember.ID, "", "", 10, 0)
+	_, checks["reward history foreign household own member"] = rewards.RewardHistory(ctx, alice, mh.ID, aliceMember.ID, "1234", "", 10, 0)
+	_, _, checks["approve redemption"] = rewards.Approve(ctx, mallory, h.ID, aliceRedemption.ID, "")
+	_, checks["reject redemption"] = rewards.Reject(ctx, mallory, h.ID, aliceRedemption.ID, "")
+	_, _, checks["request redemption via own household with alice's reward"] = rewards.RequestRedemption(ctx, mallory, mh.ID, aliceReward.ID, app.MemberAction{MemberID: malloryMember.ID})
+	_, _, checks["request redemption via own household with alice's member"] = rewards.RequestRedemption(ctx, mallory, mh.ID, aliceReward.ID, app.MemberAction{MemberID: aliceMember.ID, PIN: "1234"})
+	_, checks["list member pending redemptions via own household"] = rewards.ListMemberPending(ctx, mallory, mh.ID, aliceMember.ID, "1234", "")
+	_, checks["reward history via own household"] = rewards.RewardHistory(ctx, mallory, mh.ID, aliceMember.ID, "1234", "", 10, 0)
+	_, checks["reward history foreign member via own household as admin"] = rewards.RewardHistory(ctx, mallory, mh.ID, aliceMember.ID, "", "", 10, 0)
+	_, _, checks["approve redemption via own household"] = rewards.Approve(ctx, mallory, mh.ID, aliceRedemption.ID, "")
+	_, checks["reject redemption via own household"] = rewards.Reject(ctx, mallory, mh.ID, aliceRedemption.ID, "")
+	_, _, checks["approve redemption from own household as alice"] = rewards.Approve(ctx, alice, mh.ID, aliceRedemption.ID, "")
+	if own, err := rewards.ListPending(ctx, mallory, mh.ID, ""); err != nil || len(own) != 0 {
+		t.Errorf("mallory's own pending redemptions show other households' requests: %+v, %v", own, err)
+	}
+	// Alice's request is untouched: still pending, and no points moved.
+	if pending, err := rewards.ListPending(ctx, alice, h.ID, ""); err != nil || len(pending) != 1 || pending[0].ID != aliceRedemption.ID {
+		t.Errorf("alice's pending redemptions after outsider attempts = %+v, %v; want only %v", pending, err, aliceRedemption.ID)
+	}
+	if m, err := familySvc.Get(ctx, alice, h.ID, aliceMember.ID); err != nil || m.Points != 0 {
+		t.Errorf("alice's member points changed by outsider redemption attempts: %+v, %v", m, err)
+	}
+	var redemptionRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM reward_redemptions WHERE household_id = $1`, mh.ID).Scan(&redemptionRows); err != nil || redemptionRows != 0 {
+		t.Errorf("reward_redemptions rows in mallory's household = %d, %v; want 0", redemptionRows, err)
+	}
+	// Put the request away so the checks below start from the same state.
+	if _, err := rewards.Reject(ctx, alice, h.ID, aliceRedemption.ID, ""); err != nil {
+		t.Fatalf("alice rejects her member's redemption: %v", err)
 	}
 
 	// Combo isolation: every combo operation by an outsider is ErrNotFound,

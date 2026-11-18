@@ -124,41 +124,8 @@ func (s *FamilyService) Get(ctx context.Context, userID, householdID, memberID u
 // Otherwise (wrong or missing PIN, or a non-admin without the member PIN) it returns ErrWrongPIN.
 // Empty result returns an empty, non-nil slice.
 func (s *FamilyService) PointsHistory(ctx context.Context, userID, householdID, memberID uuid.UUID, memberPin, adminPin string, limit, offset int32) ([]PointsAward, error) {
-	if _, err := getHousehold(ctx, s.q, userID, householdID); err != nil {
+	if err := authorizeMemberRead(ctx, s.q, userID, householdID, memberID, memberPin, adminPin); err != nil {
 		return nil, err
-	}
-
-	if _, err := s.q.GetFamilyMember(ctx, db.GetFamilyMemberParams{
-		HouseholdID: householdID,
-		ID:          memberID,
-	}); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrNotFound
-		}
-		return nil, fmt.Errorf("get family member: %w", err)
-	}
-
-	authorized := false
-	_, memberErr := VerifyMemberPin(ctx, s.q, householdID, memberID, memberPin)
-	if memberErr == nil {
-		authorized = true
-	} else if !errors.Is(memberErr, ErrWrongPIN) {
-		return nil, fmt.Errorf("verify member pin: %w", memberErr)
-	}
-
-	if !authorized {
-		// Admin fallback: requireAdminPin passes for the household admin when the admin PIN
-		// matches, or when no admin PIN is set. A non-admin caller, a missing admin PIN or a
-		// wrong one is the same refusal as a wrong member PIN.
-		if _, adminErr := requireAdminPin(ctx, s.q, userID, householdID, adminPin); adminErr == nil {
-			authorized = true
-		} else if !errors.Is(adminErr, ErrForbidden) && !errors.Is(adminErr, ErrAdminPinRequired) && !errors.Is(adminErr, ErrWrongPIN) {
-			return nil, fmt.Errorf("verify admin pin: %w", adminErr)
-		}
-	}
-
-	if !authorized {
-		return nil, ErrWrongPIN
 	}
 
 	if limit <= 0 {
@@ -364,9 +331,11 @@ func (s *FamilyService) Rename(ctx context.Context, userID, householdID, memberI
 // Deleting a family member never deletes any users row.
 //
 // One transaction locks the member row, has the quest code hand back what the
-// member held, and deletes the row: either all of it happens or none does.
-// The row lock makes a concurrent Accept or MarkDone by this member wait, so
-// it either lands before the lock (and is handed back here) or fails after.
+// member held, cancels the member's reward requests still waiting for
+// approval, and deletes the row: either all of it happens or none does.
+// The row lock makes a concurrent Accept, MarkDone, or reward Approve or
+// Reject for this member wait, so it either lands before the lock (and is
+// handed back or cancelled here) or fails after.
 func (s *FamilyService) Remove(ctx context.Context, userID, householdID, memberID uuid.UUID, adminPin string) error {
 	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
 		return err
@@ -387,6 +356,9 @@ func (s *FamilyService) Remove(ctx context.Context, userID, householdID, memberI
 		return fmt.Errorf("lock family member: %w", err)
 	}
 	if err := releaseMemberQuests(ctx, qtx, householdID, memberID); err != nil {
+		return err
+	}
+	if err := cancelMemberRedemptions(ctx, qtx, householdID, memberID); err != nil {
 		return err
 	}
 	rows, err := qtx.DeleteFamilyMember(ctx, db.DeleteFamilyMemberParams{
@@ -534,6 +506,46 @@ func (s *FamilyService) ListBirthdays(ctx context.Context, userID, householdID u
 		out = append(out, toMemberBirthday(r.ID, r.Birthday, r.Age))
 	}
 	return out, nil
+}
+
+// authorizeMemberRead is the access rule of a member's own records (points
+// history, pending reward requests). The caller must be a member of the
+// household and the target member must belong to it (otherwise ErrNotFound).
+// Access then requires the member's PIN, or the caller being the household
+// admin with the admin PIN when one is set (no PIN needed when none is set),
+// whatever the member's own PIN. Anything else is ErrWrongPIN.
+func authorizeMemberRead(ctx context.Context, q *db.Queries, userID, householdID, memberID uuid.UUID, memberPin, adminPin string) error {
+	if _, err := getHousehold(ctx, q, userID, householdID); err != nil {
+		return err
+	}
+	if _, err := q.GetFamilyMember(ctx, db.GetFamilyMemberParams{
+		HouseholdID: householdID,
+		ID:          memberID,
+	}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("get family member: %w", err)
+	}
+
+	_, memberErr := VerifyMemberPin(ctx, q, householdID, memberID, memberPin)
+	if memberErr == nil {
+		return nil
+	}
+	if !errors.Is(memberErr, ErrWrongPIN) {
+		return fmt.Errorf("verify member pin: %w", memberErr)
+	}
+	// Admin fallback: requireAdminPin passes for the household admin when the admin PIN
+	// matches, or when no admin PIN is set. A non-admin caller, a missing admin PIN or a
+	// wrong one is the same refusal as a wrong member PIN.
+	_, adminErr := requireAdminPin(ctx, q, userID, householdID, adminPin)
+	if adminErr == nil {
+		return nil
+	}
+	if !errors.Is(adminErr, ErrForbidden) && !errors.Is(adminErr, ErrAdminPinRequired) && !errors.Is(adminErr, ErrWrongPIN) {
+		return fmt.Errorf("verify admin pin: %w", adminErr)
+	}
+	return ErrWrongPIN
 }
 
 // VerifyMemberPin verifies a member's PIN within a household.

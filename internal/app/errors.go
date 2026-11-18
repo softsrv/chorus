@@ -53,6 +53,19 @@ func (e RateLimitedError) Error() string {
 	return fmt.Sprintf("rate limited: retry after %s", e.RetryAt.Format(time.RFC3339))
 }
 
+// InsufficientPointsError refuses a reward approval because the member now
+// has fewer points than the request's cost. Error() is the message shown to
+// the admin; nothing was taken and the request stays pending.
+type InsufficientPointsError struct {
+	Reward, Member string
+	Points, Cost   int32
+}
+
+func (e *InsufficientPointsError) Error() string {
+	return fmt.Sprintf("Can't approve %s for %s: %s has %d points and it costs %d. Nothing was taken.",
+		e.Reward, e.Member, e.Member, e.Points, e.Cost)
+}
+
 // ValidationError reports one or more invalid input fields. Fields maps the
 // JSON field name to a human-readable message.
 type ValidationError struct {

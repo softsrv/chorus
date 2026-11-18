@@ -389,7 +389,7 @@ func TestIntegration_RewardLibraryAdoptAndGlobal(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	rewards := app.NewRewardService(q)
+	rewards := app.NewRewardService(q, pool)
 	ctx := context.Background()
 
 	var colCount int

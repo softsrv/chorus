@@ -37,10 +37,12 @@ function routes() {
     [`GET ${HP}/combos`]: () => [200, { items: [] }],
     'GET /quest-library': () => [200, { items: [] }],
     [`GET ${HP}/quests/pending`]: () => [200, { items: [] }],
+    [`GET ${HP}/reward-redemptions/pending`]: () => [200, { items: [] }],
     [`GET ${HP}/family-members`]: () => [200, { items: srv.members }],
   };
   for (const m of srv.members) {
     r[`GET ${HP}/family-members/${m.id}/points-history`] = (q) => srv.history(q, m);
+    r[`GET ${HP}/family-members/${m.id}/reward-history`] = (q) => srv.rewardHistory(q, m);
     r[`POST ${HP}/family-members/${m.id}/points-adjustments`] = (q) => srv.adjust(q, m);
     r[`POST ${HP}/family-members/${m.id}/verify`] = (q) => ((q.body.pin || '') === '' && !m.has_pin ? [204, null] : err(403, 'wrong_pin'));
   }
@@ -55,6 +57,7 @@ beforeEach(() => {
     adminPin: '9999',
     members: withHistory.members,
     history: (_, m) => [200, { items: srv.fixture.pointsHistory[m.id] }],
+    rewardHistory: () => [200, { items: [] }],
     adjust: () => err(500, 'unexpected', 'no adjust stub'),
     fixture: withHistory,
   };
@@ -90,9 +93,10 @@ test('admin points history CLM-1: History opens the member view with heading, Ba
 
   const historyNode = sectionNode(env.$app, 'Points history');
   assert.ok(historyNode, 'Points history section exists');
-  // Heading, then Back, then the history, in that order.
+  // Heading, then Back, then the points history, then the reward history.
   const order = walk(env.$app).filter((n) => (n.tagName === 'H3' && n.textContent.includes('points')) || n.tagName === 'H4' || n === back[0]);
-  assert.deepEqual(order.map((n) => n.tagName), ['H3', 'BUTTON', 'H4']);
+  assert.deepEqual(order.map((n) => n.tagName), ['H3', 'BUTTON', 'H4', 'H4']);
+  assert.deepEqual(order.slice(2).map((n) => n.textContent), ['Points history', 'Reward history']);
 
   const ths = walk(historyNode).filter((n) => n.tagName === 'TH').map((n) => n.textContent);
   assert.deepEqual(ths, ['Date', 'Points', 'Reason']);
@@ -204,6 +208,87 @@ test('admin points history CLM-5: with no members, the empty text shows with the
   assert.equal(walk(env.$app).filter((n) => n.tagName === 'INPUT' && n.name === 'points').length, 0, 'no points form');
 });
 
+// ── Reward history in the member view ───────────────────────────────────────
+
+const rewardHistoryCalls = (id) => calls.filter((c) => c.method === 'GET' && c.path === `${HP}/family-members/${id}/reward-history`);
+const movieNight = { id: 'rr1', member_id: 'm-maya', reward_id: 'r-movie', description: 'Movie night', cost: 100, status: 'approved', requested_at: '2025-11-17T12:00:00Z', decided_at: '2025-11-18T12:00:00Z' };
+
+test('reward history CLM-8/CLM-9: History reads reward-history with X-Admin-PIN and shows Date/Reward/Points beside the points history', async () => {
+  srv.adminPinSet = true;
+  srv.rewardHistory = (q) => (q.headers['X-Admin-PIN'] === '9999' ? [200, { items: [movieNight] }] : err(403, 'wrong_pin'));
+  await loadApp();
+  await openFamily();
+  await unlock('9999');
+  await click(buttons(env.$app, 'History')[0]);
+  const reads = rewardHistoryCalls('m-maya');
+  assert.equal(reads.length, 1, 'reward-history read once');
+  assert.equal(reads[0].headers['X-Admin-PIN'], '9999');
+  assert.equal(reads[0].headers['X-Member-PIN'], undefined);
+
+  assert.ok(sectionNode(env.$app, 'Points history'), 'points history still shown');
+  const node = sectionNode(env.$app, 'Reward history');
+  assert.ok(node, 'Reward history section exists');
+  assert.deepEqual(walk(node).filter((n) => n.tagName === 'TH').map((n) => n.textContent), ['Date', 'Reward', 'Points']);
+  const tds = walk(node).filter((n) => n.tagName === 'TD');
+  assert.deepEqual(tds.slice(1).map((td) => td.textContent), ['Movie night', '100']);
+  assert.ok(tds[0].textContent.length > 0, 'date shown');
+  for (const td of tds) assert.equal(td.children.length, 0, 'cells hold text only');
+});
+
+test('reward history CLM-10: no redeemed rewards shows the empty text and no table in the section', async () => {
+  await loadApp();
+  await openFamily();
+  await click(buttons(env.$app, 'History')[0]);
+  const node = sectionNode(env.$app, 'Reward history');
+  assert.deepEqual(walk(node).filter((n) => n.tagName === 'P').map((n) => n.textContent), ['No rewards redeemed yet']);
+  assert.equal(walk(node).filter((n) => n.tagName === 'TABLE').length, 0, 'no table');
+});
+
+test('reward history CLM-8: an answer that arrives after Back is not rendered over the family list', async () => {
+  srv.rewardHistory = () => [200, { items: [movieNight] }];
+  await loadApp();
+  await openFamily();
+  const realFetch = globalThis.fetch;
+  let release;
+  globalThis.fetch = async (url, init) => {
+    if (url.endsWith('/reward-history')) await new Promise((r) => { release = r; });
+    return realFetch(url, init);
+  };
+  const opening = click(buttons(env.$app, 'History')[0]);
+  await settle();
+  assert.match(sectionNode(env.$app, 'Reward history').textContent, /Loading reward history/);
+  await click(buttons(env.$app, 'Back to family')[0]);
+  release();
+  await opening;
+  await settle();
+  globalThis.fetch = realFetch;
+  assert.deepEqual(h3s(), ['Family']);
+  assert.equal(sectionNode(env.$app, 'Reward history'), null, 'stale reward history not rendered');
+  assert.doesNotMatch(text(), /Movie night/);
+});
+
+test('reward history CLM-8: a wrong_pin on the reward-history read locks the tab again', async () => {
+  srv.adminPinSet = true;
+  await loadApp();
+  await openFamily();
+  await unlock('9999');
+  srv.rewardHistory = () => err(403, 'wrong_pin', 'Wrong PIN.');
+  await click(buttons(env.$app, 'History')[0]);
+  assert.match(text(), /Enter the admin PIN to manage the family\./);
+  assert.equal(buttons(env.$app, 'History').length, 0);
+  assert.equal(sectionNode(env.$app, 'Reward history'), null);
+});
+
+test('reward history CLM-8: a failing reward-history read shows an inline error and keeps the points history', async () => {
+  srv.rewardHistory = () => err(429, 'rate_limited', 'Too many requests.');
+  await loadApp();
+  await openFamily();
+  await click(buttons(env.$app, 'History')[0]);
+  assert.deepEqual(h3s(), ['Maya — 42 points']);
+  assert.match(sectionNode(env.$app, 'Reward history').textContent, /Could not load reward history/);
+  assert.equal(walk(sectionNode(env.$app, 'Points history')).filter((n) => n.tagName === 'TABLE').length, 1);
+});
+
 // ── Admin points adjustments ────────────────────────────────────────────────
 
 const adjustForm = () => walk(env.$app).find((n) => n.tagName === 'FORM'
@@ -249,7 +334,7 @@ test('admin points CLM-4: the member view has the heading, Back above the adjust
   assert.deepEqual(h3s(), ['Maya — 42 points']);
   const back = buttons(env.$app, 'Back to family')[0];
   const order = walk(env.$app).filter((n) => n === back || n.tagName === 'LEGEND' || n.tagName === 'H4');
-  assert.deepEqual(order.map((n) => n.textContent), ['Back to family', 'Adjust points', 'Points history']);
+  assert.deepEqual(order.map((n) => n.textContent), ['Back to family', 'Adjust points', 'Points history', 'Reward history']);
   await click(back);
   assert.deepEqual(h3s(), ['Family']);
   assert.equal(adjustForm(), undefined, 'no adjust form on the family list');

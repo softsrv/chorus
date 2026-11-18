@@ -188,8 +188,9 @@ func (s *testServer) signUp(name string) tokens {
 
 type apiError struct {
 	Error struct {
-		Code   string            `json:"code"`
-		Fields map[string]string `json:"fields"`
+		Code    string            `json:"code"`
+		Message string            `json:"message"`
+		Fields  map[string]string `json:"fields"`
 	} `json:"error"`
 }
 
@@ -1144,8 +1145,9 @@ func TestAPI_EndToEnd(t *testing.T) {
 	}
 	s.expect(http.StatusNotFound, "POST", hp+"/rewards/from-library", parent.AccessToken, map[string]any{"library_id": uuid.New()}, nil)
 
-	// No redeem, spend or buy route exists, and no reward action moved points.
-	for _, action := range []string{"redeem", "spend", "buy"} {
+	// No spend or buy route exists, and no reward action moved points.
+	// (Redeem exists; TestAPI_RewardRedemption covers it.)
+	for _, action := range []string{"spend", "buy"} {
 		if got := s.do("POST", rp+"/"+action, parent.AccessToken, map[string]any{"member_id": member.ID, "pin": "4321"}, nil); got != http.StatusNotFound && got != http.StatusMethodNotAllowed {
 			t.Errorf("POST rewards/{id}/%s: status %d, want 404 or 405", action, got)
 		}

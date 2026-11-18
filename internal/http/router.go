@@ -70,7 +70,7 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	questH := handlers.NewQuestHandler(questSvc)
 	rewardSvc := cfg.RewardSvc
 	if rewardSvc == nil {
-		rewardSvc = app.NewRewardService(cfg.Queries)
+		rewardSvc = app.NewRewardService(cfg.Queries, cfg.Pool)
 	}
 	rewardH := handlers.NewRewardHandler(rewardSvc)
 	comboSvc := cfg.ComboSvc
@@ -208,8 +208,13 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 
 	// ── Rewards ───────────────────────────────────────────────────────────────
 	// Same rules as quest writes: admin-only, X-Admin-PIN once one is set, on
-	// the PIN rate limiter. The library is global and read-only. Rewards are a
-	// priced list only: there is no redeem, buy or spend route.
+	// the PIN rate limiter. The library is global and read-only. A member
+	// redeems with their member_id and PIN (PIN rate limited like quest
+	// actions); the request waits for the admin, whose pending list, approve
+	// and reject sit behind the PIN limiter as quest approvals do. The
+	// member's own pending list and reward history are PIN-checked reads like
+	// points-history: their reads are limited by historyRL and only their PIN
+	// failures charge pinRL.
 	api.Handle("GET /api/v1/reward-library", verified(rewardH.Library))
 	api.Handle("GET /api/v1/households/{householdID}/rewards", verified(rewardH.List))
 	api.Handle("POST /api/v1/households/{householdID}/rewards", authMW(middleware.RequireEmailVerified(limit(pinRL, rewardH.Create))))
@@ -217,6 +222,12 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("GET /api/v1/households/{householdID}/rewards/{rewardID}", verified(rewardH.Get))
 	api.Handle("PUT /api/v1/households/{householdID}/rewards/{rewardID}", authMW(middleware.RequireEmailVerified(limit(pinRL, rewardH.Update))))
 	api.Handle("DELETE /api/v1/households/{householdID}/rewards/{rewardID}", authMW(middleware.RequireEmailVerified(limit(pinRL, rewardH.Delete))))
+	api.Handle("POST /api/v1/households/{householdID}/rewards/{rewardID}/redeem", authMW(middleware.RequireEmailVerified(limit(pinRL, rewardH.Redeem))))
+	api.Handle("GET /api/v1/households/{householdID}/family-members/{memberID}/reward-redemptions/pending", authMW(middleware.RequireEmailVerified(historyRL.Middleware(pinRL.FailuresOnly(http.HandlerFunc(rewardH.MemberPendingRedemptions))))))
+	api.Handle("GET /api/v1/households/{householdID}/family-members/{memberID}/reward-history", authMW(middleware.RequireEmailVerified(historyRL.Middleware(pinRL.FailuresOnly(http.HandlerFunc(rewardH.RewardHistory))))))
+	api.Handle("GET /api/v1/households/{householdID}/reward-redemptions/pending", authMW(middleware.RequireEmailVerified(limit(pinRL, rewardH.PendingRedemptions))))
+	api.Handle("POST /api/v1/households/{householdID}/reward-redemptions/{redemptionID}/approve", authMW(middleware.RequireEmailVerified(limit(pinRL, rewardH.ApproveRedemption))))
+	api.Handle("POST /api/v1/households/{householdID}/reward-redemptions/{redemptionID}/reject", authMW(middleware.RequireEmailVerified(limit(pinRL, rewardH.RejectRedemption))))
 
 	// ── Combos ────────────────────────────────────────────────────────────────
 	api.Handle("GET /api/v1/households/{householdID}/combos", verified(comboH.List))
