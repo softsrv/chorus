@@ -334,6 +334,51 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	_, checks["points history foreign household own member, no PINs"] = familySvc.PointsHistory(ctx, alice, mh.ID, aliceMember.ID, "", "", 10, 0)
 	_, checks["points history nonexistent member, no PINs"] = familySvc.PointsHistory(ctx, alice, h.ID, uuid.New(), "", "", 10, 0)
 	_, checks["points history foreign member via own household as admin, no PINs"] = familySvc.PointsHistory(ctx, mallory, mh.ID, aliceMember.ID, "", "", 10, 0)
+	// Admin points adjustment isolation: a valid adjustment by an outsider, on
+	// a foreign member, under a foreign household or for an unknown member is
+	// ErrNotFound, and nothing is written for either household's members.
+	countAwards := func(memberID uuid.UUID) int {
+		t.Helper()
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM points_awards WHERE member_id = $1`, memberID).Scan(&n); err != nil {
+			t.Fatalf("count points_awards for %s: %v", memberID, err)
+		}
+		return n
+	}
+	adjustMembers := []uuid.UUID{aliceMember.ID, malloryMember.ID}
+	pointsBefore := map[uuid.UUID]int32{}
+	awardsBefore := map[uuid.UUID]int{}
+	for _, id := range adjustMembers {
+		owner, hh := alice, h.ID
+		if id == malloryMember.ID {
+			owner, hh = mallory, mh.ID
+		}
+		m, err := familySvc.Get(ctx, owner, hh, id)
+		if err != nil {
+			t.Fatalf("get member %s before adjustments: %v", id, err)
+		}
+		pointsBefore[id], awardsBefore[id] = m.Points, countAwards(id)
+	}
+	adjust := app.AdjustPointsInput{Points: num(5), Reason: "smuggled"}
+	_, checks["adjust points outsider user"] = familySvc.AdjustPoints(ctx, mallory, h.ID, aliceMember.ID, adjust, "")
+	_, checks["adjust points own household foreign member"] = familySvc.AdjustPoints(ctx, alice, h.ID, malloryMember.ID, adjust, "")
+	_, checks["adjust points foreign household own member"] = familySvc.AdjustPoints(ctx, alice, mh.ID, aliceMember.ID, adjust, "")
+	_, checks["adjust points nonexistent member"] = familySvc.AdjustPoints(ctx, alice, h.ID, uuid.New(), adjust, "")
+	_, checks["adjust points foreign member via own household as admin"] = familySvc.AdjustPoints(ctx, mallory, mh.ID, aliceMember.ID, adjust, "")
+	_, checks["adjust points outsider user, removal"] = familySvc.AdjustPoints(ctx, mallory, h.ID, aliceMember.ID, app.AdjustPointsInput{Points: num(-5)}, "")
+	for _, id := range adjustMembers {
+		owner, hh := alice, h.ID
+		if id == malloryMember.ID {
+			owner, hh = mallory, mh.ID
+		}
+		m, err := familySvc.Get(ctx, owner, hh, id)
+		if err != nil || m.Points != pointsBefore[id] {
+			t.Errorf("member %s points after refused adjustments = %+v, %v; want %d", id, m, err, pointsBefore[id])
+		}
+		if n := countAwards(id); n != awardsBefore[id] {
+			t.Errorf("member %s points_awards after refused adjustments = %d; want %d", id, n, awardsBefore[id])
+		}
+	}
 	// Reward isolation: every reward operation by an outsider is ErrNotFound,
 	// and Alice's reward id smuggled under Mallory's own household fails too.
 	rewardLibrary, err := rewards.ListLibrary(ctx)
