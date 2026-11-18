@@ -363,6 +363,9 @@ let adminPinState = { householdId: null, set: false }; // GET .../admin-pin
 // memberHistory is the active member's points history, read once per member
 // selection: { member (the activeMember object it was read for), items, error }.
 let memberHistory = null;
+// familyView marks the Family tab's member view in flight; a points-history
+// answer for a view the admin has since left is not rendered.
+let familyView = null;
 
 // clearMemberState returns to the administrator's view with nothing unlocked.
 function clearMemberState() {
@@ -370,6 +373,7 @@ function clearMemberState() {
   adminPin = null;
   adminPinState = { householdId: null, set: false };
   memberHistory = null;
+  familyView = null;
 }
 
 // activeMemberAction is the one accessor member actions (accept, abandon, mark
@@ -1323,8 +1327,42 @@ async function familyTab(h, $root) {
     return;
   }
 
+  familyView = null; // any member view still loading is now stale
   const base = `/households/${h.id}/family-members`;
   const members = (await api('GET', base)).items;
+
+  // showMember swaps the family list for one member's view: heading, Back,
+  // the slot for the adjust-points form, then the points history read with
+  // the admin's headers. A late answer for a view the admin already left is
+  // dropped; a failed read shows an inline error inside the history section.
+  const showMember = async (m) => {
+    const view = {};
+    familyView = view;
+    const heading = () => el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Points history' });
+    const $history = el('div', { class: 'space-y-1' },
+      heading(), el('p', { class: 'text-xs opacity-60', text: 'Loading points history…' }));
+    const $adjust = el('div'); // the adjust-points form mounts here
+    $root.replaceChildren(card(null,
+      el('h3', { class: 'font-semibold', text: `${m.name} — ${m.points} points` }),
+      el('div', {}, el('button', { class: 'btn btn-ghost btn-xs', text: 'Back to family', onclick: () => rerender() })),
+      $adjust,
+      $history));
+    let content;
+    try {
+      const res = await adminRequest('GET', `${base}/${m.id}/points-history`);
+      content = pointsHistoryTable(res.items, 'No points history yet.');
+    } catch (err) {
+      if (familyView !== view) return;
+      if (err instanceof ApiError && (err.code === 'wrong_pin' || err.code === 'admin_pin_required')) {
+        rerender(); // adminRequest forgot the PIN: the tab locks again
+        return;
+      }
+      console.error('points history', err);
+      content = alertBox('error', 'Could not load points history. Reload to try again.');
+    }
+    if (familyView !== view) return;
+    $history.replaceChildren(heading(), content);
+  };
 
   const rows = members.map((m) => {
     const $row = el('li', { class: 'flex flex-wrap items-center gap-2 py-2 border-b border-base-300' },
@@ -1332,6 +1370,10 @@ async function familyTab(h, $root) {
         el('div', { text: m.name }),
         el('div', { class: 'text-xs opacity-60', text: `${m.points} points` })),
       el('span', { class: 'badge badge-sm', text: m.has_pin ? 'PIN' : 'No PIN' }),
+      el('button', {
+        class: 'btn btn-ghost btn-xs', text: 'History',
+        onclick: () => showMember(m).catch((err) => showError($root, err)),
+      }),
       el('button', {
         class: 'btn btn-ghost btn-xs', text: 'Rename',
         onclick: () => $row.replaceWith(el('li', { class: 'py-2' }, form({
