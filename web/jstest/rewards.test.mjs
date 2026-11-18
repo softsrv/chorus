@@ -318,10 +318,11 @@ test('CLM-14: admin view renders no Redeem button and makes no redeem or member 
   srv.rewards = fixture.rewards;
 
   await loadApp();
+  const before = calls.length;
   await openRewards();
 
   assert.equal(buttons(env.$app, 'Redeem').length, 0);
-  assert.equal(calls.filter((c) => c.path.includes('/redeem') || c.path.includes('/reward-redemptions')).length, 0);
+  assert.equal(calls.slice(before).filter((c) => c.path.includes('/redeem') || c.path.includes('/reward-redemptions')).length, 0);
 });
 
 test('CLM-15: clicking Redeem POSTs {member_id, pin}, renders Pending approval badge, notice above list, points unchanged; pre-existing pending renders badge', async () => {

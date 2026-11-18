@@ -1895,7 +1895,7 @@ test('CLM-18: a 422 answer to reward approve shows message inline and keeps the 
       { id: 'red-pizza', household_id: H, member_id: 'm-alex', member_name: 'Alex', reward_id: 'r-pizza', description: 'Pizza night', cost: 150, status: 'pending', requested_at: '2025-01-03T12:00:00Z' },
     ],
   }];
-  const msg = \"Can't approve Pizza night for Alex: Alex has 90 points and it costs 150. Nothing was taken.\";
+  const msg = "Can't approve Pizza night for Alex: Alex has 90 points and it costs 150. Nothing was taken.";
   srv.extra[`POST ${HP}/reward-redemptions/red-pizza/approve`] = () => [422, { error: { code: 'insufficient_points', message: msg } }];
 
   await loadApp();
