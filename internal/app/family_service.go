@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -191,6 +192,103 @@ func (s *FamilyService) PointsHistory(ctx context.Context, userID, householdID, 
 		})
 	}
 	return awards, nil
+}
+
+// AdjustPointsInput is an admin's change to a member's points: Points is the
+// signed amount (positive adds, negative removes) and Reason the optional
+// note shown in the history.
+type AdjustPointsInput struct {
+	Points NumberField
+	Reason string
+}
+
+// Bounds of an admin points adjustment.
+const (
+	// maxAdjustPoints caps the size of one adjustment either way.
+	maxAdjustPoints = 1_000_000
+	// maxAdjustReasonLen is the longest reason, in characters.
+	maxAdjustReasonLen = 200
+	// defaultAdjustReason is stored when the admin leaves the reason blank.
+	defaultAdjustReason = "Adjusted by admin"
+)
+
+// AdjustPoints adds or removes points for a member of the household and
+// records it in the member's history as an admin adjustment. Requires the
+// admin role and the admin PIN when one is set. Points must be a whole,
+// non-zero number of at most maxAdjustPoints either way; a blank reason is
+// stored as defaultAdjustReason.
+//
+// One transaction locks the member row, checks the new total, and credits
+// through creditPoints, so the total and its history row change together or
+// not at all, and concurrent adjustments to the same member wait for each
+// other. A removal that would take the total below 0 is refused with a
+// ValidationError on "points" and nothing is written.
+func (s *FamilyService) AdjustPoints(ctx context.Context, userID, householdID, memberID uuid.UUID, in AdjustPointsInput, adminPin string) (Member, error) {
+	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
+		return Member{}, err
+	}
+
+	var v validator
+	var delta int32
+	switch p := in.Points; {
+	case !p.Set:
+		v.fail("points", "is required")
+	case p.Invalid:
+		v.fail("points", "must be a whole number")
+	case p.Value == 0:
+		v.fail("points", "must not be 0")
+	case p.Value > maxAdjustPoints || p.Value < -maxAdjustPoints:
+		v.fail("points", fmt.Sprintf("must be at most %d either way", maxAdjustPoints))
+	default:
+		delta = int32(p.Value)
+	}
+	reason := v.text("reason", in.Reason, 0, maxAdjustReasonLen, false)
+	if err := v.err(); err != nil {
+		return Member{}, err
+	}
+	if reason == "" {
+		reason = defaultAdjustReason
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Member{}, fmt.Errorf("begin adjust points: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	qtx := s.q.WithTx(tx)
+
+	ids := db.LockFamilyMemberParams{HouseholdID: householdID, ID: memberID}
+	if _, err := notFoundIfNoRows(qtx.LockFamilyMember(ctx, ids)); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return Member{}, ErrNotFound
+		}
+		return Member{}, fmt.Errorf("lock family member: %w", err)
+	}
+	// Read the locked row in the same transaction: no other write to this
+	// member's points can land between this read and the credit below.
+	cur, err := qtx.GetFamilyMember(ctx, db.GetFamilyMemberParams{HouseholdID: householdID, ID: memberID})
+	if err != nil {
+		return Member{}, fmt.Errorf("get family member: %w", err)
+	}
+	total := int64(cur.Points) + int64(delta)
+	if total < 0 {
+		return Member{}, &ValidationError{Fields: map[string]string{
+			"points": fmt.Sprintf("%s only has %d points — you can't remove %d.", cur.Name, cur.Points, -int64(delta)),
+		}}
+	}
+	if total > math.MaxInt32 {
+		return Member{}, &ValidationError{Fields: map[string]string{"points": "would make the total too large"}}
+	}
+
+	m, err := creditPoints(ctx, qtx, householdID, memberID, awardKindAdmin, reason, delta,
+		pgtype.Timestamptz{Time: time.Now(), Valid: true})
+	if err != nil {
+		return Member{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Member{}, fmt.Errorf("commit adjust points: %w", err)
+	}
+	return toMember(m), nil
 }
 
 // Create adds a new family member to the household. Requires admin role and admin PIN if set.
