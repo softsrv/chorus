@@ -55,7 +55,7 @@ func TestAPI_RewardRedemption(t *testing.T) {
 	var movie, pizza, game struct{ ID uuid.UUID }
 	s.expect(http.StatusCreated, "POST", hp+"/rewards", admin.AccessToken, map[string]any{"description": "Movie night", "cost": 100}, &movie)
 	s.expect(http.StatusCreated, "POST", hp+"/rewards", admin.AccessToken, map[string]any{"description": "Pizza night", "cost": 150}, &pizza)
-	s.expect(http.StatusCreated, "POST", hp+"/rewards", admin.AccessToken, map[string]any{"description": "Game time", "cost": 30}, &game)
+	s.expect(http.StatusCreated, "POST", hp+"/rewards", admin.AccessToken, map[string]any{"description": "Game time", "cost": 20}, &game)
 	redeem := func(rewardID uuid.UUID) string { return hp + "/rewards/" + rewardID.String() + "/redeem" }
 	samBody := map[string]any{"member_id": sam.ID, "pin": "1234"}
 
