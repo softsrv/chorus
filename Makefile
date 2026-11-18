@@ -5,7 +5,7 @@ BIN_DIR          := ./bin
 -include .env
 export
 
-.PHONY: dev run build test test-js test-integration test-cover boundaries fmt vet lint vulncheck secret-scan check \
+.PHONY: dev run build test test-js test-integration test-system test-system-image test-cover boundaries fmt vet lint vulncheck secret-scan check \
         services-up services-down services-reset \
         daisyui-install tailwind tailwind-watch app \
         migrate-up migrate-down migrate-create migrate-status migrate-test migrate-roundtrip-test \
@@ -54,6 +54,15 @@ test-js:
 test-integration: migrate-test migrate-roundtrip-test
 	go test -race -tags integration -p 1 ./...
 
+# System tests exec the built binary (or test the Docker image when SYSTEST_IMAGE is set).
+test-system: migrate-test
+	go test -race -tags systest -p 1 ./systest/...
+
+# test-system-image builds the image and runs system tests against it (Linux-only: uses host networking).
+test-system-image: migrate-test
+	docker build -t chorus:systest .
+	SYSTEST_IMAGE=chorus:systest go test -tags systest -p 1 ./systest/...
+
 test-cover:
 	go test -coverprofile=coverage.out ./...
 	go tool cover -html=coverage.out
@@ -67,6 +76,7 @@ fmt:
 vet:
 	go vet ./...
 	go vet -tags integration ./...
+	go vet -tags systest ./...
 
 lint:
 	golangci-lint run
@@ -79,7 +89,7 @@ secret-scan:
 	go run github.com/zricethezav/gitleaks/v8@v$(GITLEAKS_VERSION) git --redact --config .gitleaks.toml
 
 # Everything CI runs.
-check: boundaries vet test test-js test-integration vulncheck secret-scan
+check: boundaries vet test test-js test-integration test-system vulncheck secret-scan
 
 ## ── CSS ──────────────────────────────────────────────────────────────────────
 

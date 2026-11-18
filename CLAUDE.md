@@ -13,9 +13,11 @@ make run              # One-off app container without hot reload
 make test             # Unit tests (-race)
 make test-js          # Web client unit tests (node --test web/jstest/quests.test.mjs; needs Node 22+)
 make test-integration # Migrates chorus_test, runs round-trip test, then runs integration tests
+make test-system      # Migrates chorus_test, runs system tests against the built binary
+make test-system-image # Runs system tests against the built Docker image (Linux-only: host networking)
 make boundaries       # Boundary check (internal/archtest)
 make secret-scan      # Pinned gitleaks full-history scan (--redact) against .gitleaks.toml
-make check            # boundaries + vet + unit + web JS unit + integration + govulncheck + secret-scan (what CI runs)
+make check            # boundaries + vet + unit + web JS unit + integration + test-system + govulncheck + secret-scan (what CI runs)
 make vet / fmt / lint
 
 # Database
@@ -33,7 +35,7 @@ Test fixtures and configuration must use obviously fake values or be allowlisted
 
 Single test: `go test -tags integration -run TestAPI_EndToEnd ./internal/http/` (needs `TEST_DATABASE_URL`; `set -a; . ./.env; set +a` loads it).
 
-Tests are hermetic: in the internal/http and internal/app test binaries, internal/testnet.RefuseExternal makes http.DefaultTransport refuse non-loopback hosts; it does not cover non-HTTP dials (SMTP, the database) or http.Clients given their own Transport; and a new outbound client must take its endpoint from config and be pointed at an httptest fake (or a capture mailer) in tests.
+Tests are hermetic: in the internal/http and internal/app test binaries, internal/testnet.RefuseExternal makes http.DefaultTransport refuse non-loopback hosts; it does not cover non-HTTP dials (SMTP, the database) or http.Clients given their own Transport; and a new outbound client must take its endpoint from config and be pointed at an httptest fake (or a capture mailer) in tests. System tests (`systest`) exec the real binary (or Docker image) over loopback HTTP, real SMTP to an in-test capture server and real Postgres, with no external network and no Google. CI runs system tests before any image build or push. Image mode is Linux-only (host networking).
 
 Local stack (`docker-compose.yml`): the app runs in the `app` container (dev image `deploy/dev.Dockerfile`, Go + air, repo bind-mounted at `/src`) on http://localhost:8080 (`PORT` in `.env` sets both the listen and published port; keep `APP_BASE_URL` in step). It reaches `postgres` and `smtp4dev` by service name over the internal `backend` network; compose overrides `DATABASE_URL`/`SMTP_HOST`/`SMTP_PORT` for it, so `.env` keeps host-side values. Published to the host (127.0.0.1 only): Postgres on `:5433` (databases `chorus` and `chorus_test`, used by host-side migrate and integration tests) and the smtp4dev web UI at http://localhost:5080, where verification and reset emails land. smtp4dev's SMTP port is not published.
 
@@ -69,6 +71,7 @@ Allowed import directions are enforced by `make boundaries` and owned by `intern
   - `internal/http` and `internal/http/handlers` tests may additionally import `internal/auth` (for token minting).
   - `internal/app` and `internal/http` tests may additionally import `internal/testnet` (to refuse outbound dials); no production file may import it.
   - Tests may never import `cmd/app`.
+  - `systest`: test-only, imports no chorus package, runs `cmd/app` as a built binary.
 - **Web client rules:**
   - `web/static/js/*.js` and `web/jstest/*.mjs` imports must resolve within `web/` or be `node:`-prefixed Node builtins (for example `node:fs`); they may never import from `internal/` or `cmd/`.
 
