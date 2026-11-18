@@ -118,8 +118,9 @@ func (s *FamilyService) Get(ctx context.Context, userID, householdID, memberID u
 // PointsHistory returns the member's awards ordered by created_at DESC then id DESC.
 // Caller must be a member of the household (non-members get ErrNotFound).
 // The target member must belong to the household (otherwise ErrNotFound).
-// Access requires the member's PIN (via VerifyMemberPin) or the household admin PIN (if an admin PIN is set).
-// A wrong PIN returns ErrWrongPIN.
+// Access requires the member's PIN (via VerifyMemberPin), or the caller being the household admin
+// with the admin PIN when one is set (no PIN needed when none is set), whatever the member's own PIN.
+// Otherwise (wrong or missing PIN, or a non-admin without the member PIN) it returns ErrWrongPIN.
 // Empty result returns an empty, non-nil slice.
 func (s *FamilyService) PointsHistory(ctx context.Context, userID, householdID, memberID uuid.UUID, memberPin, adminPin string, limit, offset int32) ([]PointsAward, error) {
 	if _, err := getHousehold(ctx, s.q, userID, householdID); err != nil {
@@ -144,10 +145,13 @@ func (s *FamilyService) PointsHistory(ctx context.Context, userID, householdID, 
 		return nil, fmt.Errorf("verify member pin: %w", memberErr)
 	}
 
-	if !authorized && adminPin != "" {
-		if adminErr := s.VerifyAdminPin(ctx, userID, householdID, adminPin); adminErr == nil {
+	if !authorized {
+		// Admin fallback: requireAdminPin passes for the household admin when the admin PIN
+		// matches, or when no admin PIN is set. A non-admin caller, a missing admin PIN or a
+		// wrong one is the same refusal as a wrong member PIN.
+		if _, adminErr := requireAdminPin(ctx, s.q, userID, householdID, adminPin); adminErr == nil {
 			authorized = true
-		} else if !errors.Is(adminErr, ErrWrongPIN) {
+		} else if !errors.Is(adminErr, ErrForbidden) && !errors.Is(adminErr, ErrAdminPinRequired) && !errors.Is(adminErr, ErrWrongPIN) {
 			return nil, fmt.Errorf("verify admin pin: %w", adminErr)
 		}
 	}
