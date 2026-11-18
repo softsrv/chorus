@@ -1324,18 +1324,52 @@ test('sharing CLM-9 / CLM-10: ineligible candidates rendered disabled with visib
   noInlineStyle();
 });
 
+test('sharing CLM-11: a 409 age_restricted from share reloads the list, shows the age-range notice, and leaves the quest unshared', async () => {
+  ageHousehold();
+  srv.extra[`POST ${HP}/quests/q-mow/share`] = () => err(409, 'age_restricted', "member is outside this quest's age range");
+
+  // Sam holds Mow the lawn (10–14). Ava is in ineligible_member_ids. Leo is eligible.
+  srv.quests = [quest({
+    ...MOW_LAWN,
+    available: false, claimed_by: SAM.id, shareable: true,
+  })];
+
+  await loadApp();
+  await become('Sam');
+  const rowOf = () => walk(env.$app).find((n) => n.tagName === 'LI' && n.textContent.startsWith('Mow the lawn'));
+  await click(buttons(rowOf(), 'Share')[0]);
+
+  const picker = walk(env.$app).find((n) => n.className === 'font-semibold' && n.textContent === 'Share Mow the lawn with').parentNode;
+  const leoBtn = buttons(picker, 'Leo')[0];
+  assert.ok(leoBtn, 'Leo button rendered');
+  assert.equal(leoBtn.disabled, false, 'Leo is eligible');
+
+  await click(leoBtn);
+
+  const shareAt = calls.findIndex((c) => c.path === `${HP}/quests/q-mow/share`);
+  assert.ok(shareAt !== -1, 'share request sent');
+  assert.ok(calls.slice(shareAt + 1).some((c) => c.method === 'GET' && c.path === `${HP}/quests`), 'list reloaded after 409');
+
+  assert.match(text(), /This quest is outside that member's age range\./);
+  const updatedRow = rowOf();
+  assert.ok(updatedRow, 'quest still present');
+  assert.doesNotMatch(updatedRow.textContent, /Shared with/);
+  noInlineStyle();
+});
+
 test('sharing CLM-12: share picker decides eligibility only from ineligible_member_ids, ignores birthdays, and only includes household members', async () => {
   // Sam holds quest. Leo has birthday in fixture that would make him age 42, but is NOT in ineligible_member_ids.
   // Ava has no birthday.
   // Ineligible_member_ids has an outsider id not in household members.
+  ageHousehold();
   srv.members = [
-    { id: 'm-sam', household_id: H, name: 'Sam', has_pin: false, points: 0, birthday: '2015-04-02' },
-    { id: 'm-ava', household_id: H, name: 'Ava', has_pin: false, points: 0, birthday: null },
-    { id: 'm-leo', household_id: H, name: 'Leo', has_pin: false, points: 0, birthday: '1980-01-01' },
+    { ...SAM, birthday: '2015-04-02' },
+    { ...AVA, birthday: null },
+    { ...LEO, birthday: '1980-01-01' },
   ];
   srv.quests = [quest({
-    id: 'q-share', name: 'Board game', available: false, claimed_by: 'm-sam', shareable: true,
-    min_age: 10, max_age: 14, ineligible_member_ids: ['m-ava', 'outsider-id-123'],
+    id: 'q-share', name: 'Board game', available: false, claimed_by: SAM.id, shareable: true,
+    min_age: 10, max_age: 14, ineligible_member_ids: [AVA.id, 'outsider-id-123'],
   })];
   await loadApp();
   await become('Sam');
