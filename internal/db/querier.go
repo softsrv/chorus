@@ -222,6 +222,10 @@ type Querier interface {
 	ListIneligibleMemberIDs(ctx context.Context, arg ListIneligibleMemberIDsParams) ([]ListIneligibleMemberIDsRow, error)
 	ListMemberPendingRedemptions(ctx context.Context, arg ListMemberPendingRedemptionsParams) ([]RewardRedemption, error)
 	ListMemberPointsAwards(ctx context.Context, arg ListMemberPointsAwardsParams) ([]PointsAward, error)
+	// The member's approved requests, newest approval first. Each row carries
+	// the description and cost snapshotted on the request, so editing or
+	// deleting the reward later never changes the history.
+	ListMemberRewardHistory(ctx context.Context, arg ListMemberRewardHistoryParams) ([]RewardRedemption, error)
 	// Completions waiting for approval, one row each, oldest mark-done first,
 	// with the chore's name, current points and teamwork bonus, the member who
 	// marked it done, and every member it covers (member_ids and member_names,

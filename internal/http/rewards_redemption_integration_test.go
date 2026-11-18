@@ -5,6 +5,7 @@ package http_test
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -171,4 +172,98 @@ func TestAPI_RewardRedemption(t *testing.T) {
 	if points() != 20 {
 		t.Errorf("points after outsider attempts = %d, want 20", points())
 	}
+}
+
+// TestAPI_RewardHistory drives GET .../family-members/{id}/reward-history
+// through the router against Postgres: approved requests come back as
+// {items: [redemption]} with description, cost and decided_at, newest
+// approval first, read with the member's PIN or as the admin; ?limit= and
+// ?offset= page and clamp as points-history does, and a non-integer is 422.
+func TestAPI_RewardHistory(t *testing.T) {
+	s := newTestServer(t)
+	admin := s.signUp("historyadmin")
+	var h struct{ ID uuid.UUID }
+	s.expect(http.StatusCreated, "POST", "/api/v1/households", admin.AccessToken,
+		map[string]string{"name": "History Home", "timezone": "UTC"}, &h)
+	hp := "/api/v1/households/" + h.ID.String()
+
+	var sam struct{ ID uuid.UUID }
+	s.expect(http.StatusCreated, "POST", hp+"/family-members", admin.AccessToken,
+		map[string]string{"name": "Sam", "pin": "1234"}, &sam)
+	s.expect(http.StatusOK, "POST", hp+"/family-members/"+sam.ID.String()+"/points-adjustments", admin.AccessToken,
+		map[string]any{"points": 300}, nil)
+	samBody := map[string]any{"member_id": sam.ID, "pin": "1234"}
+
+	approveReward := func(desc string, cost int, decidedAt time.Time) redemptionJSON {
+		t.Helper()
+		var reward struct{ ID uuid.UUID }
+		s.expect(http.StatusCreated, "POST", hp+"/rewards", admin.AccessToken, map[string]any{"description": desc, "cost": cost}, &reward)
+		var red redemptionJSON
+		s.expect(http.StatusCreated, "POST", hp+"/rewards/"+reward.ID.String()+"/redeem", admin.AccessToken, samBody, &red)
+		s.expect(http.StatusOK, "POST", hp+"/reward-redemptions/"+red.ID.String()+"/approve", admin.AccessToken, nil, nil)
+		// Pin the approval time so the order is decided by the data.
+		if _, err := s.pool.Exec(t.Context(), "UPDATE reward_redemptions SET decided_at = $1 WHERE id = $2", decidedAt, red.ID); err != nil {
+			t.Fatalf("pin decided_at: %v", err)
+		}
+		return red
+	}
+	movie := approveReward("Movie night", 100, time.Date(2026, 11, 17, 9, 0, 0, 0, time.UTC))
+	pizza := approveReward("Pizza night", 150, time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC))
+
+	histPath := hp + "/family-members/" + sam.ID.String() + "/reward-history"
+	memberPin := map[string]string{"X-Member-PIN": "1234"}
+	var hist struct{ Items []redemptionJSON }
+	s.expectWithHeaders(http.StatusOK, "GET", histPath, admin.AccessToken, memberPin, nil, &hist)
+	if len(hist.Items) != 2 {
+		t.Fatalf("history = %+v, want two items", hist.Items)
+	}
+	wants := []struct {
+		id   uuid.UUID
+		desc string
+		cost int32
+		at   string
+	}{{pizza.ID, "Pizza night", 150, "2026-11-18T09:00:00Z"}, {movie.ID, "Movie night", 100, "2026-11-17T09:00:00Z"}}
+	for i, want := range wants {
+		got := hist.Items[i]
+		if got.ID != want.id || got.Description != want.desc || got.Cost != want.cost || got.Status != "approved" ||
+			got.MemberID != sam.ID || got.DecidedAt == nil || *got.DecidedAt != want.at {
+			t.Errorf("history[%d] = %+v (decided_at %v), want %s %d decided %s", i, got, got.DecidedAt, want.desc, want.cost, want.at)
+		}
+	}
+
+	// The admin reads it without a member PIN (no admin PIN set).
+	var adminHist struct{ Items []redemptionJSON }
+	s.expect(http.StatusOK, "GET", histPath, admin.AccessToken, nil, &adminHist)
+	if len(adminHist.Items) != 2 || adminHist.Items[0].ID != pizza.ID {
+		t.Errorf("admin history = %+v, want pizza then movie", adminHist.Items)
+	}
+
+	ids := func(query string) []uuid.UUID {
+		t.Helper()
+		var page struct{ Items []redemptionJSON }
+		s.expectWithHeaders(http.StatusOK, "GET", histPath+query, admin.AccessToken, memberPin, nil, &page)
+		out := make([]uuid.UUID, 0, len(page.Items))
+		for _, it := range page.Items {
+			out = append(out, it.ID)
+		}
+		return out
+	}
+	if got := ids("?limit=1"); len(got) != 1 || got[0] != pizza.ID {
+		t.Errorf("?limit=1 = %v, want [%v]", got, pizza.ID)
+	}
+	if got := ids("?limit=1&offset=1"); len(got) != 1 || got[0] != movie.ID {
+		t.Errorf("?limit=1&offset=1 = %v, want [%v]", got, movie.ID)
+	}
+	if got := ids("?limit=0"); len(got) != 1 {
+		t.Errorf("?limit=0 (clamped to 1) = %v, want one item", got)
+	}
+	if got := ids("?limit=1000&offset=-3"); len(got) != 2 {
+		t.Errorf("?limit=1000&offset=-3 (clamped to 100, 0) = %v, want both", got)
+	}
+	for _, off := range []string{"2147483648", "4294967296"} {
+		if got := ids("?offset=" + off); len(got) != 0 {
+			t.Errorf("?offset=%s = %v, want an empty page (no wrap)", off, got)
+		}
+	}
+	s.expectWithHeaders(http.StatusUnprocessableEntity, "GET", histPath+"?limit=abc", admin.AccessToken, memberPin, nil, nil)
 }

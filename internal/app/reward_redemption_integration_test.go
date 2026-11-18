@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -349,4 +350,106 @@ func TestIntegration_RewardRedemption(t *testing.T) {
 			t.Errorf("history after snapshot approve: %d %q; want -100 Redeemed: Movie night", sum, reasons)
 		}
 	})
+}
+
+// TestIntegration_RewardHistory covers RewardHistory at the service against
+// Postgres: requests approved through Approve come back with the snapshotted
+// description and cost and their decided_at, newest approval first (ties by
+// id DESC); limit and offset page through them and are clamped; a member
+// with none gets an empty, non-nil slice.
+func TestIntegration_RewardHistory(t *testing.T) {
+	w := newRedeemWorld(t, "rewardhistory")
+	hal := w.member("Hal", 500)
+	movie := w.reward("Movie night", 100)
+	pizza := w.reward("Pizza night", 150)
+	game := w.reward("Game time", 20)
+
+	approve := func(r db.HouseholdReward, decidedAt time.Time) db.RewardRedemption {
+		t.Helper()
+		approved, _, err := w.rewards.Approve(w.ctx, w.admin, w.h.ID, w.request(hal, r).ID, "")
+		if err != nil {
+			t.Fatalf("Approve %s: %v", r.Description, err)
+		}
+		// Pin the approval time so the order is decided by the data, not by
+		// how fast the approvals ran.
+		if _, err := w.pool.Exec(w.ctx, `UPDATE reward_redemptions SET decided_at = $1 WHERE id = $2`, decidedAt, approved.ID); err != nil {
+			t.Fatalf("pin decided_at: %v", err)
+		}
+		return approved
+	}
+	movieRed := approve(movie, time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC))
+	pizzaRed := approve(pizza, time.Date(2026, 11, 18, 10, 0, 0, 0, time.UTC))
+	// The same approval time as pizza: id DESC puts the later request first.
+	gameRed := approve(game, time.Date(2026, 11, 18, 10, 0, 0, 0, time.UTC))
+
+	history, err := w.rewards.RewardHistory(w.ctx, w.admin, w.h.ID, hal.ID, "1234", "", 50, 0)
+	if err != nil {
+		t.Fatalf("RewardHistory: %v", err)
+	}
+	type item struct {
+		id   uuid.UUID
+		desc string
+		cost int32
+		at   string
+	}
+	got := make([]item, 0, len(history))
+	for _, r := range history {
+		if r.Status != "approved" || !r.DecidedAt.Valid || r.MemberID != hal.ID || r.HouseholdID != w.h.ID {
+			t.Errorf("history row %+v: want an approved row of Hal with decided_at", r)
+		}
+		got = append(got, item{r.ID, r.Description, r.Cost, r.DecidedAt.Time.UTC().Format("2006-01-02T15:04:05Z")})
+	}
+	want := []item{
+		{gameRed.ID, "Game time", 20, "2026-11-18T10:00:00Z"},
+		{pizzaRed.ID, "Pizza night", 150, "2026-11-18T10:00:00Z"},
+		{movieRed.ID, "Movie night", 100, "2026-11-16T10:00:00Z"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("history = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("history[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	// The admin reads it too (no admin PIN set, so no header is needed).
+	if adminView, err := w.rewards.RewardHistory(w.ctx, w.admin, w.h.ID, hal.ID, "", "", 50, 0); err != nil || len(adminView) != 3 {
+		t.Errorf("admin RewardHistory = %d rows, %v; want 3", len(adminView), err)
+	}
+
+	page := func(limit, offset int32) []uuid.UUID {
+		t.Helper()
+		rows, err := w.rewards.RewardHistory(w.ctx, w.admin, w.h.ID, hal.ID, "1234", "", limit, offset)
+		if err != nil {
+			t.Fatalf("RewardHistory(limit %d, offset %d): %v", limit, offset, err)
+		}
+		ids := make([]uuid.UUID, 0, len(rows))
+		for _, r := range rows {
+			ids = append(ids, r.ID)
+		}
+		return ids
+	}
+	if ids := page(1, 1); len(ids) != 1 || ids[0] != pizzaRed.ID {
+		t.Errorf("limit 1 offset 1 = %v, want [%v]", ids, pizzaRed.ID)
+	}
+	if ids := page(2, 2); len(ids) != 1 || ids[0] != movieRed.ID {
+		t.Errorf("limit 2 offset 2 = %v, want [%v]", ids, movieRed.ID)
+	}
+	if ids := page(0, -5); len(ids) != 3 || ids[0] != gameRed.ID {
+		t.Errorf("limit 0 offset -5 (clamped to 50, 0) = %v, want all three from %v", ids, gameRed.ID)
+	}
+	if ids := page(1000, 0); len(ids) != 3 {
+		t.Errorf("limit 1000 (clamped to 100) = %v, want all three", ids)
+	}
+	if ids := page(50, 3); ids == nil || len(ids) != 0 {
+		t.Errorf("offset past the end = %#v, want empty", ids)
+	}
+
+	// A member with nothing approved: an empty, non-nil slice.
+	ivy := w.member("Ivy", 0)
+	none, err := w.rewards.RewardHistory(w.ctx, w.admin, w.h.ID, ivy.ID, "1234", "", 50, 0)
+	if err != nil || none == nil || len(none) != 0 {
+		t.Errorf("RewardHistory for a member with none = %#v, %v; want an empty, non-nil slice", none, err)
+	}
 }

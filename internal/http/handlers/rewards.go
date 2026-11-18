@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -22,6 +23,7 @@ type rewardServicer interface {
 	ListLibrary(ctx context.Context) ([]db.RewardLibrary, error)
 	RequestRedemption(ctx context.Context, userID, householdID, rewardID uuid.UUID, act app.MemberAction) (db.RewardRedemption, bool, error)
 	ListMemberPending(ctx context.Context, userID, householdID, memberID uuid.UUID, memberPin, adminPin string) ([]db.RewardRedemption, error)
+	RewardHistory(ctx context.Context, userID, householdID, memberID uuid.UUID, memberPin, adminPin string, limit, offset int32) ([]db.RewardRedemption, error)
 	ListPending(ctx context.Context, userID, householdID uuid.UUID, adminPin string) ([]db.ListPendingRewardRedemptionsRow, error)
 	Approve(ctx context.Context, userID, householdID, redemptionID uuid.UUID, adminPin string) (db.RewardRedemption, db.FamilyMember, error)
 	Reject(ctx context.Context, userID, householdID, redemptionID uuid.UUID, adminPin string) (db.RewardRedemption, error)
@@ -206,6 +208,46 @@ func (h *RewardHandler) MemberPendingRedemptions(w http.ResponseWriter, r *http.
 		return
 	}
 	rows, err := h.svc.ListMemberPending(r.Context(), currentUser(r), hid, mid, r.Header.Get("X-Member-PIN"), r.Header.Get("X-Admin-PIN"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, listResponse[rewardRedemptionJSON]{Items: mapSlice(rows, toRewardRedemption)})
+}
+
+// RewardHistory lists one member's approved redemptions, newest approval
+// first. The member's PIN travels in X-Member-PIN, or the admin's in
+// X-Admin-PIN. ?limit= is clamped to 1..100 (default 50) and ?offset= to
+// 0..MaxInt32, as points-history does; a non-integer is a 422.
+// GET /api/v1/households/{householdID}/family-members/{memberID}/reward-history
+func (h *RewardHandler) RewardHistory(w http.ResponseWriter, r *http.Request) {
+	hid, mid, ok := parseMemberIDs(w, r)
+	if !ok {
+		return
+	}
+	limit, err := queryInt(r, "limit", defaultPageSize)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	offset, err := queryInt(r, "offset", 0)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	if limit < 1 {
+		limit = 1
+	} else if limit > 100 {
+		limit = 100
+	}
+	// Clamped as a plain int before the int32 conversion, so an oversized
+	// offset reads past the end (an empty page) instead of wrapping.
+	if offset < 0 {
+		offset = 0
+	} else if offset > math.MaxInt32 {
+		offset = math.MaxInt32
+	}
+	rows, err := h.svc.RewardHistory(r.Context(), currentUser(r), hid, mid, r.Header.Get("X-Member-PIN"), r.Header.Get("X-Admin-PIN"), int32(limit), int32(offset))
 	if err != nil {
 		writeError(w, r, err)
 		return

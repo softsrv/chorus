@@ -63,6 +63,15 @@ SELECT * FROM reward_redemptions
 WHERE household_id = $1 AND member_id = $2 AND status = 'pending'
 ORDER BY requested_at ASC, id ASC;
 
+-- name: ListMemberRewardHistory :many
+-- The member's approved requests, newest approval first. Each row carries
+-- the description and cost snapshotted on the request, so editing or
+-- deleting the reward later never changes the history.
+SELECT * FROM reward_redemptions
+WHERE household_id = $1 AND member_id = $2 AND status = 'approved'
+ORDER BY decided_at DESC, id DESC
+LIMIT $3 OFFSET $4;
+
 -- name: GetPendingRedemptionMember :one
 -- The member of a pending request, read without a lock so Approve and Reject
 -- can lock that member's row before they lock the request (member first, the
