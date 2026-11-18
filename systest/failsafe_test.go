@@ -3,9 +3,6 @@
 package systest
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -16,10 +13,10 @@ import (
 )
 
 // TestSystem_FailsSafely tests that the running app handles failure modes safely:
-// 1. Unreachable database: reports /health 200 {status:ok} and /ready 503 {status:unavailable}.
-// 2. Bad configuration: exits non-zero within bounded deadline, logs "configuration error",
-//    and never accepts connections on its port.
-// 3. Graceful shutdown: in-flight request finishes, exits 0, and logs "shutdown complete".
+//  1. Unreachable database: reports /health 200 {status:ok} and /ready 503 {status:unavailable}.
+//  2. Bad configuration: exits non-zero within bounded deadline, logs "configuration error",
+//     and never accepts connections on its port.
+//  3. Graceful shutdown: in-flight request finishes, exits 0, and logs "shutdown complete".
 func TestSystem_FailsSafely(t *testing.T) {
 	t.Run("unreachable database", func(t *testing.T) {
 		// Pick an unused port by listening on loopback and immediately closing it.
