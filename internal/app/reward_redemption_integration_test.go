@@ -452,4 +452,103 @@ func TestIntegration_RewardHistory(t *testing.T) {
 	if err != nil || none == nil || len(none) != 0 {
 		t.Errorf("RewardHistory for a member with none = %#v, %v; want an empty, non-nil slice", none, err)
 	}
+
+	historyIDs := func(t *testing.T, m app.Member) []uuid.UUID {
+		t.Helper()
+		rows, err := w.rewards.RewardHistory(w.ctx, w.admin, w.h.ID, m.ID, "1234", "", 50, 0)
+		if err != nil {
+			t.Fatalf("RewardHistory(%s): %v", m.Name, err)
+		}
+		ids := make([]uuid.UUID, 0, len(rows))
+		for _, r := range rows {
+			ids = append(ids, r.ID)
+		}
+		return ids
+	}
+
+	// Only approved requests are history: a pending, a rejected and a
+	// cancelled request of the same member stay out, and the pending one
+	// shows up once it is approved.
+	t.Run("only approved requests are history", func(t *testing.T) {
+		jo := w.member("Jo", 500)
+		pending := w.request(jo, w.reward("Bike ride", 30))
+		rejected := w.request(jo, w.reward("Ice cream", 40))
+		if _, err := w.rewards.Reject(w.ctx, w.admin, w.h.ID, rejected.ID, ""); err != nil {
+			t.Fatalf("Reject: %v", err)
+		}
+		// Remove cancels a member's requests but then deletes the member
+		// (cascading the rows), so a cancelled row of a member who is still
+		// here is written directly, as the cancel would leave it.
+		cancelled := w.request(jo, w.reward("Zoo trip", 50))
+		if _, err := w.pool.Exec(w.ctx, `UPDATE reward_redemptions SET status = 'cancelled', decided_at = NOW() WHERE id = $1`, cancelled.ID); err != nil {
+			t.Fatalf("cancel request: %v", err)
+		}
+		approved, _, err := w.rewards.Approve(w.ctx, w.admin, w.h.ID, w.request(jo, w.reward("Board game", 60)).ID, "")
+		if err != nil {
+			t.Fatalf("Approve: %v", err)
+		}
+		for id, want := range map[uuid.UUID]string{pending.ID: "pending", rejected.ID: "rejected", cancelled.ID: "cancelled", approved.ID: "approved"} {
+			if got := w.status(id); got != want {
+				t.Fatalf("status of %v = %q, want %q", id, got, want)
+			}
+		}
+		if ids := historyIDs(t, jo); len(ids) != 1 || ids[0] != approved.ID {
+			t.Errorf("history = %v, want only the approved %v", ids, approved.ID)
+		}
+
+		if _, _, err := w.rewards.Approve(w.ctx, w.admin, w.h.ID, pending.ID, ""); err != nil {
+			t.Fatalf("Approve the pending request: %v", err)
+		}
+		ids := historyIDs(t, jo)
+		if len(ids) != 2 {
+			t.Fatalf("history after approving the pending request = %v, want two", ids)
+		}
+		seen := map[uuid.UUID]bool{ids[0]: true, ids[1]: true}
+		if !seen[pending.ID] || !seen[approved.ID] {
+			t.Errorf("history = %v, want %v and %v", ids, pending.ID, approved.ID)
+		}
+	})
+
+	// A history item keeps the description and cost snapshotted on the
+	// request: editing the reward and then deleting it (reward_id becomes
+	// NULL) changes nothing and the item is still returned.
+	t.Run("history keeps the snapshot after the reward is edited and deleted", func(t *testing.T) {
+		kim := w.member("Kim", 500)
+		trip := w.reward("Beach trip", 120)
+		approved, _, err := w.rewards.Approve(w.ctx, w.admin, w.h.ID, w.request(kim, trip).ID, "")
+		if err != nil {
+			t.Fatalf("Approve: %v", err)
+		}
+		read := func(stage string) db.RewardRedemption {
+			t.Helper()
+			rows, err := w.rewards.RewardHistory(w.ctx, w.admin, w.h.ID, kim.ID, "1234", "", 50, 0)
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("history %s = %+v, %v; want one item", stage, rows, err)
+			}
+			return rows[0]
+		}
+		before := read("after approval")
+		if before.ID != approved.ID || before.Description != "Beach trip" || before.Cost != 120 || before.RewardID == nil || *before.RewardID != trip.ID {
+			t.Fatalf("history after approval = %+v, want Beach trip at 120 for reward %v", before, trip.ID)
+		}
+
+		if _, err := w.rewards.Update(w.ctx, w.admin, w.h.ID, trip.ID, app.RewardInput{Description: "Mountain trip", Cost: num(900)}, ""); err != nil {
+			t.Fatalf("Update reward: %v", err)
+		}
+		// Same item, same snapshot, same approval time.
+		sameItem := func(got db.RewardRedemption) bool {
+			return got.ID == before.ID && got.Description == "Beach trip" && got.Cost == 120 && got.Status == "approved" &&
+				got.DecidedAt.Valid && got.DecidedAt.Time.Equal(before.DecidedAt.Time)
+		}
+		if edited := read("after edit"); !sameItem(edited) || edited.RewardID == nil || *edited.RewardID != trip.ID {
+			t.Errorf("history after edit = %+v, want unchanged %+v", edited, before)
+		}
+
+		if err := w.rewards.Delete(w.ctx, w.admin, w.h.ID, trip.ID, ""); err != nil {
+			t.Fatalf("Delete reward: %v", err)
+		}
+		if deleted := read("after delete"); !sameItem(deleted) || deleted.RewardID != nil {
+			t.Errorf("history after delete = %+v, want Beach trip at 120, decided %v, reward_id nil", deleted, before.DecidedAt.Time)
+		}
+	})
 }
