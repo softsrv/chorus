@@ -20,6 +20,8 @@ type familyServicer interface {
 	Remove(ctx context.Context, userID, householdID, memberID uuid.UUID, adminPin string) error
 	SetPin(ctx context.Context, userID, householdID, memberID uuid.UUID, pin string, adminPin string) (app.Member, error)
 	ClearPin(ctx context.Context, userID, householdID, memberID uuid.UUID, adminPin string) (app.Member, error)
+	SetBirthday(ctx context.Context, userID, householdID, memberID uuid.UUID, birthday *string, adminPin string) (app.MemberBirthday, error)
+	ListBirthdays(ctx context.Context, userID, householdID uuid.UUID, adminPin string) ([]app.MemberBirthday, error)
 	Verify(ctx context.Context, userID, householdID, memberID uuid.UUID, pin string) (app.Member, error)
 	PointsHistory(ctx context.Context, userID, householdID, memberID uuid.UUID, memberPin, adminPin string, limit, offset int32) ([]app.PointsAward, error)
 	AdminPinSet(ctx context.Context, userID, householdID uuid.UUID) (bool, error)
@@ -71,6 +73,24 @@ type renameMemberRequest struct {
 
 type setMemberPinRequest struct {
 	PIN string `json:"pin"`
+}
+
+// setBirthdayRequest is the body of PUT .../birthday: a YYYY-MM-DD date, or
+// null to clear it.
+type setBirthdayRequest struct {
+	Birthday *string `json:"birthday"`
+}
+
+// birthdayJSON is one member's birthday as only the admin reads it, through
+// the two admin-PIN-gated birthday routes. memberResponse never carries it.
+type birthdayJSON struct {
+	MemberID uuid.UUID `json:"member_id"`
+	Birthday *string   `json:"birthday"`
+	Age      *int32    `json:"age"`
+}
+
+func toBirthdayJSON(b app.MemberBirthday) birthdayJSON {
+	return birthdayJSON{MemberID: b.MemberID, Birthday: b.Birthday, Age: b.Age}
 }
 
 type verifyMemberPinRequest struct {
@@ -227,6 +247,46 @@ func (h *FamilyMemberHandler) ClearPin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.JSON(w, http.StatusOK, toMemberResponse(m))
+}
+
+// SetBirthday sets or clears (null) a family member's birthday.
+// PUT /api/v1/households/{householdID}/family-members/{memberID}/birthday
+func (h *FamilyMemberHandler) SetBirthday(w http.ResponseWriter, r *http.Request) {
+	hid, mid, ok := parseMemberIDs(w, r)
+	if !ok {
+		return
+	}
+	var req setBirthdayRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	adminPin := r.Header.Get("X-Admin-PIN")
+	b, err := h.svc.SetBirthday(r.Context(), currentUser(r), hid, mid, req.Birthday, adminPin)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, toBirthdayJSON(b))
+}
+
+// Birthdays lists every member's birthday and age for the admin.
+// GET /api/v1/households/{householdID}/family-members/birthdays
+func (h *FamilyMemberHandler) Birthdays(w http.ResponseWriter, r *http.Request) {
+	hid, ok := parseHouseholdID(w, r)
+	if !ok {
+		return
+	}
+	adminPin := r.Header.Get("X-Admin-PIN")
+	items, err := h.svc.ListBirthdays(r.Context(), currentUser(r), hid, adminPin)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	out := mapSlice(items, toBirthdayJSON)
+	if out == nil {
+		out = []birthdayJSON{}
+	}
+	respond.JSON(w, http.StatusOK, listResponse[birthdayJSON]{Items: out})
 }
 
 // Verify verifies a family member's PIN.

@@ -180,6 +180,10 @@ type Querier interface {
 	ListCombosCompletedByMemberOnDay(ctx context.Context, arg ListCombosCompletedByMemberOnDayParams) ([]ListCombosCompletedByMemberOnDayRow, error)
 	// Events overlapping [range_start, range_end).
 	ListEventsInRange(ctx context.Context, arg ListEventsInRangeParams) ([]Event, error)
+	// Every member of the household with their birthday and their age today in
+	// the household's timezone (quest_member_age). As above, age is 0 and not
+	// meaningful for a member with no birthday.
+	ListFamilyMemberBirthdays(ctx context.Context, householdID uuid.UUID) ([]ListFamilyMemberBirthdaysRow, error)
 	// Every family member query is scoped by household_id. Membership / admin
 	// authorization is checked by the service layer first; the household_id
 	// predicate guarantees a member ID from another household can never be
@@ -328,6 +332,12 @@ type Querier interface {
 	// member row, and this writes nothing for it.
 	SetCompletionMemberAward(ctx context.Context, arg SetCompletionMemberAwardParams) error
 	SetEmailVerified(ctx context.Context, id uuid.UUID) error
+	// Sets a member's birthday, or clears it with NULL. Returns it with the
+	// member's age today in the household's timezone, from quest_member_age (the
+	// one age rule). age is only meaningful when birthday is set: it is 0 for a
+	// member with none, and the caller reports no age then. A member id of
+	// another household matches no row.
+	SetFamilyMemberBirthday(ctx context.Context, arg SetFamilyMemberBirthdayParams) (SetFamilyMemberBirthdayRow, error)
 	SetFamilyMemberPin(ctx context.Context, arg SetFamilyMemberPinParams) (FamilyMember, error)
 	// Links a Google account to an existing user. Conditional on google_subject IS
 	// NULL so an account already linked to a Google identity is never relinked.

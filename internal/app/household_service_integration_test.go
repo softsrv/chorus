@@ -926,6 +926,98 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	}
 }
 
+// TestIntegration_HouseholdIsolation_Birthdays extends the isolation guard to
+// member birthdays (CLM-5, CLM-4): a user outside the household cannot read
+// or write them (ErrNotFound, never ErrForbidden), a member id of another
+// household is not found through the caller's own household, and neither
+// changes the stored birthday. ListBirthdays lists only this household.
+func TestIntegration_HouseholdIsolation_Birthdays(t *testing.T) {
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	households := app.NewHouseholdService(q, pool)
+	familySvc := app.NewFamilyService(q, pool, 10)
+	ctx := context.Background()
+
+	alice := registerVerified(t, pool, authSvc, mailer, "bdayalice").User.ID
+	mallory := registerVerified(t, pool, authSvc, mailer, "bdaymallory").User.ID
+
+	h, err := households.Create(ctx, alice, app.HouseholdInput{Name: "Alice Birthdays", Timezone: "America/Chicago"})
+	if err != nil {
+		t.Fatalf("create alice household: %v", err)
+	}
+	mh, err := households.Create(ctx, mallory, app.HouseholdInput{Name: "Mallory Birthdays"})
+	if err != nil {
+		t.Fatalf("create mallory household: %v", err)
+	}
+	kid, err := familySvc.Create(ctx, alice, h.ID, app.FamilyMemberInput{Name: "Kid"}, "")
+	if err != nil {
+		t.Fatalf("create kid: %v", err)
+	}
+	malloryKid, err := familySvc.Create(ctx, mallory, mh.ID, app.FamilyMemberInput{Name: "Mallory Kid"}, "")
+	if err != nil {
+		t.Fatalf("create mallory kid: %v", err)
+	}
+	set := "2015-04-02"
+	if _, err := familySvc.SetBirthday(ctx, alice, h.ID, kid.ID, &set, ""); err != nil {
+		t.Fatalf("alice SetBirthday: %v", err)
+	}
+	stored := func(id uuid.UUID) string {
+		t.Helper()
+		var d pgtype.Date
+		if err := pool.QueryRow(ctx, "SELECT birthday FROM family_members WHERE id = $1", id).Scan(&d); err != nil {
+			t.Fatalf("read birthday: %v", err)
+		}
+		if !d.Valid {
+			return ""
+		}
+		return d.Time.Format(time.DateOnly)
+	}
+
+	// Mallory reads and writes nothing of Alice's household.
+	if _, err := familySvc.ListBirthdays(ctx, mallory, h.ID, ""); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("mallory ListBirthdays: %v, want ErrNotFound", err)
+	}
+	other := "2001-01-01"
+	if _, err := familySvc.SetBirthday(ctx, mallory, h.ID, kid.ID, &other, ""); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("mallory SetBirthday: %v, want ErrNotFound", err)
+	}
+	if _, err := familySvc.SetBirthday(ctx, mallory, h.ID, kid.ID, nil, ""); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("mallory clear birthday: %v, want ErrNotFound", err)
+	}
+	// Alice's member id through Mallory's own household is not found either.
+	if _, err := familySvc.SetBirthday(ctx, mallory, mh.ID, kid.ID, &other, ""); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("mallory SetBirthday on alice's member via own household: %v, want ErrNotFound", err)
+	}
+	if got := stored(kid.ID); got != set {
+		t.Errorf("alice kid birthday after mallory's attempts = %q, want %q", got, set)
+	}
+	// And Mallory's member id through Alice's household is not found for Alice.
+	if _, err := familySvc.SetBirthday(ctx, alice, h.ID, malloryKid.ID, &other, ""); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("alice SetBirthday on mallory's member: %v, want ErrNotFound", err)
+	}
+	if got := stored(malloryKid.ID); got != "" {
+		t.Errorf("mallory kid birthday = %q, want unset", got)
+	}
+
+	// Each household's list holds only its own members.
+	list, err := familySvc.ListBirthdays(ctx, alice, h.ID, "")
+	if err != nil {
+		t.Fatalf("alice ListBirthdays: %v", err)
+	}
+	if len(list) != 1 || list[0].MemberID != kid.ID {
+		t.Errorf("alice ListBirthdays = %+v, want only Kid", list)
+	}
+	mlist, err := familySvc.ListBirthdays(ctx, mallory, mh.ID, "")
+	if err != nil {
+		t.Fatalf("mallory ListBirthdays own: %v", err)
+	}
+	if len(mlist) != 1 || mlist[0].MemberID != malloryKid.ID || mlist[0].Birthday != nil || mlist[0].Age != nil {
+		t.Errorf("mallory ListBirthdays = %+v, want only Mallory Kid with no birthday", mlist)
+	}
+}
+
 func TestIntegration_HouseholdMembersOneLoginConstraint(t *testing.T) {
 	pool := testDB(t)
 	ctx := context.Background()

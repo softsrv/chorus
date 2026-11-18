@@ -149,6 +149,43 @@ func (q *Queries) GetFamilyMember(ctx context.Context, arg GetFamilyMemberParams
 	return i, err
 }
 
+const listFamilyMemberBirthdays = `-- name: ListFamilyMemberBirthdays :many
+SELECT m.id, m.birthday, COALESCE(quest_member_age(m.birthday, h.timezone), 0)::int AS age
+FROM family_members m
+JOIN households h ON h.id = m.household_id
+WHERE m.household_id = $1
+ORDER BY m.name, m.id
+`
+
+type ListFamilyMemberBirthdaysRow struct {
+	ID       uuid.UUID   `json:"id"`
+	Birthday pgtype.Date `json:"birthday"`
+	Age      int32       `json:"age"`
+}
+
+// Every member of the household with their birthday and their age today in
+// the household's timezone (quest_member_age). As above, age is 0 and not
+// meaningful for a member with no birthday.
+func (q *Queries) ListFamilyMemberBirthdays(ctx context.Context, householdID uuid.UUID) ([]ListFamilyMemberBirthdaysRow, error) {
+	rows, err := q.db.Query(ctx, listFamilyMemberBirthdays, householdID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListFamilyMemberBirthdaysRow{}
+	for rows.Next() {
+		var i ListFamilyMemberBirthdaysRow
+		if err := rows.Scan(&i.ID, &i.Birthday, &i.Age); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listFamilyMembers = `-- name: ListFamilyMembers :many
 
 SELECT id, household_id, name, pin_hash, points, created_at, updated_at, birthday FROM family_members
@@ -236,6 +273,39 @@ func (q *Queries) RenameFamilyMember(ctx context.Context, arg RenameFamilyMember
 		&i.UpdatedAt,
 		&i.Birthday,
 	)
+	return i, err
+}
+
+const setFamilyMemberBirthday = `-- name: SetFamilyMemberBirthday :one
+UPDATE family_members m
+SET birthday = $1::date, updated_at = NOW()
+FROM households h
+WHERE m.household_id = $2 AND m.id = $3
+  AND h.id = m.household_id
+RETURNING m.id, m.birthday, COALESCE(quest_member_age(m.birthday, h.timezone), 0)::int AS age
+`
+
+type SetFamilyMemberBirthdayParams struct {
+	Birthday    pgtype.Date `json:"birthday"`
+	HouseholdID uuid.UUID   `json:"household_id"`
+	ID          uuid.UUID   `json:"id"`
+}
+
+type SetFamilyMemberBirthdayRow struct {
+	ID       uuid.UUID   `json:"id"`
+	Birthday pgtype.Date `json:"birthday"`
+	Age      int32       `json:"age"`
+}
+
+// Sets a member's birthday, or clears it with NULL. Returns it with the
+// member's age today in the household's timezone, from quest_member_age (the
+// one age rule). age is only meaningful when birthday is set: it is 0 for a
+// member with none, and the caller reports no age then. A member id of
+// another household matches no row.
+func (q *Queries) SetFamilyMemberBirthday(ctx context.Context, arg SetFamilyMemberBirthdayParams) (SetFamilyMemberBirthdayRow, error) {
+	row := q.db.QueryRow(ctx, setFamilyMemberBirthday, arg.Birthday, arg.HouseholdID, arg.ID)
+	var i SetFamilyMemberBirthdayRow
+	err := row.Scan(&i.ID, &i.Birthday, &i.Age)
 	return i, err
 }
 
