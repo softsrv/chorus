@@ -140,6 +140,9 @@ async function becomeSam(pin = '1234') {
 async function becomeAnn() {
   await click(buttons(env.$app, 'Switch member')[0]);
   await click(buttonStarting(env.$app, 'Ann'));
+  // Ann has no PIN: picking her enters her member view at once.
+  assert.match(text(), /Viewing as: Ann/, 'member view entered');
+  assert.equal(buttons(env.$app, 'Administrator view').length, 1, 'member view offers the way back');
 }
 
 test('CLM-1: rewards list description and cost; add POSTs {description, cost}; Edit PUTs; Delete on the second click', async () => {
@@ -372,13 +375,59 @@ test('CLM-16: a 422 answer shows inline message and keeps Redeem button; wrong_p
   await click(buttons(rowOf('Movie night'), 'Redeem')[0]);
   assert.match(rowOf('Movie night').textContent, /Not enough points/);
   assert.equal(buttons(rowOf('Movie night'), 'Redeem').length, 1);
+  assert.equal(buttons(rowOf('Movie night'), 'Redeem')[0].disabled, false, 'Redeem stays enabled after a 422');
   assert.doesNotMatch(rowOf('Movie night').textContent, /Pending approval/);
+  assert.match(text(), /Viewing as: Sam/);
 
-  // wrong_pin answers
+  // wrong_pin answers: memberActionFailed drops the member back to the
+  // administrator's view and says the PIN is no longer correct.
   srv.extra[`POST ${HP}/rewards/r-movie/redeem`] = () => err(403, 'wrong_pin', 'Wrong PIN.');
   await click(buttons(rowOf('Movie night'), 'Redeem')[0]);
   assert.equal(signedOut, 0);
-  assert.ok(buttonStarting(env.$app, 'Switch member') || buttonStarting(env.$app, 'Administrator view'));
+  assert.match(text(), /Viewing as: Administrator/, 'member cleared back to the administrator view');
+  assert.equal(buttons(env.$app, 'Administrator view').length, 0);
+  assert.match(document.body.textContent, /That PIN is no longer correct\. Pick the member again\./);
+  assert.doesNotMatch(text(), /Pending approval/);
+});
+
+test('1.1/2: a failing member pending read shows an inline error and offers no enabled Redeem', async () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/rewards-member-enough.json', import.meta.url), 'utf8'));
+  for (const [status, code] of [[500, 'internal'], [429, 'rate_limited']]) {
+    srv.members = fixture.members;
+    srv.rewards = fixture.rewards;
+    srv.memberPendingRewards = () => err(status, code, 'Server trouble.');
+    await loadApp();
+    await becomeSam();
+    await openRewards();
+    assert.match(text(), /Viewing as: Sam/);
+    assert.match(text(), /Could not load your waiting requests/, `inline error on ${status}`);
+    const redeem = buttons(env.$app, 'Redeem');
+    assert.equal(redeem.length, fixture.rewards.length);
+    assert.ok(redeem.every((b) => b.disabled), `no enabled Redeem on ${status}`);
+  }
+});
+
+test('1.1/2: a Redeem answered 404 reloads with a notice; 500 shows an inline row error and keeps Redeem', async () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/rewards-member-enough.json', import.meta.url), 'utf8'));
+  srv.members = fixture.members;
+  srv.rewards = fixture.rewards;
+  srv.extra[`POST ${HP}/rewards/r-movie/redeem`] = () => [500, { error: { code: 'internal', message: 'Server trouble.' } }];
+  await loadApp();
+  await becomeSam();
+  await openRewards();
+
+  await click(buttons(rowOf('Movie night'), 'Redeem')[0]);
+  assert.match(rowOf('Movie night').textContent, /Could not request Movie night: Server trouble\./);
+  assert.equal(buttons(rowOf('Movie night'), 'Redeem')[0].disabled, false);
+  assert.doesNotMatch(rowOf('Movie night').textContent, /Pending approval/);
+
+  srv.extra[`POST ${HP}/rewards/r-movie/redeem`] = () => {
+    srv.rewards = srv.rewards.filter((r) => r.id !== 'r-movie');
+    return err(404, 'not_found', 'Not found.');
+  };
+  await click(buttons(rowOf('Movie night'), 'Redeem')[0]);
+  assert.match(text(), /Movie night is no longer available\./);
+  assert.equal(rowOf('Movie night'), undefined, 'deleted reward left the list');
 });
 
 test('CLM-21: empty list in member view shows empty state text and zero Redeem buttons', async () => {
@@ -387,6 +436,7 @@ test('CLM-21: empty list in member view shows empty state text and zero Redeem b
   await loadApp();
   await becomeAnn();
   await openRewards();
+  assert.match(text(), /Viewing as: Ann/, 'still in the member view on Rewards');
   assert.ok(text().includes(EMPTY));
   assert.equal(buttons(env.$app, 'Redeem').length, 0);
 });

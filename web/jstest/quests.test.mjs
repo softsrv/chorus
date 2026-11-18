@@ -2073,6 +2073,38 @@ test('CLM-20: approvals card empty state accounts for both quest and redemption 
   assert.match(approvals2().textContent, /Reward requests/);
 });
 
+test('1.1/4: a failing reward-requests read shows an inline error and the quest completions still render with their actions', async () => {
+  for (const [status, code] of [[500, 'internal'], [429, 'rate_limited']]) {
+    srv.adminPinSet = true;
+    srv.pending = () => [200, { items: [
+      { completion_id: 'c1', quest_id: 'q1', name: 'Empty the dishwasher', points: 10, member_id: 'm-a', member_name: 'Alex', done_at: '2025-01-03T00:00:00Z' },
+    ] }];
+    srv.pendingRewards = () => [status, { error: { code, message: 'Server trouble.' } }];
+
+    await loadApp();
+    await unlockAdmin('9999');
+
+    const approvals = walk(env.$app).find((n) => n.tagName === 'H3' && n.textContent === 'Approvals').parentNode;
+    const row = walk(approvals).find((n) => n.tagName === 'LI' && n.textContent.includes('Empty the dishwasher'));
+    assert.ok(row, `quest row renders when the reward read answers ${status}`);
+    assert.equal(buttons(row, 'Approve').length, 1);
+    assert.equal(buttons(row, 'Send back').length, 1);
+    assert.match(approvals.textContent, /Could not load reward requests/);
+    assert.doesNotMatch(approvals.textContent, /Nothing waiting for approval\./);
+  }
+});
+
+test('1.1/4: with no quest completions, a failing reward-requests read never claims nothing is waiting', async () => {
+  srv.adminPinSet = true;
+  srv.pending = () => [200, { items: [] }];
+  srv.pendingRewards = () => [500, { error: { code: 'internal', message: 'Server trouble.' } }];
+  await loadApp();
+  await unlockAdmin('9999');
+  const approvals = walk(env.$app).find((n) => n.tagName === 'H3' && n.textContent === 'Approvals').parentNode;
+  assert.match(approvals.textContent, /Could not load reward requests/);
+  assert.doesNotMatch(approvals.textContent, /Nothing waiting for approval\./);
+});
+
 test('1.1/8: a 404 on reward approve or reject (already decided or cancelled) reloads the card with a notice and the stale row leaves', async () => {
   for (const verb of ['approve', 'reject']) {
     srv.adminPinSet = true;
