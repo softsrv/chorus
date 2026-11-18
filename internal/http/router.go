@@ -164,11 +164,16 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	// ── Family members & Admin PIN ───────────────────────────────────────────
 	api.Handle("GET /api/v1/households/{householdID}/family-members", verified(familyMemberH.List))
 	api.Handle("POST /api/v1/households/{householdID}/family-members", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.Create))))
+	// Birthdays are admin-only behind the admin PIN, so this read shares the
+	// PIN limiter like /pin. The literal segment is more specific than
+	// {memberID}, so the mux never reads "birthdays" as a member id.
+	api.Handle("GET /api/v1/households/{householdID}/family-members/birthdays", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.Birthdays))))
 	api.Handle("GET /api/v1/households/{householdID}/family-members/{memberID}", verified(familyMemberH.Get))
 	api.Handle("PUT /api/v1/households/{householdID}/family-members/{memberID}", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.Rename))))
 	api.Handle("DELETE /api/v1/households/{householdID}/family-members/{memberID}", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.Delete))))
 	api.Handle("PUT /api/v1/households/{householdID}/family-members/{memberID}/pin", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.SetPin))))
 	api.Handle("DELETE /api/v1/households/{householdID}/family-members/{memberID}/pin", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.ClearPin))))
+	api.Handle("PUT /api/v1/households/{householdID}/family-members/{memberID}/birthday", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.SetBirthday))))
 	api.Handle("POST /api/v1/households/{householdID}/family-members/{memberID}/verify", authMW(middleware.RequireEmailVerified(limit(pinRL, familyMemberH.Verify))))
 	api.Handle("GET /api/v1/households/{householdID}/family-members/{memberID}/points-history", authMW(middleware.RequireEmailVerified(historyRL.Middleware(pinRL.FailuresOnly(http.HandlerFunc(familyMemberH.PointsHistory))))))
 	api.Handle("GET /api/v1/households/{householdID}/admin-pin", verified(familyMemberH.AdminPinStatus))

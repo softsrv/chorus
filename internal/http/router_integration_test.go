@@ -1996,3 +1996,237 @@ func TestAPI_RemovedInviteAndMemberRoutes404(t *testing.T) {
 		t.Errorf("DELETE /members/{uid}: code %q, want not_found", e.Error.Code)
 	}
 }
+
+// CLM-2: POST share for an out-of-range target answers 409 age_restricted
+// with "This quest is outside that member's age range." and leaves the quest,
+// its holder and its participants unchanged.
+func TestAPI_QuestShare_AgeRange(t *testing.T) {
+	s := newTestServer(t)
+	parent := s.signUp("shareparent")
+	ctx := context.Background()
+
+	var h struct{ ID uuid.UUID }
+	s.expect(http.StatusCreated, "POST", "/api/v1/households", parent.AccessToken,
+		map[string]string{"name": "Share Ages", "timezone": "America/Chicago"}, &h)
+	hp := "/api/v1/households/" + h.ID.String()
+
+	loc, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatalf("load tz: %v", err)
+	}
+	now := time.Now().In(loc)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+
+	newMemberWithPin := func(name, pin string, years int) uuid.UUID {
+		t.Helper()
+		var m struct{ ID uuid.UUID }
+		s.expect(http.StatusCreated, "POST", hp+"/family-members", parent.AccessToken,
+			map[string]string{"name": name, "pin": pin}, &m)
+		if years >= 0 {
+			bd := today.AddDate(-years, 0, -30).Format("2006-01-02")
+			if _, err := s.pool.Exec(ctx, `UPDATE family_members SET birthday = $1::date WHERE id = $2`, bd, m.ID); err != nil {
+				t.Fatalf("set birthday: %v", err)
+			}
+		}
+		return m.ID
+	}
+
+	eligible := newMemberWithPin("Eligible", "1111", 12)
+	outOfRange := newMemberWithPin("TooYoung", "2222", 8)
+
+	type shareQuest struct {
+		ID                  uuid.UUID   `json:"id"`
+		Name                string      `json:"name"`
+		Shareable           bool        `json:"shareable"`
+		Shared              bool        `json:"shared"`
+		ClaimedBy           *uuid.UUID  `json:"claimed_by"`
+		Participants        []uuid.UUID `json:"participants"`
+		MinAge              *int32      `json:"min_age"`
+		MaxAge              *int32      `json:"max_age"`
+		IneligibleMemberIDs []uuid.UUID `json:"ineligible_member_ids"`
+	}
+
+	var q shareQuest
+	s.expect(http.StatusCreated, "POST", hp+"/quests", parent.AccessToken, map[string]any{
+		"name": "Mow lawn", "points": 50, "shareable": true, "teamwork_bonus": 10,
+		"min_age": 10, "max_age": 14,
+	}, &q)
+
+	qp := hp + "/quests/" + q.ID.String()
+	// Eligible member accepts the quest.
+	s.expect(http.StatusOK, "POST", qp+"/accept", parent.AccessToken, map[string]any{
+		"member_id": eligible, "pin": "1111",
+	}, nil)
+
+	// POST share to an out-of-range target returns 409 age_restricted.
+	var refused ageErr
+	s.expect(http.StatusConflict, "POST", qp+"/share", parent.AccessToken, map[string]any{
+		"member_id":        eligible,
+		"pin":              "1111",
+		"target_member_id": outOfRange,
+		"target_pin":       "2222",
+	}, &refused)
+
+	if refused.Error.Code != "age_restricted" {
+		t.Errorf("share refusal code: got %q, want age_restricted", refused.Error.Code)
+	}
+	const wantMsg = "This quest is outside that member's age range."
+	if refused.Error.Message != wantMsg {
+		t.Errorf("share refusal message: got %q, want %q", refused.Error.Message, wantMsg)
+	}
+
+	// GET quest confirms the quest, its holder and its participants are unchanged afterwards.
+	var got shareQuest
+	s.expect(http.StatusOK, "GET", qp, parent.AccessToken, nil, &got)
+	if got.Shared {
+		t.Errorf("quest after refused share: shared = true, want false")
+	}
+	if len(got.Participants) != 0 {
+		t.Errorf("quest after refused share: participants = %v, want empty", got.Participants)
+	}
+	if got.ClaimedBy == nil || *got.ClaimedBy != eligible {
+		t.Errorf("quest after refused share: claimed_by = %v, want %v", got.ClaimedBy, eligible)
+	}
+}
+
+// CLM-5: Share refuses with ErrAgeRestricted exactly the set in ineligible_member_ids;
+// members not on the quest are never missing from the family-members list because of age,
+// and GET family-members returns no birthday or age keys.
+func TestAPI_QuestShare_IneligibleConsistency(t *testing.T) {
+	s := newTestServer(t)
+	parent := s.signUp("ineligibleparent")
+	ctx := context.Background()
+
+	var h struct{ ID uuid.UUID }
+	s.expect(http.StatusCreated, "POST", "/api/v1/households", parent.AccessToken,
+		map[string]string{"name": "Ineligible Consistency", "timezone": "America/Chicago"}, &h)
+	hp := "/api/v1/households/" + h.ID.String()
+
+	loc, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatalf("load tz: %v", err)
+	}
+	now := time.Now().In(loc)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+
+	newMember := func(name string, years int) uuid.UUID {
+		t.Helper()
+		var m struct{ ID uuid.UUID }
+		s.expect(http.StatusCreated, "POST", hp+"/family-members", parent.AccessToken,
+			map[string]string{"name": name}, &m)
+		if years >= 0 {
+			bd := today.AddDate(-years, 0, -30).Format("2006-01-02")
+			if _, err := s.pool.Exec(ctx, `UPDATE family_members SET birthday = $1::date WHERE id = $2`, bd, m.ID); err != nil {
+				t.Fatalf("set birthday: %v", err)
+			}
+		}
+		return m.ID
+	}
+
+	m8 := newMember("Eight", 8)
+	m10 := newMember("Ten", 10)
+	m12 := newMember("Twelve", 12)
+	m14 := newMember("Fourteen", 14)
+	m15 := newMember("Fifteen", 15)
+	mNoBday := newMember("NoBirthday", -1)
+
+	allMembers := []uuid.UUID{m8, m10, m12, m14, m15, mNoBday}
+
+	type shareQuest struct {
+		ID                  uuid.UUID   `json:"id"`
+		Name                string      `json:"name"`
+		Shareable           bool        `json:"shareable"`
+		Shared              bool        `json:"shared"`
+		ClaimedBy           *uuid.UUID  `json:"claimed_by"`
+		Participants        []uuid.UUID `json:"participants"`
+		IneligibleMemberIDs []uuid.UUID `json:"ineligible_member_ids"`
+	}
+
+	createAndAcceptQuest := func(name string) shareQuest {
+		var q shareQuest
+		s.expect(http.StatusCreated, "POST", hp+"/quests", parent.AccessToken, map[string]any{
+			"name": name, "points": 25, "shareable": true, "teamwork_bonus": 5,
+			"min_age": 10, "max_age": 14,
+		}, &q)
+		s.expect(http.StatusOK, "POST", hp+"/quests/"+q.ID.String()+"/accept", parent.AccessToken, map[string]any{
+			"member_id": m12,
+		}, nil)
+		s.expect(http.StatusOK, "GET", hp+"/quests/"+q.ID.String(), parent.AccessToken, nil, &q)
+		return q
+	}
+
+	initialQuest := createAndAcceptQuest("Check Ineligible")
+	ineligible := initialQuest.IneligibleMemberIDs
+
+	// Out of the members, exactly m8 and m15 should be in ineligible_member_ids.
+	wantIneligible := []uuid.UUID{m8, m15}
+	if len(ineligible) != len(wantIneligible) {
+		t.Fatalf("ineligible_member_ids: got %v, want %v", ineligible, wantIneligible)
+	}
+	for _, id := range wantIneligible {
+		if !slices.Contains(ineligible, id) {
+			t.Errorf("ineligible_member_ids missing %v", id)
+		}
+	}
+
+	// For each other member, compare ineligible_member_ids with POST share outcome.
+	// Each success (and each test) on a fresh quest so no already_participant interference.
+	otherMembers := []uuid.UUID{m8, m10, m14, m15, mNoBday}
+	for _, target := range otherMembers {
+		quest := createAndAcceptQuest(fmt.Sprintf("Quest for %s", target))
+		sharePath := hp + "/quests/" + quest.ID.String() + "/share"
+		shareBody := map[string]any{
+			"member_id":        m12,
+			"target_member_id": target,
+		}
+
+		if slices.Contains(ineligible, target) {
+			var errResp ageErr
+			s.expect(http.StatusConflict, "POST", sharePath, parent.AccessToken, shareBody, &errResp)
+			if errResp.Error.Code != "age_restricted" {
+				t.Errorf("member %v: share refusal code got %q, want age_restricted", target, errResp.Error.Code)
+			}
+			const wantMsg = "This quest is outside that member's age range."
+			if errResp.Error.Message != wantMsg {
+				t.Errorf("member %v: share refusal message got %q, want %q", target, errResp.Error.Message, wantMsg)
+			}
+		} else {
+			var successQuest shareQuest
+			s.expect(http.StatusOK, "POST", sharePath, parent.AccessToken, shareBody, &successQuest)
+			if !successQuest.Shared {
+				t.Errorf("member %v: successful share did not set shared = true", target)
+			}
+			if !slices.Contains(successQuest.Participants, target) {
+				t.Errorf("member %v: not found in participants %v", target, successQuest.Participants)
+			}
+		}
+	}
+
+	// GET .../family-members returns every member with no birthday or age key.
+	var rawMembers any
+	s.expect(http.StatusOK, "GET", hp+"/family-members", parent.AccessToken, nil, &rawMembers)
+	noBirthdayKey(t, "family-members", rawMembers)
+
+	var memberList struct {
+		Items []struct {
+			ID   uuid.UUID `json:"id"`
+			Name string    `json:"name"`
+		} `json:"items"`
+	}
+	s.expect(http.StatusOK, "GET", hp+"/family-members", parent.AccessToken, nil, &memberList)
+	if len(memberList.Items) != len(allMembers) {
+		t.Fatalf("family-members count: got %d, want %d", len(memberList.Items), len(allMembers))
+	}
+	for _, expectedID := range allMembers {
+		found := false
+		for _, m := range memberList.Items {
+			if m.ID == expectedID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("family-members missing member %v", expectedID)
+		}
+	}
+}

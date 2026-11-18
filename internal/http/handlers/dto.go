@@ -148,6 +148,11 @@ type questJSON struct {
 	TeamworkBonus    int32       `json:"teamwork_bonus"`
 	Shared           bool        `json:"shared"`
 	Participants     []uuid.UUID `json:"participants"`
+	MinAge           *int32      `json:"min_age"`
+	MaxAge           *int32      `json:"max_age"`
+	// IneligibleMemberIDs are the household's members outside the quest's
+	// age range today; never a birthday or an age.
+	IneligibleMemberIDs []uuid.UUID `json:"ineligible_member_ids"`
 }
 
 // toQuest maps a quest; awaiting_approval comes only from the service's
@@ -157,6 +162,10 @@ func toQuest(v app.QuestView) questJSON {
 	participants := v.Participants
 	if participants == nil {
 		participants = []uuid.UUID{}
+	}
+	ineligible := v.IneligibleMemberIDs
+	if ineligible == nil {
+		ineligible = []uuid.UUID{}
 	}
 	return questJSON{
 		ID:               q.ID,
@@ -179,7 +188,19 @@ func toQuest(v app.QuestView) questJSON {
 		TeamworkBonus:    q.TeamworkBonus,
 		Shared:           v.Shared(),
 		Participants:     participants,
+		MinAge:           int4Ptr(q.MinAge),
+		MaxAge:           int4Ptr(q.MaxAge),
+
+		IneligibleMemberIDs: ineligible,
 	}
+}
+
+// int4Ptr is nil for a NULL column, so it marshals as null.
+func int4Ptr(n pgtype.Int4) *int32 {
+	if !n.Valid {
+		return nil
+	}
+	return &n.Int32
 }
 
 // completionJSON is one time a member marked a chore done. approved_at is

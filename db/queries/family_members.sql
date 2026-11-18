@@ -29,6 +29,29 @@ SET pin_hash = $3, updated_at = NOW()
 WHERE household_id = $1 AND id = $2
 RETURNING *;
 
+-- name: SetFamilyMemberBirthday :one
+-- Sets a member's birthday, or clears it with NULL. Returns it with the
+-- member's age today in the household's timezone, from quest_member_age (the
+-- one age rule). age is only meaningful when birthday is set: it is 0 for a
+-- member with none, and the caller reports no age then. A member id of
+-- another household matches no row.
+UPDATE family_members m
+SET birthday = sqlc.narg(birthday)::date, updated_at = NOW()
+FROM households h
+WHERE m.household_id = sqlc.arg(household_id) AND m.id = sqlc.arg(id)
+  AND h.id = m.household_id
+RETURNING m.id, m.birthday, COALESCE(quest_member_age(m.birthday, h.timezone), 0)::int AS age;
+
+-- name: ListFamilyMemberBirthdays :many
+-- Every member of the household with their birthday and their age today in
+-- the household's timezone (quest_member_age). As above, age is 0 and not
+-- meaningful for a member with no birthday.
+SELECT m.id, m.birthday, COALESCE(quest_member_age(m.birthday, h.timezone), 0)::int AS age
+FROM family_members m
+JOIN households h ON h.id = m.household_id
+WHERE m.household_id = sqlc.arg(household_id)
+ORDER BY m.name, m.id;
+
 -- name: LockFamilyMember :one
 -- Locks the member row for the rest of the transaction. The lock conflicts
 -- with the key-share lock a foreign-key check takes, so rows that would point

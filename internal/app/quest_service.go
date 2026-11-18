@@ -36,7 +36,9 @@ type NumberField struct {
 // each member of a shared completion earns on top of their split. An absent
 // TeamworkBonus means 0, and a bonus above 0 needs Shareable. An absent
 // StreakBonus is 0 (no streak bonus) on Create; on Update an absent
-// StreakBonus keeps the stored one.
+// StreakBonus keeps the stored one. MinAge and MaxAge are the quest's
+// inclusive age limits; an absent one is no limit on that side, on Create
+// and on Update alike (Update replaces the whole range).
 type QuestInput struct {
 	Name          string
 	Points        NumberField
@@ -45,6 +47,8 @@ type QuestInput struct {
 	Shareable     bool
 	TeamworkBonus NumberField
 	StreakBonus   NumberField
+	MinAge        NumberField
+	MaxAge        NumberField
 }
 
 // QuestPage narrows List to one page.
@@ -70,11 +74,15 @@ func NewQuestService(q *db.Queries, pool pgxBeginner) *QuestService {
 // QuestView is a household quest with awaiting_approval: whether one of its
 // completions is waiting for the administrator. Participants lists every
 // member on a shared quest, earliest first (the holder included); it is
-// empty for a quest that is not shared.
+// empty for a quest that is not shared. IneligibleMemberIDs lists the
+// household's members whose birthday puts them outside the quest's age range
+// today (quest_age_eligible, the rule Accept and Share apply); it is empty
+// for a quest with no limits and never holds a member without a birthday.
 type QuestView struct {
 	db.HouseholdQuest
-	AwaitingApproval bool
-	Participants     []uuid.UUID
+	AwaitingApproval    bool
+	Participants        []uuid.UUID
+	IneligibleMemberIDs []uuid.UUID
 }
 
 // Shared reports whether more than one member is on the quest.
@@ -184,7 +192,38 @@ func (s *QuestService) view(ctx context.Context, quest db.HouseholdQuest) (Quest
 	if err != nil {
 		return QuestView{}, fmt.Errorf("read participants: %w", err)
 	}
-	return QuestView{HouseholdQuest: quest, AwaitingApproval: pending, Participants: participants}, nil
+	v := []QuestView{{HouseholdQuest: quest, AwaitingApproval: pending, Participants: participants}}
+	if err := addIneligible(ctx, s.q, quest.HouseholdID, v); err != nil {
+		return QuestView{}, err
+	}
+	return v[0], nil
+}
+
+// addIneligible fills each view's IneligibleMemberIDs from one household-
+// scoped query over the views' quests that have an age limit; a quest with no
+// limits has none, so it is not asked about.
+func addIneligible(ctx context.Context, q *db.Queries, householdID uuid.UUID, views []QuestView) error {
+	var ids []uuid.UUID
+	for _, v := range views {
+		if v.MinAge.Valid || v.MaxAge.Valid {
+			ids = append(ids, v.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	rows, err := q.ListIneligibleMemberIDs(ctx, db.ListIneligibleMemberIDsParams{HouseholdID: householdID, QuestIds: ids})
+	if err != nil {
+		return fmt.Errorf("list ineligible members: %w", err)
+	}
+	byQuest := make(map[uuid.UUID][]uuid.UUID, len(ids))
+	for _, r := range rows {
+		byQuest[r.QuestID] = append(byQuest[r.QuestID], r.MemberID)
+	}
+	for i := range views {
+		views[i].IneligibleMemberIDs = byQuest[views[i].ID]
+	}
+	return nil
 }
 
 // viewOf takes a single-quest query's result and adds awaiting_approval to
@@ -229,7 +268,14 @@ func (s *QuestService) List(ctx context.Context, userID, householdID uuid.UUID, 
 		quests[i] = QuestView{HouseholdQuest: r.HouseholdQuest, AwaitingApproval: r.AwaitingApproval, Participants: r.Participants}
 	}
 	if len(quests) > p.Limit {
-		return quests[:p.Limit], true, nil
+		quests = quests[:p.Limit]
+		if err := addIneligible(ctx, s.q, householdID, quests); err != nil {
+			return nil, false, err
+		}
+		return quests, true, nil
+	}
+	if err := addIneligible(ctx, s.q, householdID, quests); err != nil {
+		return nil, false, err
 	}
 	return quests, false, nil
 }
@@ -243,7 +289,11 @@ func (s *QuestService) Get(ctx context.Context, userID, householdID, questID uui
 	if err != nil {
 		return QuestView{}, err
 	}
-	return QuestView{HouseholdQuest: row.HouseholdQuest, AwaitingApproval: row.AwaitingApproval, Participants: row.Participants}, nil
+	v := []QuestView{{HouseholdQuest: row.HouseholdQuest, AwaitingApproval: row.AwaitingApproval, Participants: row.Participants}}
+	if err := addIneligible(ctx, s.q, householdID, v); err != nil {
+		return QuestView{}, err
+	}
+	return v[0], nil
 }
 
 // Create adds a quest to the household.
@@ -287,6 +337,8 @@ func (s *QuestService) Update(ctx context.Context, userID, householdID, questID 
 		Shareable:     v.shareable,
 		TeamworkBonus: v.teamworkBonus,
 		StreakBonus:   v.streakBonus,
+		MinAge:        v.minAge,
+		MaxAge:        v.maxAge,
 	})
 	return s.viewOf(ctx, quest, err)
 }
@@ -308,7 +360,8 @@ func (s *QuestService) Delete(ctx context.Context, userID, householdID, questID 
 
 // CopyFromLibrary adds a copy of a library quest to the household. The copy
 // carries the library's name, points, days, notes and streak bonus and
-// remembers its library_id; editing it later never changes the library.
+// remembers its library_id; editing it later never changes the library. The
+// library has no age limits, so the copy is all ages.
 func (s *QuestService) CopyFromLibrary(ctx context.Context, userID, householdID, libraryID uuid.UUID, adminPin string) (QuestView, error) {
 	if _, err := requireAdminPin(ctx, s.q, userID, householdID, adminPin); err != nil {
 		return QuestView{}, err
@@ -342,7 +395,10 @@ func QuestAvailable(q db.HouseholdQuest, now time.Time) bool {
 // Accept assigns an available quest to the acting member. The member must
 // belong to the household and prove themselves with their PIN. A quest that
 // another member holds, or that is waiting out its repeat days, gives
-// ErrQuestTaken; of two concurrent accepts exactly one succeeds.
+// ErrQuestTaken; of two concurrent accepts exactly one succeeds. An
+// available quest whose age range leaves the member out (quest_age_eligible,
+// checked in ClaimQuest's own statement) gives ErrAgeRestricted, writes
+// nothing and stays in the pool.
 func (s *QuestService) Accept(ctx context.Context, userID, householdID, questID uuid.UUID, act MemberAction) (QuestView, error) {
 	if err := s.verifyActingMember(ctx, userID, householdID, act); err != nil {
 		return QuestView{}, err
@@ -371,9 +427,24 @@ func (s *QuestService) Accept(ctx context.Context, userID, householdID, questID 
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return QuestView{}, fmt.Errorf("claim quest: %w", err)
 	}
-	// No row: either the quest is not in this household, or it is not available.
-	if _, err := notFoundIfNoRows(qtx.GetHouseholdQuest(ctx, db.GetHouseholdQuestParams{HouseholdID: householdID, ID: questID})); err != nil {
+	// No row: the quest is not in this household, it is not available, or
+	// the member is outside its age range.
+	existing, err := notFoundIfNoRows(qtx.GetHouseholdQuest(ctx, db.GetHouseholdQuestParams{HouseholdID: householdID, ID: questID}))
+	if err != nil {
 		return QuestView{}, err
+	}
+	if QuestAvailable(existing, time.Now()) && (existing.MinAge.Valid || existing.MaxAge.Valid) {
+		// The same household-scoped rule ClaimQuest applied, asked of this
+		// one quest: a member it lists is out of range.
+		rows, err := qtx.ListIneligibleMemberIDs(ctx, db.ListIneligibleMemberIDsParams{HouseholdID: householdID, QuestIds: []uuid.UUID{questID}})
+		if err != nil {
+			return QuestView{}, fmt.Errorf("list ineligible members: %w", err)
+		}
+		for _, r := range rows {
+			if r.MemberID == act.MemberID {
+				return QuestView{}, ErrAgeRestricted
+			}
+		}
 	}
 	return QuestView{}, ErrQuestTaken
 }
@@ -421,8 +492,9 @@ func (s *QuestService) Abandon(ctx context.Context, userID, householdID, questID
 // otherwise succeed. A quest that is not in this household, not shareable or
 // not held by the acting member, and a target that is not a member of this
 // household, are ErrNotFound. Sharing with oneself or with a member already
-// on the quest is ErrAlreadyParticipant. Nothing changes on any error. The
-// first share records the holder as a participant too.
+// on the quest is ErrAlreadyParticipant. A target outside the quest's age
+// range is ErrAgeRestricted. Nothing changes on any error. The first share
+// records the holder as a participant too.
 func (s *QuestService) Share(ctx context.Context, userID, householdID, questID uuid.UUID, act, target MemberAction) (QuestView, error) {
 	if err := s.verifyActingMember(ctx, userID, householdID, act); err != nil {
 		return QuestView{}, err
@@ -462,9 +534,38 @@ func (s *QuestService) Share(ctx context.Context, userID, householdID, questID u
 	}
 	if len(added) == 0 {
 		// Nothing written: either the quest is not one the actor may share,
-		// or the target is the actor or already on it.
+		// or the target is the actor or already on it, or the target is
+		// outside the quest's age range.
 		if !quest.Shareable || quest.ClaimedBy == nil || *quest.ClaimedBy != act.MemberID {
 			return QuestView{}, ErrNotFound
+		}
+		if target.MemberID == act.MemberID {
+			return QuestView{}, ErrAlreadyParticipant
+		}
+		participants, err := qtx.ListQuestParticipants(ctx, db.ListQuestParticipantsParams{
+			HouseholdID: householdID,
+			QuestID:     questID,
+		})
+		if err != nil {
+			return QuestView{}, fmt.Errorf("list quest participants: %w", err)
+		}
+		for _, p := range participants {
+			if p == target.MemberID {
+				return QuestView{}, ErrAlreadyParticipant
+			}
+		}
+		eligible, err := qtx.QuestMemberAgeEligible(ctx, db.QuestMemberAgeEligibleParams{
+			HouseholdID: householdID,
+			MemberID:    target.MemberID,
+			QuestID:     questID,
+		})
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return QuestView{}, ErrNotFound
+		case err != nil:
+			return QuestView{}, fmt.Errorf("check age eligibility: %w", err)
+		case !eligible:
+			return QuestView{}, ErrAgeRestricted
 		}
 		return QuestView{}, ErrAlreadyParticipant
 	}
@@ -607,7 +708,11 @@ func (s *QuestService) MarkDone(ctx context.Context, userID, householdID, questI
 	if err := tx.Commit(ctx); err != nil {
 		return QuestView{}, fmt.Errorf("commit: %w", err)
 	}
-	return QuestView{HouseholdQuest: db.HouseholdQuest(row), AwaitingApproval: true}, nil
+	v := []QuestView{{HouseholdQuest: db.HouseholdQuest(row), AwaitingApproval: true}}
+	if err := addIneligible(ctx, s.q, householdID, v); err != nil {
+		return QuestView{}, err
+	}
+	return v[0], nil
 }
 
 // ListPending returns the completions waiting for approval, one per
@@ -1059,16 +1164,22 @@ func (s *QuestService) insert(ctx context.Context, householdID uuid.UUID, librar
 		Shareable:     v.shareable,
 		TeamworkBonus: v.teamworkBonus,
 		StreakBonus:   v.streakBonus,
+		MinAge:        v.minAge,
+		MaxAge:        v.maxAge,
 	})
 	if err != nil {
 		return QuestView{}, fmt.Errorf("create quest: %w", err)
 	}
-	return QuestView{HouseholdQuest: quest}, nil
+	views := []QuestView{{HouseholdQuest: quest}}
+	if err := addIneligible(ctx, s.q, householdID, views); err != nil {
+		return QuestView{}, err
+	}
+	return views[0], nil
 }
 
 // validQuest is a QuestInput that passed validateQuest. A library copy
 // leaves shareable false and teamworkBonus 0; its streakBonus is the
-// library's default.
+// library's default; its minAge and maxAge are unset (all ages).
 type validQuest struct {
 	name          string
 	points        int32
@@ -1077,13 +1188,16 @@ type validQuest struct {
 	shareable     bool
 	teamworkBonus int32
 	streakBonus   int32
+	minAge        pgtype.Int4
+	maxAge        pgtype.Int4
 }
 
 // validateQuest checks every field and reports each bad one: name 1-200
 // characters, points a whole number >= 0, repeat_days a whole number >= 1,
 // notes at most 2000 characters, teamwork_bonus a whole number >= 0 and
 // above 0 only on a shareable quest, streak_bonus a whole number >= 0
-// (absent is 0, no streak bonus).
+// (absent is 0, no streak bonus), min_age and max_age each absent (no limit)
+// or a whole number >= 0, and min_age not above max_age when both are set.
 func validateQuest(in QuestInput) (validQuest, error) {
 	var v validator
 	out := validQuest{
@@ -1094,6 +1208,11 @@ func validateQuest(in QuestInput) (validQuest, error) {
 		shareable:     in.Shareable,
 		teamworkBonus: v.intField("teamwork_bonus", in.TeamworkBonus, 0, 0),
 		streakBonus:   v.intField("streak_bonus", in.StreakBonus, 0, 0),
+		minAge:        optionalAge(&v, "min_age", in.MinAge),
+		maxAge:        optionalAge(&v, "max_age", in.MaxAge),
+	}
+	if out.minAge.Valid && out.maxAge.Valid && out.minAge.Int32 > out.maxAge.Int32 {
+		v.fail("max_age", "Minimum age can't be above the maximum age.")
 	}
 	if out.teamworkBonus > 0 && !out.shareable {
 		v.fail("teamwork_bonus", "needs shareable")
@@ -1105,6 +1224,20 @@ func validateQuest(in QuestInput) (validQuest, error) {
 		v.fail("teamwork_bonus", fmt.Sprintf("together with points must not exceed %d", math.MaxInt32))
 	}
 	return out, v.err()
+}
+
+// optionalAge checks an age limit: absent is no limit (not Valid); present it
+// must be a whole number >= 0, with the same messages as every other number
+// field.
+func optionalAge(v *validator, field string, f NumberField) pgtype.Int4 {
+	if !f.Set {
+		return pgtype.Int4{}
+	}
+	n := v.intField(field, f, 0, 0)
+	if _, bad := v.fields[field]; bad {
+		return pgtype.Int4{}
+	}
+	return pgtype.Int4{Int32: n, Valid: true}
 }
 
 // notFoundIfNoRows maps pgx.ErrNoRows to ErrNotFound for single-row queries.
