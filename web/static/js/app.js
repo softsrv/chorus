@@ -932,14 +932,12 @@ async function takeCard(h, quests, members, rerender, member = activeMember) {
       el('button', { class: 'btn btn-ghost btn-sm', text: 'Cancel', onclick: (e) => { e.preventDefault(); $share.replaceChildren(); } })));
   };
 
-  // Share is offered only on a shareable quest the active member holds, and
-  // only while at least one candidate is not ineligible.
+  // Share is offered only on a shareable quest the active member holds, while
+  // anyone is left to share with. Out-of-range candidates count: the picker
+  // shows them disabled with the reason, even when none is in range.
   const shareButton = (q) => {
     if (!q.shareable || q.claimed_by !== member.id) return null;
-    const candidates = shareCandidates(q);
-    if (candidates.length === 0) return null;
-    const ineligible = new Set(q.ineligible_member_ids || []);
-    if (!candidates.some((m) => !ineligible.has(m.id))) return null;
+    if (shareCandidates(q).length === 0) return null;
     return el('button', { class: 'btn btn-ghost btn-xs', text: 'Share', onclick: (e) => { e.preventDefault(); showShare(q); } });
   };
 
