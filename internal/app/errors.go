@@ -38,6 +38,9 @@ var (
 	// ErrAlreadyParticipant is returned when a quest is shared with the
 	// sharer themselves or with a member who is already on it.
 	ErrAlreadyParticipant = errors.New("member is already on this quest")
+	// ErrAgeRestricted is returned when a member is outside a quest's age
+	// range: accepting it, or being shared with on it.
+	ErrAgeRestricted = errors.New("member is outside this quest's age range")
 )
 
 // RateLimitedError is returned when an operation is attempted too frequently.

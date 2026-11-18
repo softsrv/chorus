@@ -249,9 +249,15 @@ func (q *Queries) CancelMemberPendingCompletions(ctx context.Context, arg Cancel
 const claimQuest = `-- name: ClaimQuest :one
 UPDATE household_quests
 SET claimed_by = $1, claimed_at = NOW(), updated_at = NOW()
-WHERE household_id = $2 AND id = $3
-  AND claimed_by IS NULL
-  AND (available_at IS NULL OR available_at <= NOW())
+WHERE household_quests.household_id = $2 AND household_quests.id = $3
+  AND household_quests.claimed_by IS NULL
+  AND (household_quests.available_at IS NULL OR household_quests.available_at <= NOW())
+  AND EXISTS (
+      SELECT 1 FROM family_members m
+      JOIN households h ON h.id = m.household_id
+      WHERE m.household_id = $2 AND m.id = $1
+        AND quest_age_eligible(m.birthday, h.timezone, household_quests.min_age, household_quests.max_age)
+  )
 RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at, shareable, teamwork_bonus, streak_bonus, min_age, max_age
 `
 
@@ -263,7 +269,10 @@ type ClaimQuestParams struct {
 
 // Assigns an available quest to a family member. The availability check and
 // the write are one statement, so of two concurrent claims exactly one
-// matches; the other gets no row.
+// matches; the other gets no row. The claiming member must also be within
+// the quest's age range (quest_age_eligible, in the household's timezone: no
+// birthday or no limits always pass), read only from this household's
+// members; a member out of range, or not in this household, gets no row.
 func (q *Queries) ClaimQuest(ctx context.Context, arg ClaimQuestParams) (HouseholdQuest, error) {
 	row := q.db.QueryRow(ctx, claimQuest, arg.MemberID, arg.HouseholdID, arg.ID)
 	var i HouseholdQuest
@@ -292,24 +301,28 @@ func (q *Queries) ClaimQuest(ctx context.Context, arg ClaimQuestParams) (Househo
 }
 
 const createHouseholdQuest = `-- name: CreateHouseholdQuest :one
-INSERT INTO household_quests (id, household_id, library_id, name, points, repeat_days, notes, shareable, teamwork_bonus, streak_bonus, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+INSERT INTO household_quests (id, household_id, library_id, name, points, repeat_days, notes, shareable, teamwork_bonus, streak_bonus, min_age, max_age, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
 RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at, shareable, teamwork_bonus, streak_bonus, min_age, max_age
 `
 
 type CreateHouseholdQuestParams struct {
-	ID            uuid.UUID  `json:"id"`
-	HouseholdID   uuid.UUID  `json:"household_id"`
-	LibraryID     *uuid.UUID `json:"library_id"`
-	Name          string     `json:"name"`
-	Points        int32      `json:"points"`
-	RepeatDays    int32      `json:"repeat_days"`
-	Notes         string     `json:"notes"`
-	Shareable     bool       `json:"shareable"`
-	TeamworkBonus int32      `json:"teamwork_bonus"`
-	StreakBonus   int32      `json:"streak_bonus"`
+	ID            uuid.UUID   `json:"id"`
+	HouseholdID   uuid.UUID   `json:"household_id"`
+	LibraryID     *uuid.UUID  `json:"library_id"`
+	Name          string      `json:"name"`
+	Points        int32       `json:"points"`
+	RepeatDays    int32       `json:"repeat_days"`
+	Notes         string      `json:"notes"`
+	Shareable     bool        `json:"shareable"`
+	TeamworkBonus int32       `json:"teamwork_bonus"`
+	StreakBonus   int32       `json:"streak_bonus"`
+	MinAge        pgtype.Int4 `json:"min_age"`
+	MaxAge        pgtype.Int4 `json:"max_age"`
 }
 
+// min_age and max_age are the quest's inclusive age limits; NULL is no limit
+// on that side.
 func (q *Queries) CreateHouseholdQuest(ctx context.Context, arg CreateHouseholdQuestParams) (HouseholdQuest, error) {
 	row := q.db.QueryRow(ctx, createHouseholdQuest,
 		arg.ID,
@@ -322,6 +335,8 @@ func (q *Queries) CreateHouseholdQuest(ctx context.Context, arg CreateHouseholdQ
 		arg.Shareable,
 		arg.TeamworkBonus,
 		arg.StreakBonus,
+		arg.MinAge,
+		arg.MaxAge,
 	)
 	var i HouseholdQuest
 	err := row.Scan(
@@ -603,6 +618,53 @@ func (q *Queries) ListHouseholdQuests(ctx context.Context, arg ListHouseholdQues
 			&i.AwaitingApproval,
 			&i.Participants,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listIneligibleMemberIDs = `-- name: ListIneligibleMemberIDs :many
+SELECT q.id AS quest_id, m.id AS member_id
+FROM household_quests q
+JOIN households h ON h.id = q.household_id
+JOIN family_members m ON m.household_id = q.household_id
+WHERE q.household_id = $1
+  AND q.id = ANY($2::uuid[])
+  AND (q.min_age IS NOT NULL OR q.max_age IS NOT NULL)
+  AND NOT quest_age_eligible(m.birthday, h.timezone, q.min_age, q.max_age)
+ORDER BY q.id, m.created_at, m.id
+`
+
+type ListIneligibleMemberIDsParams struct {
+	HouseholdID uuid.UUID   `json:"household_id"`
+	QuestIds    []uuid.UUID `json:"quest_ids"`
+}
+
+type ListIneligibleMemberIDsRow struct {
+	QuestID  uuid.UUID `json:"quest_id"`
+	MemberID uuid.UUID `json:"member_id"`
+}
+
+// For each of the given quests of the household, the household's members
+// whose birthday puts them outside its age range today (quest_age_eligible,
+// the same rule ClaimQuest and ShareQuest apply). Members without a birthday
+// and quests without limits never appear. Only this household's members are
+// read.
+func (q *Queries) ListIneligibleMemberIDs(ctx context.Context, arg ListIneligibleMemberIDsParams) ([]ListIneligibleMemberIDsRow, error) {
+	rows, err := q.db.Query(ctx, listIneligibleMemberIDs, arg.HouseholdID, arg.QuestIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListIneligibleMemberIDsRow{}
+	for rows.Next() {
+		var i ListIneligibleMemberIDsRow
+		if err := rows.Scan(&i.QuestID, &i.MemberID); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -1346,26 +1408,31 @@ func (q *Queries) ShareQuest(ctx context.Context, arg ShareQuestParams) ([]uuid.
 const updateHouseholdQuest = `-- name: UpdateHouseholdQuest :one
 UPDATE household_quests
 SET name = $3, points = $4, repeat_days = $5, notes = $6,
-    shareable = $7, teamwork_bonus = $8, streak_bonus = $9, updated_at = NOW()
+    shareable = $7, teamwork_bonus = $8, streak_bonus = $9,
+    min_age = $10, max_age = $11, updated_at = NOW()
 WHERE household_id = $1 AND id = $2
 RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at, shareable, teamwork_bonus, streak_bonus, min_age, max_age
 `
 
 type UpdateHouseholdQuestParams struct {
-	HouseholdID   uuid.UUID `json:"household_id"`
-	ID            uuid.UUID `json:"id"`
-	Name          string    `json:"name"`
-	Points        int32     `json:"points"`
-	RepeatDays    int32     `json:"repeat_days"`
-	Notes         string    `json:"notes"`
-	Shareable     bool      `json:"shareable"`
-	TeamworkBonus int32     `json:"teamwork_bonus"`
-	StreakBonus   int32     `json:"streak_bonus"`
+	HouseholdID   uuid.UUID   `json:"household_id"`
+	ID            uuid.UUID   `json:"id"`
+	Name          string      `json:"name"`
+	Points        int32       `json:"points"`
+	RepeatDays    int32       `json:"repeat_days"`
+	Notes         string      `json:"notes"`
+	Shareable     bool        `json:"shareable"`
+	TeamworkBonus int32       `json:"teamwork_bonus"`
+	StreakBonus   int32       `json:"streak_bonus"`
+	MinAge        pgtype.Int4 `json:"min_age"`
+	MaxAge        pgtype.Int4 `json:"max_age"`
 }
 
 // Full replacement of the editable fields. A new points, shareable or
 // teamwork_bonus applies from the next approval: a pending completion is
-// paid from the quest as it stands when it is approved.
+// paid from the quest as it stands when it is approved. A new age range
+// applies from the next accept or share: a member who already holds or is on
+// the quest keeps it.
 func (q *Queries) UpdateHouseholdQuest(ctx context.Context, arg UpdateHouseholdQuestParams) (HouseholdQuest, error) {
 	row := q.db.QueryRow(ctx, updateHouseholdQuest,
 		arg.HouseholdID,
@@ -1377,6 +1444,8 @@ func (q *Queries) UpdateHouseholdQuest(ctx context.Context, arg UpdateHouseholdQ
 		arg.Shareable,
 		arg.TeamworkBonus,
 		arg.StreakBonus,
+		arg.MinAge,
+		arg.MaxAge,
 	)
 	var i HouseholdQuest
 	err := row.Scan(

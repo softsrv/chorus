@@ -53,17 +53,22 @@ SELECT EXISTS (
 ) AS awaiting_approval;
 
 -- name: CreateHouseholdQuest :one
-INSERT INTO household_quests (id, household_id, library_id, name, points, repeat_days, notes, shareable, teamwork_bonus, streak_bonus, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+-- min_age and max_age are the quest's inclusive age limits; NULL is no limit
+-- on that side.
+INSERT INTO household_quests (id, household_id, library_id, name, points, repeat_days, notes, shareable, teamwork_bonus, streak_bonus, min_age, max_age, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, sqlc.narg(min_age), sqlc.narg(max_age), NOW(), NOW())
 RETURNING *;
 
 -- name: UpdateHouseholdQuest :one
 -- Full replacement of the editable fields. A new points, shareable or
 -- teamwork_bonus applies from the next approval: a pending completion is
--- paid from the quest as it stands when it is approved.
+-- paid from the quest as it stands when it is approved. A new age range
+-- applies from the next accept or share: a member who already holds or is on
+-- the quest keeps it.
 UPDATE household_quests
 SET name = $3, points = $4, repeat_days = $5, notes = $6,
-    shareable = $7, teamwork_bonus = $8, streak_bonus = $9, updated_at = NOW()
+    shareable = $7, teamwork_bonus = $8, streak_bonus = $9,
+    min_age = sqlc.narg(min_age), max_age = sqlc.narg(max_age), updated_at = NOW()
 WHERE household_id = $1 AND id = $2
 RETURNING *;
 
@@ -73,13 +78,38 @@ DELETE FROM household_quests WHERE household_id = $1 AND id = $2;
 -- name: ClaimQuest :one
 -- Assigns an available quest to a family member. The availability check and
 -- the write are one statement, so of two concurrent claims exactly one
--- matches; the other gets no row.
+-- matches; the other gets no row. The claiming member must also be within
+-- the quest's age range (quest_age_eligible, in the household's timezone: no
+-- birthday or no limits always pass), read only from this household's
+-- members; a member out of range, or not in this household, gets no row.
 UPDATE household_quests
 SET claimed_by = sqlc.arg(member_id), claimed_at = NOW(), updated_at = NOW()
-WHERE household_id = sqlc.arg(household_id) AND id = sqlc.arg(id)
-  AND claimed_by IS NULL
-  AND (available_at IS NULL OR available_at <= NOW())
+WHERE household_quests.household_id = sqlc.arg(household_id) AND household_quests.id = sqlc.arg(id)
+  AND household_quests.claimed_by IS NULL
+  AND (household_quests.available_at IS NULL OR household_quests.available_at <= NOW())
+  AND EXISTS (
+      SELECT 1 FROM family_members m
+      JOIN households h ON h.id = m.household_id
+      WHERE m.household_id = sqlc.arg(household_id) AND m.id = sqlc.arg(member_id)
+        AND quest_age_eligible(m.birthday, h.timezone, household_quests.min_age, household_quests.max_age)
+  )
 RETURNING *;
+
+-- name: ListIneligibleMemberIDs :many
+-- For each of the given quests of the household, the household's members
+-- whose birthday puts them outside its age range today (quest_age_eligible,
+-- the same rule ClaimQuest and ShareQuest apply). Members without a birthday
+-- and quests without limits never appear. Only this household's members are
+-- read.
+SELECT q.id AS quest_id, m.id AS member_id
+FROM household_quests q
+JOIN households h ON h.id = q.household_id
+JOIN family_members m ON m.household_id = q.household_id
+WHERE q.household_id = sqlc.arg(household_id)
+  AND q.id = ANY(sqlc.arg(quest_ids)::uuid[])
+  AND (q.min_age IS NOT NULL OR q.max_age IS NOT NULL)
+  AND NOT quest_age_eligible(m.birthday, h.timezone, q.min_age, q.max_age)
+ORDER BY q.id, m.created_at, m.id;
 
 -- name: LockHouseholdQuest :one
 -- Locks one quest row of the household for the rest of the transaction,

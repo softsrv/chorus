@@ -66,7 +66,10 @@ type Querier interface {
 	ClaimHouseholdProvisioning(ctx context.Context, id uuid.UUID) (int64, error)
 	// Assigns an available quest to a family member. The availability check and
 	// the write are one statement, so of two concurrent claims exactly one
-	// matches; the other gets no row.
+	// matches; the other gets no row. The claiming member must also be within
+	// the quest's age range (quest_age_eligible, in the household's timezone: no
+	// birthday or no limits always pass), read only from this household's
+	// members; a member out of range, or not in this household, gets no row.
 	ClaimQuest(ctx context.Context, arg ClaimQuestParams) (HouseholdQuest, error)
 	// Single use: conditional on used_at IS NULL, unexpired, and the flow's
 	// purpose, so a state can't be replayed or used to complete another flow.
@@ -82,6 +85,8 @@ type Querier interface {
 	CreateGoogleUser(ctx context.Context, arg CreateGoogleUserParams) (User, error)
 	CreateHousehold(ctx context.Context, arg CreateHouseholdParams) (Household, error)
 	CreateHouseholdCombo(ctx context.Context, arg CreateHouseholdComboParams) (Combo, error)
+	// min_age and max_age are the quest's inclusive age limits; NULL is no limit
+	// on that side.
 	CreateHouseholdQuest(ctx context.Context, arg CreateHouseholdQuestParams) (HouseholdQuest, error)
 	CreateHouseholdReward(ctx context.Context, arg CreateHouseholdRewardParams) (HouseholdReward, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
@@ -190,6 +195,12 @@ type Querier interface {
 	ListHouseholdQuests(ctx context.Context, arg ListHouseholdQuestsParams) ([]ListHouseholdQuestsRow, error)
 	ListHouseholdRewards(ctx context.Context, householdID uuid.UUID) ([]HouseholdReward, error)
 	ListHouseholdsForUser(ctx context.Context, userID uuid.UUID) ([]ListHouseholdsForUserRow, error)
+	// For each of the given quests of the household, the household's members
+	// whose birthday puts them outside its age range today (quest_age_eligible,
+	// the same rule ClaimQuest and ShareQuest apply). Members without a birthday
+	// and quests without limits never appear. Only this household's members are
+	// read.
+	ListIneligibleMemberIDs(ctx context.Context, arg ListIneligibleMemberIDsParams) ([]ListIneligibleMemberIDsRow, error)
 	ListMemberPointsAwards(ctx context.Context, arg ListMemberPointsAwardsParams) ([]PointsAward, error)
 	// Completions waiting for approval, one row each, oldest mark-done first,
 	// with the chore's name, current points and teamwork bonus, the member who
@@ -337,7 +348,9 @@ type Querier interface {
 	UpdateHouseholdCombo(ctx context.Context, arg UpdateHouseholdComboParams) (Combo, error)
 	// Full replacement of the editable fields. A new points, shareable or
 	// teamwork_bonus applies from the next approval: a pending completion is
-	// paid from the quest as it stands when it is approved.
+	// paid from the quest as it stands when it is approved. A new age range
+	// applies from the next accept or share: a member who already holds or is on
+	// the quest keeps it.
 	UpdateHouseholdQuest(ctx context.Context, arg UpdateHouseholdQuestParams) (HouseholdQuest, error)
 	UpdateHouseholdReward(ctx context.Context, arg UpdateHouseholdRewardParams) (HouseholdReward, error)
 	UpdatePasswordHash(ctx context.Context, arg UpdatePasswordHashParams) error

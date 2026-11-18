@@ -1053,3 +1053,90 @@ func (f *faultDBTX) QueryRow(ctx context.Context, sql string, args ...interface{
 type errRow struct{}
 
 func (errRow) Scan(...any) error { return errInjected }
+
+// TestIntegration_HouseholdIsolation_QuestAges extends the isolation guard to
+// quest age ranges (CLM-17): the age checks of ClaimQuest, ShareQuest and the
+// ineligible-members read only use members of the quest's own household. A
+// member of another household is not found and claims nothing, another
+// household's out-of-range members are never listed, and a non-member user
+// reads nothing.
+func TestIntegration_HouseholdIsolation_QuestAges(t *testing.T) {
+	f := newAgeRangeFixture(t, "ageiso")
+	hb, err := app.NewHouseholdService(f.q, f.pool).Create(f.ctx, f.admin, app.HouseholdInput{Name: "Other ages", Timezone: "Asia/Tokyo"})
+	if err != nil {
+		t.Fatalf("create second household: %v", err)
+	}
+	holder := f.member(f.h, "Holder", 12)
+	inRange := f.member(f.h, "InRange", 11)
+	young := f.member(f.h, "Young", 7)
+	// The other household's members, one far out of range and one in it.
+	otherYoung := f.member(hb.ID, "OtherYoung", 3)
+	otherInRange := f.member(hb.ID, "OtherInRange", 12)
+
+	ranged := f.quest("Ranged", limit(10), limit(14), true)
+
+	// Another household's member cannot accept it, even one inside the range,
+	// and the refusal is not found (never age_restricted, which would tell the
+	// caller something about a member they cannot see).
+	for _, m := range []uuid.UUID{otherYoung, otherInRange} {
+		if err := f.accept(ranged.ID, m); !errors.Is(err, app.ErrNotFound) {
+			t.Errorf("accept by %s of another household: %v, want ErrNotFound", f.nameByID[m], err)
+		}
+	}
+	if got := f.stored(ranged.ID).ClaimedBy; got != nil {
+		t.Fatalf("cross-household accept claimed the quest: %v", *got)
+	}
+	// Through the other household's id the quest does not exist.
+	if _, err := f.quests.Accept(f.ctx, f.admin, hb.ID, ranged.ID, app.MemberAction{MemberID: otherInRange}); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("accept through another household: %v, want ErrNotFound", err)
+	}
+
+	// ineligible_member_ids lists only this household's out-of-range member.
+	view, err := f.quests.Get(f.ctx, f.admin, f.h, ranged.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(view.IneligibleMemberIDs) != 1 || view.IneligibleMemberIDs[0] != young {
+		t.Errorf("ineligible = %v, want only Young", view.IneligibleMemberIDs)
+	}
+	list, _, err := f.quests.List(f.ctx, f.admin, f.h, app.QuestPage{Limit: 100})
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list: %d %v", len(list), err)
+	}
+	for _, id := range list[0].IneligibleMemberIDs {
+		if id == otherYoung || id == otherInRange {
+			t.Errorf("list ineligible holds another household's member %s", f.nameByID[id])
+		}
+	}
+
+	// Sharing with another household's member is not found and adds nobody;
+	// sharing in-household still respects the range.
+	if err := f.accept(ranged.ID, holder); err != nil {
+		t.Fatalf("holder accept: %v", err)
+	}
+	holderAct := app.MemberAction{MemberID: holder}
+	for _, m := range []uuid.UUID{otherYoung, otherInRange} {
+		if _, err := f.quests.Share(f.ctx, f.admin, f.h, ranged.ID, holderAct, app.MemberAction{MemberID: m}); !errors.Is(err, app.ErrNotFound) {
+			t.Errorf("share with %s of another household: %v, want ErrNotFound", f.nameByID[m], err)
+		}
+	}
+	if got, err := f.quests.Get(f.ctx, f.admin, f.h, ranged.ID); err != nil || len(got.Participants) != 0 {
+		t.Errorf("participants after cross-household shares: %v %v", got.Participants, err)
+	}
+	if _, err := f.quests.Share(f.ctx, f.admin, f.h, ranged.ID, holderAct, app.MemberAction{MemberID: inRange}); err != nil {
+		t.Errorf("share with an in-range member: %v", err)
+	}
+
+	// A user who is not a member of the household reads nothing of it.
+	mailer := &captureMailer{}
+	mallory := registerVerified(t, f.pool, testAuthService(t, f.pool, mailer), mailer, "agemallory").User.ID
+	if _, err := f.quests.Get(f.ctx, mallory, f.h, ranged.ID); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("mallory get: %v, want ErrNotFound", err)
+	}
+	if _, _, err := f.quests.List(f.ctx, mallory, f.h, app.QuestPage{Limit: 10}); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("mallory list: %v, want ErrNotFound", err)
+	}
+	if _, err := f.quests.Accept(f.ctx, mallory, f.h, ranged.ID, app.MemberAction{MemberID: young}); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("mallory accept: %v, want ErrNotFound", err)
+	}
+}

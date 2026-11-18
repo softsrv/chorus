@@ -213,3 +213,60 @@ func TestQuestStreakBonusJSON(t *testing.T) {
 		t.Errorf("library streak_bonus = %v, want 10", got)
 	}
 }
+
+// TestQuestAgeRangeJSON pins the age-range keys of quest JSON: min_age and
+// max_age are null for no limit and the number otherwise, ineligible_member_ids
+// is [] when nobody is left out, and no birthday or age key is ever present.
+func TestQuestAgeRangeJSON(t *testing.T) {
+	t.Parallel()
+
+	decode := func(v any) map[string]any {
+		t.Helper()
+		data, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("json.Marshal failed: %v", err)
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(data, &raw); err != nil {
+			t.Fatalf("json.Unmarshal failed: %v", err)
+		}
+		return raw
+	}
+
+	left := uuid.MustParse("018f25b3-8b77-7000-8000-0000000000aa")
+	ranged := decode(toQuest(app.QuestView{
+		HouseholdQuest: db.HouseholdQuest{
+			ID: uuid.New(), Name: "Mow the lawn",
+			MinAge: pgtype.Int4{Int32: 10, Valid: true}, MaxAge: pgtype.Int4{Int32: 14, Valid: true},
+		},
+		IneligibleMemberIDs: []uuid.UUID{left},
+	}))
+	if ranged["min_age"] != float64(10) || ranged["max_age"] != float64(14) {
+		t.Errorf("ranged min_age/max_age = %v/%v, want 10/14", ranged["min_age"], ranged["max_age"])
+	}
+	if got, ok := ranged["ineligible_member_ids"].([]any); !ok || len(got) != 1 || got[0] != left.String() {
+		t.Errorf("ineligible_member_ids = %v, want [%s]", ranged["ineligible_member_ids"], left)
+	}
+
+	open := decode(toQuest(app.QuestView{HouseholdQuest: db.HouseholdQuest{
+		ID: uuid.New(), Name: "Read a chapter", MinAge: pgtype.Int4{Int32: 6, Valid: true},
+	}}))
+	for _, key := range []string{"min_age", "max_age", "ineligible_member_ids"} {
+		if _, ok := open[key]; !ok {
+			t.Errorf("%s missing from quest JSON", key)
+		}
+	}
+	if open["min_age"] != float64(6) || open["max_age"] != nil {
+		t.Errorf("one-sided min_age/max_age = %v/%v, want 6/null", open["min_age"], open["max_age"])
+	}
+	if got, ok := open["ineligible_member_ids"].([]any); !ok || len(got) != 0 {
+		t.Errorf("ineligible_member_ids = %#v, want []", open["ineligible_member_ids"])
+	}
+	for _, raw := range []map[string]any{ranged, open} {
+		for key := range raw {
+			if strings.Contains(key, "birthday") || key == "age" {
+				t.Errorf("quest JSON carries %q", key)
+			}
+		}
+	}
+}
