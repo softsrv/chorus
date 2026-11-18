@@ -40,6 +40,7 @@ var prodAllow = map[string][]string{
 	"web":                      nil,
 	"internal/archtest":        nil,
 	"internal/testnet":         nil,
+	"systest":                  nil,
 }
 
 // testExtra is what a package's _test.go files (internal and external test
