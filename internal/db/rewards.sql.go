@@ -322,6 +322,58 @@ func (q *Queries) ListMemberPendingRedemptions(ctx context.Context, arg ListMemb
 	return items, nil
 }
 
+const listMemberRewardHistory = `-- name: ListMemberRewardHistory :many
+SELECT id, household_id, member_id, reward_id, description, cost, status, requested_at, decided_at FROM reward_redemptions
+WHERE household_id = $1 AND member_id = $2 AND status = 'approved'
+ORDER BY decided_at DESC, id DESC
+LIMIT $3 OFFSET $4
+`
+
+type ListMemberRewardHistoryParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	MemberID    uuid.UUID `json:"member_id"`
+	Limit       int32     `json:"limit"`
+	Offset      int32     `json:"offset"`
+}
+
+// The member's approved requests, newest approval first. Each row carries
+// the description and cost snapshotted on the request, so editing or
+// deleting the reward later never changes the history.
+func (q *Queries) ListMemberRewardHistory(ctx context.Context, arg ListMemberRewardHistoryParams) ([]RewardRedemption, error) {
+	rows, err := q.db.Query(ctx, listMemberRewardHistory,
+		arg.HouseholdID,
+		arg.MemberID,
+		arg.Limit,
+		arg.Offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []RewardRedemption{}
+	for rows.Next() {
+		var i RewardRedemption
+		if err := rows.Scan(
+			&i.ID,
+			&i.HouseholdID,
+			&i.MemberID,
+			&i.RewardID,
+			&i.Description,
+			&i.Cost,
+			&i.Status,
+			&i.RequestedAt,
+			&i.DecidedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPendingRewardRedemptions = `-- name: ListPendingRewardRedemptions :many
 SELECT r.id, r.household_id, r.member_id, r.reward_id, r.description, r.cost,
        r.status, r.requested_at, r.decided_at, m.name AS member_name

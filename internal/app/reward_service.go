@@ -235,6 +235,40 @@ func (s *RewardService) ListMemberPending(ctx context.Context, userID, household
 	return rows, nil
 }
 
+// RewardHistory returns the member's approved requests, newest approval
+// first (decided_at DESC, id DESC), each with the description and cost
+// snapshotted on the request; none is an empty, non-nil slice. Access is
+// that of the member's points history (authorizeMemberRead): the member's
+// PIN, or the household admin (with the admin PIN once one is set). limit is
+// clamped to 1..100 (default 50 when not positive) and a negative offset to
+// 0, as PointsHistory does.
+func (s *RewardService) RewardHistory(ctx context.Context, userID, householdID, memberID uuid.UUID, memberPin, adminPin string, limit, offset int32) ([]db.RewardRedemption, error) {
+	if err := authorizeMemberRead(ctx, s.q, userID, householdID, memberID, memberPin, adminPin); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 50
+	} else if limit > 100 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.q.ListMemberRewardHistory(ctx, db.ListMemberRewardHistoryParams{
+		HouseholdID: householdID,
+		MemberID:    memberID,
+		Limit:       limit,
+		Offset:      offset,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list member reward history: %w", err)
+	}
+	if rows == nil {
+		rows = []db.RewardRedemption{}
+	}
+	return rows, nil
+}
+
 // ListPending returns the household's requests waiting for approval, oldest
 // first, each with the member's name; none is an empty, non-nil slice. Admin
 // only, behind the admin PIN once one is set.

@@ -64,6 +64,9 @@ function routes() {
       if (typeof prop === 'string' && prop.startsWith(`GET ${HP}/family-members/`) && prop.endsWith('/points-history')) {
         return (req) => (srv.pointsHistory ? srv.pointsHistory(req) : [200, { items: srv.history || [] }]);
       }
+      if (typeof prop === 'string' && prop.startsWith(`GET ${HP}/family-members/`) && prop.endsWith('/reward-history')) {
+        return (req) => (srv.rewardHistory ? srv.rewardHistory(req) : [200, { items: [] }]);
+      }
       return undefined;
     },
   });
@@ -633,6 +636,91 @@ test('a wrong_pin answering a superseded member\'s history read does not throw o
   assert.match(text(), /Viewing as: Ben/);
   assert.match(text(), /Quests for Ben/);
   globalThis.fetch = realFetch;
+});
+
+// ── Reward history on the member card ────────────────────────────────────────
+
+const rewardHistoryReads = () => calls.filter((c) => c.method === 'GET' && c.path.endsWith('/reward-history'));
+
+test('reward history CLM-7/CLM-9: picking a member reads reward-history once with X-Member-PIN and shows it under Points history', async () => {
+  srv.history = [{ id: 'p1', points: -100, reason: 'Redeemed: Movie night', earned_at: '2025-11-18T12:00:00Z' }];
+  srv.rewardHistory = () => [200, { items: [
+    { id: 'rr1', member_id: 'm-b', reward_id: 'r-movie', description: 'Movie night', cost: 100, status: 'approved', requested_at: '2025-11-17T12:00:00Z', decided_at: '2025-11-18T12:00:00Z' },
+  ] }];
+  srv.extra[`POST ${HP}/quests/q1/accept`] = (r) => {
+    srv.quests = [quest({ available: false, claimed_by: r.body.member_id, claimed_at: '2025-01-02T00:00:00Z' })];
+    return [200, srv.quests[0]];
+  };
+  await loadApp();
+  await becomeBen();
+
+  const reads = rewardHistoryReads();
+  assert.equal(reads.length, 1, 'one reward-history read per selection');
+  assert.equal(reads[0].path, `${HP}/family-members/m-b/reward-history`);
+  assert.equal(reads[0].headers['X-Member-PIN'], '1234');
+
+  const h4s = walk(env.$app).filter((n) => n.tagName === 'H4').map((n) => n.textContent);
+  assert.ok(h4s.indexOf('Points history') >= 0 && h4s.indexOf('Reward history') === h4s.indexOf('Points history') + 1,
+    'Reward history follows Points history');
+  const node = sectionNode(env.$app, 'Reward history');
+  assert.deepEqual(walk(node).filter((n) => n.tagName === 'TH').map((n) => n.textContent), ['Date', 'Reward', 'Points']);
+  const tds = walk(node).filter((n) => n.tagName === 'TD');
+  assert.deepEqual(tds.slice(1).map((td) => td.textContent), ['Movie night', '100']);
+  for (const td of tds) assert.equal(td.children.length, 0, 'cells hold text only');
+  // The points history keeps its own signed redemption row.
+  assert.match(sectionNode(env.$app, 'Points history').textContent, /-100Redeemed: Movie night/);
+
+  // An action rerenders without reading it again.
+  await click(buttons(env.$app, 'View')[0]);
+  await click(buttons(env.$app, 'Accept')[0]);
+  assert.equal(rewardHistoryReads().length, 1, 'no re-read on an action');
+  assert.match(sectionNode(env.$app, 'Reward history').textContent, /Movie night/);
+});
+
+test('reward history CLM-10: no redeemed rewards shows the empty text and no table on the member card', async () => {
+  await loadApp();
+  await becomeAnn();
+  const node = sectionNode(env.$app, 'Reward history');
+  assert.ok(node, 'Reward history section exists');
+  assert.deepEqual(walk(node).filter((n) => n.tagName === 'P').map((n) => n.textContent), ['No rewards redeemed yet']);
+  assert.equal(walk(node).filter((n) => n.tagName === 'TABLE').length, 0, 'no table');
+});
+
+test('reward history CLM-7: a late answer for a member picked earlier is not rendered under the member picked since', async () => {
+  srv.rewardHistory = (r) => [200, { items: [{ id: r.path.includes('/m-a/') ? 'ra' : 'rb', description: r.path.includes('/m-a/') ? 'Ann treat' : 'Ben treat', cost: 5, status: 'approved', decided_at: '2025-01-02T12:00:00Z' }] }];
+  await loadApp();
+  const realFetch = globalThis.fetch;
+  let releaseAnn;
+  const annHeld = new Promise((r) => { releaseAnn = r; });
+  globalThis.fetch = async (url, init) => {
+    const res = realFetch(url, init);
+    if (url.includes('/family-members/m-a/reward-history')) await annHeld;
+    return res;
+  };
+  await becomeAnn();
+  await becomeBen();
+  releaseAnn();
+  await settle();
+  globalThis.fetch = realFetch;
+  assert.match(text(), /Quests for Ben/);
+  const node = sectionNode(env.$app, 'Reward history');
+  assert.match(node.textContent, /Ben treat/);
+  assert.doesNotMatch(text(), /Ann treat/);
+});
+
+test('reward history CLM-7: a failing reward-history read stays in its section; wrong_pin returns to the picker', async () => {
+  srv.rewardHistory = () => err(429, 'rate_limited', 'Too many requests.');
+  await loadApp();
+  await becomeAnn();
+  assert.match(sectionNode(env.$app, 'Reward history').textContent, /Could not load reward history/);
+  assert.equal(walk(sectionNode(env.$app, 'Points history')).filter((n) => n.tagName === 'P').length, 1, 'points history renders');
+  assert.match(section(env.$app, 'Available'), /Feed the cat/);
+
+  srv.rewardHistory = () => err(403, 'wrong_pin', 'Wrong PIN.');
+  await becomeBen();
+  assert.doesNotMatch(text(), /Viewing as: Ben/);
+  assert.equal(sectionNode(env.$app, 'Reward history'), null);
+  assert.equal(signedOut, 0);
 });
 
 test('CLM-11: empty points-history renders empty message and no table', async () => {

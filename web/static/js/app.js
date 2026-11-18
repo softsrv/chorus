@@ -401,9 +401,10 @@ let tab = 'quests';
 let activeMember = null; // { id, name, pin } after a successful verify
 let adminPin = null; // the admin PIN once entered, sent as X-Admin-PIN
 let adminPinState = { householdId: null, set: false }; // GET .../admin-pin
-// memberHistory is the active member's points history, read once per member
-// selection (and again after an admin adjusts that member's points on the
-// Family tab): { member (the activeMember object it was read for), ready }.
+// memberHistory is the active member's points and reward history, read once
+// per member selection (and again after an admin adjusts that member's points
+// on the Family tab): { member (the activeMember object it was read for),
+// ready }.
 let memberHistory = null;
 // memberBarPoints re-reads the active member's total into the member bar
 // drawn last (set by memberBar); null before one is drawn.
@@ -845,16 +846,21 @@ async function takeCard(h, quests, members, rerender, member = activeMember) {
   // member is picked again or the page reloads, and the quest lists still
   // render. A 403 wrong_pin goes to the same handler member actions use,
   // which returns to the picker; a stale read's wrong_pin is dropped.
+  // The reward history (approved redemptions) is read alongside it, under the
+  // same rules: once per selection, its own failure shown only in its own
+  // section, a wrong_pin handed to memberActionFailed.
   if (memberHistory?.member !== member) {
-    const ready = api('GET', `/households/${h.id}/family-members/${member.id}/points-history`, undefined, {
+    const read = (path, label) => api('GET', `/households/${h.id}/family-members/${member.id}/${path}`, undefined, {
       headers: { 'X-Member-PIN': member.pin ?? '' },
     }).then(
       (res) => ({ items: res?.items || [], error: null, failure: null }),
       (err) => {
         if (err instanceof ApiError && err.code === 'wrong_pin') return { items: [], error: null, failure: err };
-        console.error('points history', err);
-        return { items: [], error: 'Could not load points history. Reload to try again.', failure: null };
+        console.error(label, err);
+        return { items: [], error: `Could not load ${label}. Reload to try again.`, failure: null };
       });
+    const ready = Promise.all([read('points-history', 'points history'), read('reward-history', 'reward history')])
+      .then(([points, rewards]) => ({ points, rewards, failure: points.failure || rewards.failure }));
     memberHistory = { member, ready };
   }
   const result = await memberHistory.ready;
@@ -864,8 +870,10 @@ async function takeCard(h, quests, members, rerender, member = activeMember) {
     memberActionFailed(result.failure);
     return null;
   }
-  const history = result.items;
-  const historyError = result.error;
+  const history = result.points.items;
+  const historyError = result.points.error;
+  const rewardHistory = result.rewards.items;
+  const rewardHistoryError = result.rewards.error;
 
   const act = (verb, q) => action(async () => {
     if (activeMember !== member) return; // this card is stale: never send another member's identity for its quests
@@ -1003,7 +1011,33 @@ async function takeCard(h, quests, members, rerender, member = activeMember) {
     el('div', { class: 'space-y-1' },
       el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Points history' }),
       historyError ? alertBox('error', historyError) : pointsHistoryTable(history, 'No points yet. Points you earn will show up here.', { adminLabel: '(from admin)' }),
+    ),
+    el('div', { class: 'space-y-1' },
+      el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Reward history' }),
+      rewardHistoryError ? alertBox('error', rewardHistoryError) : rewardHistoryTable(rewardHistory),
     ));
+}
+
+// rewardHistoryTable renders a member's approved reward redemptions, newest
+// first: the Date/Reward/Points table, the cost as the plain number it took,
+// or 'No rewards redeemed yet' when there are none. The points history shows
+// the same redemption as its own signed '-N Redeemed: …' row.
+function rewardHistoryTable(items) {
+  if (!items || items.length === 0) {
+    return el('p', { class: 'text-xs opacity-60', text: 'No rewards redeemed yet' });
+  }
+  return el('table', { class: 'table table-sm' },
+    el('thead', {}, el('tr', {},
+      el('th', { text: 'Date' }),
+      el('th', { text: 'Reward' }),
+      el('th', { text: 'Points' }),
+    )),
+    el('tbody', {}, items.map((item) => el('tr', {},
+      el('td', { text: fmtDate(item.decided_at) }),
+      el('td', { text: item.description }),
+      el('td', { text: String(item.cost) }),
+    ))),
+  );
 }
 
 // pointsHistoryTable renders the member's or admin's view of points awards:
@@ -1610,35 +1644,48 @@ async function familyTab(h, $root) {
   };
 
   // showMember swaps the family list for one member's view: heading, Back,
-  // the slot for the adjust-points form, then the points history read with
-  // the admin's headers. A late answer for a view the admin already left is
-  // dropped; a failed read shows an inline error inside the history section.
+  // the slot for the adjust-points form, then the points history and the
+  // reward history, each read with the admin's headers. A late answer for a
+  // view the admin already left is dropped; a failed read shows an inline
+  // error inside its own section; a refused admin PIN locks the tab again.
   const showMember = async (m) => {
     const view = {};
     familyView = view;
     const heading = () => el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Points history' });
     const $history = el('div', { class: 'space-y-1' },
       heading(), el('p', { class: 'text-xs opacity-60', text: 'Loading points history…' }));
+    const rewardHeading = () => el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Reward history' });
+    const $rewards = el('div', { class: 'space-y-1' },
+      rewardHeading(), el('p', { class: 'text-xs opacity-60', text: 'Loading reward history…' }));
     $root.replaceChildren(card(null,
       el('h3', { class: 'font-semibold', text: `${m.name} — ${m.points} points` }),
       el('div', {}, el('button', { class: 'btn btn-ghost btn-xs', text: 'Back to family', onclick: () => rerender() })),
       adjustPointsForm(m, view),
-      $history));
-    let content;
-    try {
-      const res = await adminRequest('GET', `${base}/${m.id}/points-history`);
-      content = pointsHistoryTable(res.items, 'No points history yet.', { adminLabel: '(admin adjustment)' });
-    } catch (err) {
-      if (familyView !== view) return;
-      if (err instanceof ApiError && (err.code === 'wrong_pin' || err.code === 'admin_pin_required')) {
-        rerender(); // adminRequest forgot the PIN: the tab locks again
-        return;
+      $history,
+      $rewards));
+    // Each read settles to its content, or null when the view is gone or the
+    // admin PIN was refused (the tab re-renders locked).
+    const load = async (path, label, render) => {
+      try {
+        return render((await adminRequest('GET', `${base}/${m.id}/${path}`)).items);
+      } catch (err) {
+        if (familyView !== view) return null;
+        if (err instanceof ApiError && (err.code === 'wrong_pin' || err.code === 'admin_pin_required')) {
+          familyView = null;
+          rerender(); // adminRequest forgot the PIN: the tab locks again
+          return null;
+        }
+        console.error(label, err);
+        return alertBox('error', `Could not load ${label}. Reload to try again.`);
       }
-      console.error('points history', err);
-      content = alertBox('error', 'Could not load points history. Reload to try again.');
-    }
-    if (familyView !== view) return;
+    };
+    const [content, rewardContent] = await Promise.all([
+      load('points-history', 'points history', (items) => pointsHistoryTable(items, 'No points history yet.', { adminLabel: '(admin adjustment)' })),
+      load('reward-history', 'reward history', (items) => rewardHistoryTable(items)),
+    ]);
+    if (familyView !== view || !content || !rewardContent) return;
     $history.replaceChildren(heading(), content);
+    $rewards.replaceChildren(rewardHeading(), rewardContent);
   };
 
   // adjustPointsForm is the member view's 'Adjust points' fieldset: an amount,
