@@ -340,6 +340,56 @@ func toLibraryReward(r db.RewardLibrary) libraryRewardJSON {
 	return libraryRewardJSON{ID: r.ID, Description: r.Description, Cost: r.Cost}
 }
 
+// rewardRedemptionJSON is a member's request to redeem a reward. description
+// and cost are snapshotted at request time; reward_id is null once the
+// reward was deleted. status is pending, approved, rejected or cancelled;
+// decided_at is null while pending.
+type rewardRedemptionJSON struct {
+	ID          uuid.UUID  `json:"id"`
+	MemberID    uuid.UUID  `json:"member_id"`
+	RewardID    *uuid.UUID `json:"reward_id"`
+	Description string     `json:"description"`
+	Cost        int32      `json:"cost"`
+	Status      string     `json:"status"`
+	RequestedAt time.Time  `json:"requested_at"`
+	DecidedAt   *time.Time `json:"decided_at"`
+}
+
+func toRewardRedemption(r db.RewardRedemption) rewardRedemptionJSON {
+	out := rewardRedemptionJSON{
+		ID:          r.ID,
+		MemberID:    r.MemberID,
+		RewardID:    r.RewardID,
+		Description: r.Description,
+		Cost:        r.Cost,
+		Status:      r.Status,
+		RequestedAt: r.RequestedAt.Time.UTC(),
+	}
+	if r.DecidedAt.Valid {
+		t := r.DecidedAt.Time.UTC()
+		out.DecidedAt = &t
+	}
+	return out
+}
+
+// pendingRedemptionJSON is a request in the admin's pending list: the
+// redemption plus the requesting member's name.
+type pendingRedemptionJSON struct {
+	rewardRedemptionJSON
+	MemberName string `json:"member_name"`
+}
+
+func toPendingRedemption(r db.ListPendingRewardRedemptionsRow) pendingRedemptionJSON {
+	return pendingRedemptionJSON{
+		rewardRedemptionJSON: toRewardRedemption(db.RewardRedemption{
+			ID: r.ID, HouseholdID: r.HouseholdID, MemberID: r.MemberID, RewardID: r.RewardID,
+			Description: r.Description, Cost: r.Cost, Status: r.Status,
+			RequestedAt: r.RequestedAt, DecidedAt: r.DecidedAt,
+		}),
+		MemberName: r.MemberName,
+	}
+}
+
 // comboJSON is the wire representation of a household combo.
 type comboJSON struct {
 	ID          uuid.UUID   `json:"id"`

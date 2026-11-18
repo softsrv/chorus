@@ -296,6 +296,18 @@ type RewardLibrary struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type RewardRedemption struct {
+	ID          uuid.UUID          `json:"id"`
+	HouseholdID uuid.UUID          `json:"household_id"`
+	MemberID    uuid.UUID          `json:"member_id"`
+	RewardID    *uuid.UUID         `json:"reward_id"`
+	Description string             `json:"description"`
+	Cost        int32              `json:"cost"`
+	Status      string             `json:"status"`
+	RequestedAt pgtype.Timestamptz `json:"requested_at"`
+	DecidedAt   pgtype.Timestamptz `json:"decided_at"`
+}
+
 type User struct {
 	ID                     uuid.UUID          `json:"id"`
 	Email                  string             `json:"email"`
