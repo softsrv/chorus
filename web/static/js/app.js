@@ -908,21 +908,28 @@ async function takeCard(h, quests, members, rerender, member = activeMember) {
         waitingBadge(q)), ''),
     el('div', { class: 'space-y-1' },
       el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Points history' }),
-      historyError ? alertBox('error', historyError) : history.length
-        ? el('table', { class: 'table table-sm' },
-            el('thead', {}, el('tr', {},
-              el('th', { text: 'Date' }),
-              el('th', { text: 'Points' }),
-              el('th', { text: 'Reason' }),
-            )),
-            el('tbody', {}, history.map((item) => el('tr', {},
-              el('td', { text: fmtDate(item.earned_at) }),
-              el('td', { text: `+${item.points}` }),
-              el('td', { text: item.reason }),
-            ))),
-          )
-        : el('p', { class: 'text-xs opacity-60', text: 'No points yet. Points you earn will show up here.' }),
+      historyError ? alertBox('error', historyError) : pointsHistoryTable(history, 'No points yet. Points you earn will show up here.'),
     ));
+}
+
+// pointsHistoryTable renders the member's or admin's view of points awards:
+// the Date/Points/Reason table, or an empty paragraph when there are none.
+function pointsHistoryTable(history, emptyText) {
+  if (!history || history.length === 0) {
+    return el('p', { class: 'text-xs opacity-60', text: emptyText });
+  }
+  return el('table', { class: 'table table-sm' },
+    el('thead', {}, el('tr', {},
+      el('th', { text: 'Date' }),
+      el('th', { text: 'Points' }),
+      el('th', { text: 'Reason' }),
+    )),
+    el('tbody', {}, history.map((item) => el('tr', {},
+      el('td', { text: fmtDate(item.earned_at) }),
+      el('td', { text: `+${item.points}` }),
+      el('td', { text: item.reason }),
+    ))),
+  );
 }
 
 // approvalNotice is the plain-text notice after an approval that paid
