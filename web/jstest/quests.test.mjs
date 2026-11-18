@@ -55,6 +55,7 @@ function routes() {
     [`POST ${HP}/family-members/m-a/verify`]: () => [204, null],
     [`POST ${HP}/family-members/m-b/verify`]: (r) => (r.body.pin === '1234' ? [204, null] : err(403, 'wrong_pin')),
     [`GET ${HP}/quests/pending`]: (r) => srv.pending(r),
+    [`GET ${HP}/reward-redemptions/pending`]: (r) => (srv.pendingRewards ? srv.pendingRewards(r) : [200, { items: [] }]),
     ...srv.extra,
   };
   return new Proxy(r, {
@@ -1817,3 +1818,148 @@ test('CLM-27: a 409 age_restricted on accept reloads the list, then shows the ag
   assert.match(text(), /This quest is outside that member's age range\./);
   assert.doesNotMatch(text(), /This quest was already taken\./);
 });
+
+test('CLM-17: approvals card lists pending reward requests with member name, description, signed points, and Approve/Reject buttons', async () => {
+  srv.adminPinSet = true;
+  let completions = [
+    { completion_id: 'c1', quest_id: 'q1', name: 'Empty the dishwasher', points: 10, member_id: 'm-a', member_name: 'Alex', done_at: '2025-01-03T00:00:00Z' },
+  ];
+  let redemptions = [
+    { id: 'red-1', household_id: H, member_id: 'm-sam', member_name: 'Sam', reward_id: 'r-movie', description: 'Movie night', cost: 100, status: 'pending', requested_at: '2025-01-03T12:00:00Z' },
+  ];
+  srv.pending = () => [200, { items: completions }];
+  srv.pendingRewards = () => [200, { items: redemptions }];
+
+  srv.extra[`POST ${HP}/reward-redemptions/red-1/approve`] = () => {
+    redemptions = redemptions.filter((r) => r.id !== 'red-1');
+    return [200, { redemption: { id: 'red-1', status: 'approved' } }];
+  };
+  srv.extra[`POST ${HP}/reward-redemptions/red-1/reject`] = () => {
+    redemptions = redemptions.filter((r) => r.id !== 'red-1');
+    return [200, { redemption: { id: 'red-1', status: 'rejected' } }];
+  };
+
+  await loadApp();
+  await unlockAdmin('9999');
+
+  const approvals = () => walk(env.$app).find((n) => n.tagName === 'H3' && n.textContent === 'Approvals').parentNode;
+  assert.ok(walk(approvals()).some((n) => n.tagName === 'H4' && n.textContent === 'Reward requests'), 'Reward requests heading present');
+
+  const lis = () => walk(approvals()).filter((n) => n.tagName === 'LI');
+  assert.equal(lis().length, 2, 'one quest row and one redemption row');
+
+  const questRow = lis()[0];
+  assert.match(questRow.textContent, /Empty the dishwasher/);
+  assert.equal(buttons(questRow, 'Approve').length, 1);
+  assert.equal(buttons(questRow, 'Send back').length, 1);
+
+  const rewardRow = lis()[1];
+  assert.match(rewardRow.textContent, /Sam/);
+  assert.match(rewardRow.textContent, /Reward: Movie night/);
+  assert.match(rewardRow.textContent, /-100/);
+  assert.equal(buttons(rewardRow, 'Approve').length, 1);
+  assert.equal(buttons(rewardRow, 'Reject').length, 1);
+
+  // Click Approve on the redemption row
+  await click(buttons(rewardRow, 'Approve')[0]);
+  const approveCall = calls.filter((c) => c.method === 'POST' && c.path.includes('/reward-redemptions/red-1/approve')).at(-1);
+  assert.ok(approveCall, 'approve POST called');
+  assert.deepEqual(approveCall.body, {});
+  assert.equal(approveCall.headers['X-Admin-PIN'], '9999');
+
+  // Verify row leaves the list after reload
+  assert.equal(lis().length, 1);
+  assert.doesNotMatch(approvals().textContent, /Reward: Movie night/);
+  assert.ok(!walk(approvals()).some((n) => n.tagName === 'H4' && n.textContent === 'Reward requests'));
+
+  // Test reject path with a fresh redemption
+  redemptions = [
+    { id: 'red-1', household_id: H, member_id: 'm-sam', member_name: 'Sam', reward_id: 'r-movie', description: 'Movie night', cost: 100, status: 'pending', requested_at: '2025-01-03T12:00:00Z' },
+  ];
+  await click(walk(env.$app).find((n) => n.tagName === 'A' && n.textContent === 'Quests'));
+  const rewardRow2 = lis()[1];
+  assert.ok(rewardRow2);
+  await click(buttons(rewardRow2, 'Reject')[0]);
+  const rejectCall = calls.filter((c) => c.method === 'POST' && c.path.includes('/reward-redemptions/red-1/reject')).at(-1);
+  assert.ok(rejectCall, 'reject POST called');
+  assert.deepEqual(rejectCall.body, {});
+  assert.equal(rejectCall.headers['X-Admin-PIN'], '9999');
+  assert.equal(lis().length, 1);
+});
+
+test('CLM-18: a 422 answer to reward approve shows message inline and keeps the row and both buttons', async () => {
+  srv.adminPinSet = true;
+  srv.pending = () => [200, { items: [] }];
+  srv.pendingRewards = () => [200, {
+    items: [
+      { id: 'red-pizza', household_id: H, member_id: 'm-alex', member_name: 'Alex', reward_id: 'r-pizza', description: 'Pizza night', cost: 150, status: 'pending', requested_at: '2025-01-03T12:00:00Z' },
+    ],
+  }];
+  const msg = "Can't approve Pizza night for Alex: Alex has 90 points and it costs 150. Nothing was taken.";
+  srv.extra[`POST ${HP}/reward-redemptions/red-pizza/approve`] = () => [422, { error: { code: 'insufficient_points', message: msg } }];
+
+  await loadApp();
+  await unlockAdmin('9999');
+
+  const approvals = () => walk(env.$app).find((n) => n.tagName === 'H3' && n.textContent === 'Approvals').parentNode;
+  const lis = () => walk(approvals()).filter((n) => n.tagName === 'LI');
+  assert.equal(lis().length, 1);
+
+  await click(buttons(lis()[0], 'Approve')[0]);
+
+  assert.match(approvals().textContent, new RegExp(msg));
+  assert.equal(lis().length, 1);
+  assert.equal(buttons(lis()[0], 'Approve').length, 1);
+  assert.equal(buttons(lis()[0], 'Reject').length, 1);
+});
+
+test('CLM-19: a 403 wrong_pin on reward approve/reject invokes wrongAdminPin and keeps the row', async () => {
+  srv.adminPinSet = true;
+  srv.pending = () => [200, { items: [] }];
+  srv.pendingRewards = () => [200, {
+    items: [
+      { id: 'red-1', household_id: H, member_id: 'm-sam', member_name: 'Sam', reward_id: 'r-movie', description: 'Movie night', cost: 100, status: 'pending', requested_at: '2025-01-03T12:00:00Z' },
+    ],
+  }];
+  srv.extra[`POST ${HP}/reward-redemptions/red-1/approve`] = () => err(403, 'wrong_pin', 'Wrong PIN.');
+
+  await loadApp();
+  await unlockAdmin('9999');
+
+  const approvals = () => walk(env.$app).find((n) => n.tagName === 'H3' && n.textContent === 'Approvals').parentNode;
+  const lis = () => walk(approvals()).filter((n) => n.tagName === 'LI');
+  assert.equal(lis().length, 1);
+
+  await click(buttons(lis()[0], 'Approve')[0]);
+
+  assert.match(text(), /Wrong administrator PIN\./);
+  assert.equal(sessionStorage.getItem(REFRESH_KEY), 'rt');
+  assert.equal(signedOut, 0);
+});
+
+test('CLM-20: approvals card empty state accounts for both quest and redemption lists', async () => {
+  srv.adminPinSet = true;
+  srv.pending = () => [200, { items: [] }];
+  srv.pendingRewards = () => [200, { items: [] }];
+
+  await loadApp();
+  await unlockAdmin('9999');
+
+  const approvals = () => walk(env.$app).find((n) => n.tagName === 'H3' && n.textContent === 'Approvals').parentNode;
+  assert.match(approvals().textContent, /Nothing waiting for approval\./);
+  assert.doesNotMatch(approvals().textContent, /Reward requests/);
+  assert.equal(walk(approvals()).filter((n) => n.tagName === 'TABLE' || n.tagName === 'UL').length, 0);
+
+  // With only a redemption pending, the empty text is absent
+  srv.pendingRewards = () => [200, {
+    items: [
+      { id: 'red-1', household_id: H, member_id: 'm-sam', member_name: 'Sam', reward_id: 'r-movie', description: 'Movie night', cost: 100, status: 'pending', requested_at: '2025-01-03T12:00:00Z' },
+    ],
+  }];
+  await click(walk(env.$app).find((n) => n.tagName === 'A' && n.textContent === 'Quests'));
+
+  const approvals2 = () => walk(env.$app).find((n) => n.tagName === 'H3' && n.textContent === 'Approvals').parentNode;
+  assert.doesNotMatch(approvals2().textContent, /Nothing waiting for approval\./);
+  assert.match(approvals2().textContent, /Reward requests/);
+});
+

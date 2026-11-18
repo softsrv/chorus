@@ -41,6 +41,7 @@ type Querier interface {
 	// marker's streak as fixed at this completion's mark-done (NULL for one
 	// marked done before streaks existed); neither is recomputed from NOW().
 	ApproveCompletion(ctx context.Context, arg ApproveCompletionParams) (ApproveCompletionRow, error)
+	ApproveRewardRedemption(ctx context.Context, arg ApproveRewardRedemptionParams) (RewardRedemption, error)
 	// Takes a member who is leaving the household off every completion still
 	// waiting for approval. Their quest_completion_members row goes. Where they
 	// marked it done, the marker moves first to the earliest remaining recorded
@@ -55,6 +56,10 @@ type Querier interface {
 	// completions are locked after the caller's lock on the member row (member
 	// first, the order Approve uses).
 	CancelMemberPendingCompletions(ctx context.Context, arg CancelMemberPendingCompletionsParams) error
+	// Cancels every request of a member who is leaving the household. The UPDATE
+	// locks each row it cancels, after the caller's lock on the member row
+	// (member first, the order Approve and Reject use). No points move.
+	CancelMemberPendingRedemptions(ctx context.Context, arg CancelMemberPendingRedemptionsParams) (int64, error)
 	// Counts one completion per chore of the combo toward the award: for each
 	// chore, the earliest approved completion on award_day (household-local)
 	// covering the member (marked by them, or with them recorded in
@@ -89,6 +94,11 @@ type Querier interface {
 	// on that side.
 	CreateHouseholdQuest(ctx context.Context, arg CreateHouseholdQuestParams) (HouseholdQuest, error)
 	CreateHouseholdReward(ctx context.Context, arg CreateHouseholdRewardParams) (HouseholdReward, error)
+	// A member's request to redeem a reward, waiting for the administrator, with
+	// the reward's description and cost snapshotted. A request for a reward the
+	// member already has pending writes nothing and returns no row (the partial
+	// unique index); the caller then reads the existing request.
+	CreateRewardRedemption(ctx context.Context, arg CreateRewardRedemptionParams) (RewardRedemption, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	DeleteAdminPin(ctx context.Context, householdID uuid.UUID) (int64, error)
 	DeleteComboQuests(ctx context.Context, arg DeleteComboQuestsParams) error
@@ -128,6 +138,7 @@ type Querier interface {
 	// reads it.
 	GetHouseholdQuestView(ctx context.Context, arg GetHouseholdQuestViewParams) (GetHouseholdQuestViewRow, error)
 	GetHouseholdReward(ctx context.Context, arg GetHouseholdRewardParams) (HouseholdReward, error)
+	GetMemberPendingRedemptionForReward(ctx context.Context, arg GetMemberPendingRedemptionForRewardParams) (RewardRedemption, error)
 	GetMemberQuestStreak(ctx context.Context, arg GetMemberQuestStreakParams) (MemberQuestStreak, error)
 	GetOldestRecentVerificationCode(ctx context.Context, userID uuid.UUID) (pgtype.Timestamptz, error)
 	GetPasswordResetTokenByHash(ctx context.Context, tokenHash string) (PasswordResetToken, error)
@@ -136,6 +147,10 @@ type Querier interface {
 	// rows before it locks the completion (the order FamilyService.Remove uses).
 	// A completion recorded before quest sharing has no member rows.
 	GetPendingCompletionMembers(ctx context.Context, arg GetPendingCompletionMembersParams) (GetPendingCompletionMembersRow, error)
+	// The member of a pending request, read without a lock so Approve and Reject
+	// can lock that member's row before they lock the request (member first, the
+	// order FamilyService.Remove uses).
+	GetPendingRedemptionMember(ctx context.Context, arg GetPendingRedemptionMemberParams) (uuid.UUID, error)
 	GetQuestLibraryItem(ctx context.Context, id uuid.UUID) (QuestLibrary, error)
 	GetRefreshTokenByHash(ctx context.Context, tokenHash string) (RefreshToken, error)
 	GetRefreshTokenByID(ctx context.Context, id uuid.UUID) (RefreshToken, error)
@@ -205,6 +220,7 @@ type Querier interface {
 	// and quests without limits never appear. Only this household's members are
 	// read.
 	ListIneligibleMemberIDs(ctx context.Context, arg ListIneligibleMemberIDsParams) ([]ListIneligibleMemberIDsRow, error)
+	ListMemberPendingRedemptions(ctx context.Context, arg ListMemberPendingRedemptionsParams) ([]RewardRedemption, error)
 	ListMemberPointsAwards(ctx context.Context, arg ListMemberPointsAwardsParams) ([]PointsAward, error)
 	// Completions waiting for approval, one row each, oldest mark-done first,
 	// with the chore's name, current points and teamwork bonus, the member who
@@ -212,6 +228,9 @@ type Querier interface {
 	// in the same order: earliest recorded first). A completion recorded before
 	// quest sharing has no member rows; the caller reads its marker alone.
 	ListPendingCompletions(ctx context.Context, householdID uuid.UUID) ([]ListPendingCompletionsRow, error)
+	// The household's requests waiting for approval, oldest first, each with the
+	// requesting member's name.
+	ListPendingRewardRedemptions(ctx context.Context, householdID uuid.UUID) ([]ListPendingRewardRedemptionsRow, error)
 	// Household quest queries are scoped by household_id. Membership is checked
 	// by the service layer first; the household_id predicate guarantees a quest ID
 	// from another household can never be read or modified through this one.
@@ -219,12 +238,13 @@ type Querier interface {
 	ListQuestLibrary(ctx context.Context) ([]QuestLibrary, error)
 	// The members on one quest, earliest first; none when it is not shared.
 	ListQuestParticipants(ctx context.Context, arg ListQuestParticipantsParams) ([]uuid.UUID, error)
-	// Household reward queries are scoped by household_id. Membership is checked
-	// by the service layer first; the household_id predicate guarantees a reward
-	// ID from another household can never be read or modified through this one.
-	// The reward library is global and read-only: there are no write queries on
-	// it. No query here touches family_members, so no reward operation can change
-	// anyone's points.
+	// Household reward and reward redemption queries are scoped by household_id.
+	// Membership is checked by the service layer first; the household_id
+	// predicate guarantees a reward or redemption ID from another household can
+	// never be read or modified through this one. The reward library is global
+	// and read-only: there are no write queries on it. No query here writes
+	// family_members: a redemption's points move only on approval, through
+	// creditPoints in the service layer.
 	ListRewardLibrary(ctx context.Context) ([]RewardLibrary, error)
 	LockAccount(ctx context.Context, arg LockAccountParams) error
 	// Locks, in one statement and in id order, every combo of the household that
@@ -254,6 +274,9 @@ type Querier interface {
 	// that committed while the lock waited (each takes the quest row lock), and
 	// none can commit under it.
 	LockMemberQuests(ctx context.Context, arg LockMemberQuestsParams) ([]uuid.UUID, error)
+	// Locks a pending request of the member, after the caller locked the member
+	// row. A request decided or cancelled meanwhile returns no row.
+	LockPendingRedemption(ctx context.Context, arg LockPendingRedemptionParams) (RewardRedemption, error)
 	LockUserProvisioning(ctx context.Context, id uuid.UUID) (pgtype.Timestamptz, error)
 	MarkGoogleCalendarConnectionBroken(ctx context.Context, userID uuid.UUID) (int64, error)
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
@@ -313,6 +336,7 @@ type Querier interface {
 	// cooldown has not ended, the cooldown is cancelled so the chore is available
 	// again right away. Other completions and the quest's holder are untouched.
 	RejectCompletion(ctx context.Context, arg RejectCompletionParams) (RejectCompletionRow, error)
+	RejectRewardRedemption(ctx context.Context, arg RejectRewardRedemptionParams) (RewardRedemption, error)
 	// Re-arms first-sign-in provisioning for a user who has no household left.
 	ReleaseHouseholdProvisioning(ctx context.Context, id uuid.UUID) error
 	// Takes a member who is leaving the household off every quest they are on.

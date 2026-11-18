@@ -9,7 +9,59 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
+
+const approveRewardRedemption = `-- name: ApproveRewardRedemption :one
+UPDATE reward_redemptions
+SET status = 'approved', decided_at = NOW()
+WHERE household_id = $1 AND id = $2 AND status = 'pending'
+RETURNING id, household_id, member_id, reward_id, description, cost, status, requested_at, decided_at
+`
+
+type ApproveRewardRedemptionParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	ID          uuid.UUID `json:"id"`
+}
+
+func (q *Queries) ApproveRewardRedemption(ctx context.Context, arg ApproveRewardRedemptionParams) (RewardRedemption, error) {
+	row := q.db.QueryRow(ctx, approveRewardRedemption, arg.HouseholdID, arg.ID)
+	var i RewardRedemption
+	err := row.Scan(
+		&i.ID,
+		&i.HouseholdID,
+		&i.MemberID,
+		&i.RewardID,
+		&i.Description,
+		&i.Cost,
+		&i.Status,
+		&i.RequestedAt,
+		&i.DecidedAt,
+	)
+	return i, err
+}
+
+const cancelMemberPendingRedemptions = `-- name: CancelMemberPendingRedemptions :execrows
+UPDATE reward_redemptions
+SET status = 'cancelled', decided_at = NOW()
+WHERE household_id = $1 AND member_id = $2 AND status = 'pending'
+`
+
+type CancelMemberPendingRedemptionsParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	MemberID    uuid.UUID `json:"member_id"`
+}
+
+// Cancels every request of a member who is leaving the household. The UPDATE
+// locks each row it cancels, after the caller's lock on the member row
+// (member first, the order Approve and Reject use). No points move.
+func (q *Queries) CancelMemberPendingRedemptions(ctx context.Context, arg CancelMemberPendingRedemptionsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, cancelMemberPendingRedemptions, arg.HouseholdID, arg.MemberID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
 
 const createHouseholdReward = `-- name: CreateHouseholdReward :one
 INSERT INTO household_rewards (id, household_id, library_id, description, cost, created_at, updated_at)
@@ -42,6 +94,50 @@ func (q *Queries) CreateHouseholdReward(ctx context.Context, arg CreateHousehold
 		&i.Cost,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const createRewardRedemption = `-- name: CreateRewardRedemption :one
+INSERT INTO reward_redemptions (id, household_id, member_id, reward_id, description, cost, status, requested_at)
+VALUES ($1, $2, $3, $4, $5, $6, 'pending', NOW())
+ON CONFLICT (household_id, member_id, reward_id) WHERE status = 'pending' DO NOTHING
+RETURNING id, household_id, member_id, reward_id, description, cost, status, requested_at, decided_at
+`
+
+type CreateRewardRedemptionParams struct {
+	ID          uuid.UUID  `json:"id"`
+	HouseholdID uuid.UUID  `json:"household_id"`
+	MemberID    uuid.UUID  `json:"member_id"`
+	RewardID    *uuid.UUID `json:"reward_id"`
+	Description string     `json:"description"`
+	Cost        int32      `json:"cost"`
+}
+
+// A member's request to redeem a reward, waiting for the administrator, with
+// the reward's description and cost snapshotted. A request for a reward the
+// member already has pending writes nothing and returns no row (the partial
+// unique index); the caller then reads the existing request.
+func (q *Queries) CreateRewardRedemption(ctx context.Context, arg CreateRewardRedemptionParams) (RewardRedemption, error) {
+	row := q.db.QueryRow(ctx, createRewardRedemption,
+		arg.ID,
+		arg.HouseholdID,
+		arg.MemberID,
+		arg.RewardID,
+		arg.Description,
+		arg.Cost,
+	)
+	var i RewardRedemption
+	err := row.Scan(
+		&i.ID,
+		&i.HouseholdID,
+		&i.MemberID,
+		&i.RewardID,
+		&i.Description,
+		&i.Cost,
+		&i.Status,
+		&i.RequestedAt,
+		&i.DecidedAt,
 	)
 	return i, err
 }
@@ -85,6 +181,54 @@ func (q *Queries) GetHouseholdReward(ctx context.Context, arg GetHouseholdReward
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const getMemberPendingRedemptionForReward = `-- name: GetMemberPendingRedemptionForReward :one
+SELECT id, household_id, member_id, reward_id, description, cost, status, requested_at, decided_at FROM reward_redemptions
+WHERE household_id = $1 AND member_id = $2 AND reward_id = $3 AND status = 'pending'
+`
+
+type GetMemberPendingRedemptionForRewardParams struct {
+	HouseholdID uuid.UUID  `json:"household_id"`
+	MemberID    uuid.UUID  `json:"member_id"`
+	RewardID    *uuid.UUID `json:"reward_id"`
+}
+
+func (q *Queries) GetMemberPendingRedemptionForReward(ctx context.Context, arg GetMemberPendingRedemptionForRewardParams) (RewardRedemption, error) {
+	row := q.db.QueryRow(ctx, getMemberPendingRedemptionForReward, arg.HouseholdID, arg.MemberID, arg.RewardID)
+	var i RewardRedemption
+	err := row.Scan(
+		&i.ID,
+		&i.HouseholdID,
+		&i.MemberID,
+		&i.RewardID,
+		&i.Description,
+		&i.Cost,
+		&i.Status,
+		&i.RequestedAt,
+		&i.DecidedAt,
+	)
+	return i, err
+}
+
+const getPendingRedemptionMember = `-- name: GetPendingRedemptionMember :one
+SELECT member_id FROM reward_redemptions
+WHERE household_id = $1 AND id = $2 AND status = 'pending'
+`
+
+type GetPendingRedemptionMemberParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	ID          uuid.UUID `json:"id"`
+}
+
+// The member of a pending request, read without a lock so Approve and Reject
+// can lock that member's row before they lock the request (member first, the
+// order FamilyService.Remove uses).
+func (q *Queries) GetPendingRedemptionMember(ctx context.Context, arg GetPendingRedemptionMemberParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, getPendingRedemptionMember, arg.HouseholdID, arg.ID)
+	var member_id uuid.UUID
+	err := row.Scan(&member_id)
+	return member_id, err
 }
 
 const getRewardLibraryItem = `-- name: GetRewardLibraryItem :one
@@ -137,17 +281,114 @@ func (q *Queries) ListHouseholdRewards(ctx context.Context, householdID uuid.UUI
 	return items, nil
 }
 
+const listMemberPendingRedemptions = `-- name: ListMemberPendingRedemptions :many
+SELECT id, household_id, member_id, reward_id, description, cost, status, requested_at, decided_at FROM reward_redemptions
+WHERE household_id = $1 AND member_id = $2 AND status = 'pending'
+ORDER BY requested_at ASC, id ASC
+`
+
+type ListMemberPendingRedemptionsParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	MemberID    uuid.UUID `json:"member_id"`
+}
+
+func (q *Queries) ListMemberPendingRedemptions(ctx context.Context, arg ListMemberPendingRedemptionsParams) ([]RewardRedemption, error) {
+	rows, err := q.db.Query(ctx, listMemberPendingRedemptions, arg.HouseholdID, arg.MemberID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []RewardRedemption{}
+	for rows.Next() {
+		var i RewardRedemption
+		if err := rows.Scan(
+			&i.ID,
+			&i.HouseholdID,
+			&i.MemberID,
+			&i.RewardID,
+			&i.Description,
+			&i.Cost,
+			&i.Status,
+			&i.RequestedAt,
+			&i.DecidedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPendingRewardRedemptions = `-- name: ListPendingRewardRedemptions :many
+SELECT r.id, r.household_id, r.member_id, r.reward_id, r.description, r.cost,
+       r.status, r.requested_at, r.decided_at, m.name AS member_name
+FROM reward_redemptions r
+JOIN family_members m ON m.household_id = r.household_id AND m.id = r.member_id
+WHERE r.household_id = $1 AND r.status = 'pending'
+ORDER BY r.requested_at ASC, r.id ASC
+`
+
+type ListPendingRewardRedemptionsRow struct {
+	ID          uuid.UUID          `json:"id"`
+	HouseholdID uuid.UUID          `json:"household_id"`
+	MemberID    uuid.UUID          `json:"member_id"`
+	RewardID    *uuid.UUID         `json:"reward_id"`
+	Description string             `json:"description"`
+	Cost        int32              `json:"cost"`
+	Status      string             `json:"status"`
+	RequestedAt pgtype.Timestamptz `json:"requested_at"`
+	DecidedAt   pgtype.Timestamptz `json:"decided_at"`
+	MemberName  string             `json:"member_name"`
+}
+
+// The household's requests waiting for approval, oldest first, each with the
+// requesting member's name.
+func (q *Queries) ListPendingRewardRedemptions(ctx context.Context, householdID uuid.UUID) ([]ListPendingRewardRedemptionsRow, error) {
+	rows, err := q.db.Query(ctx, listPendingRewardRedemptions, householdID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPendingRewardRedemptionsRow{}
+	for rows.Next() {
+		var i ListPendingRewardRedemptionsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.HouseholdID,
+			&i.MemberID,
+			&i.RewardID,
+			&i.Description,
+			&i.Cost,
+			&i.Status,
+			&i.RequestedAt,
+			&i.DecidedAt,
+			&i.MemberName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRewardLibrary = `-- name: ListRewardLibrary :many
 
 SELECT id, description, cost, created_at FROM reward_library ORDER BY cost ASC, description ASC, id ASC
 `
 
-// Household reward queries are scoped by household_id. Membership is checked
-// by the service layer first; the household_id predicate guarantees a reward
-// ID from another household can never be read or modified through this one.
-// The reward library is global and read-only: there are no write queries on
-// it. No query here touches family_members, so no reward operation can change
-// anyone's points.
+// Household reward and reward redemption queries are scoped by household_id.
+// Membership is checked by the service layer first; the household_id
+// predicate guarantees a reward or redemption ID from another household can
+// never be read or modified through this one. The reward library is global
+// and read-only: there are no write queries on it. No query here writes
+// family_members: a redemption's points move only on approval, through
+// creditPoints in the service layer.
 func (q *Queries) ListRewardLibrary(ctx context.Context) ([]RewardLibrary, error) {
 	rows, err := q.db.Query(ctx, listRewardLibrary)
 	if err != nil {
@@ -171,6 +412,66 @@ func (q *Queries) ListRewardLibrary(ctx context.Context) ([]RewardLibrary, error
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockPendingRedemption = `-- name: LockPendingRedemption :one
+SELECT id, household_id, member_id, reward_id, description, cost, status, requested_at, decided_at FROM reward_redemptions
+WHERE household_id = $1 AND id = $2 AND member_id = $3 AND status = 'pending'
+FOR UPDATE
+`
+
+type LockPendingRedemptionParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	ID          uuid.UUID `json:"id"`
+	MemberID    uuid.UUID `json:"member_id"`
+}
+
+// Locks a pending request of the member, after the caller locked the member
+// row. A request decided or cancelled meanwhile returns no row.
+func (q *Queries) LockPendingRedemption(ctx context.Context, arg LockPendingRedemptionParams) (RewardRedemption, error) {
+	row := q.db.QueryRow(ctx, lockPendingRedemption, arg.HouseholdID, arg.ID, arg.MemberID)
+	var i RewardRedemption
+	err := row.Scan(
+		&i.ID,
+		&i.HouseholdID,
+		&i.MemberID,
+		&i.RewardID,
+		&i.Description,
+		&i.Cost,
+		&i.Status,
+		&i.RequestedAt,
+		&i.DecidedAt,
+	)
+	return i, err
+}
+
+const rejectRewardRedemption = `-- name: RejectRewardRedemption :one
+UPDATE reward_redemptions
+SET status = 'rejected', decided_at = NOW()
+WHERE household_id = $1 AND id = $2 AND status = 'pending'
+RETURNING id, household_id, member_id, reward_id, description, cost, status, requested_at, decided_at
+`
+
+type RejectRewardRedemptionParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	ID          uuid.UUID `json:"id"`
+}
+
+func (q *Queries) RejectRewardRedemption(ctx context.Context, arg RejectRewardRedemptionParams) (RewardRedemption, error) {
+	row := q.db.QueryRow(ctx, rejectRewardRedemption, arg.HouseholdID, arg.ID)
+	var i RewardRedemption
+	err := row.Scan(
+		&i.ID,
+		&i.HouseholdID,
+		&i.MemberID,
+		&i.RewardID,
+		&i.Description,
+		&i.Cost,
+		&i.Status,
+		&i.RequestedAt,
+		&i.DecidedAt,
+	)
+	return i, err
 }
 
 const updateHouseholdReward = `-- name: UpdateHouseholdReward :one

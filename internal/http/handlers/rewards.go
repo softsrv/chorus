@@ -20,11 +20,19 @@ type rewardServicer interface {
 	Delete(ctx context.Context, userID, householdID, rewardID uuid.UUID, adminPin string) error
 	CopyFromLibrary(ctx context.Context, userID, householdID, libraryID uuid.UUID, adminPin string) (db.HouseholdReward, error)
 	ListLibrary(ctx context.Context) ([]db.RewardLibrary, error)
+	RequestRedemption(ctx context.Context, userID, householdID, rewardID uuid.UUID, act app.MemberAction) (db.RewardRedemption, bool, error)
+	ListMemberPending(ctx context.Context, userID, householdID, memberID uuid.UUID, memberPin, adminPin string) ([]db.RewardRedemption, error)
+	ListPending(ctx context.Context, userID, householdID uuid.UUID, adminPin string) ([]db.ListPendingRewardRedemptionsRow, error)
+	Approve(ctx context.Context, userID, householdID, redemptionID uuid.UUID, adminPin string) (db.RewardRedemption, db.FamilyMember, error)
+	Reject(ctx context.Context, userID, householdID, redemptionID uuid.UUID, adminPin string) (db.RewardRedemption, error)
 }
 
-// RewardHandler serves /api/v1/households/{householdID}/rewards and
-// /api/v1/reward-library. Writes carry the admin PIN in X-Admin-PIN. There is
-// no redeem, buy or spend action.
+// RewardHandler serves /api/v1/households/{householdID}/rewards,
+// /api/v1/households/{householdID}/reward-redemptions and
+// /api/v1/reward-library. Reward writes, the pending list, approve and reject
+// carry the admin PIN in X-Admin-PIN. A member redeems with member_id and pin
+// in the body; the request waits for the admin and moves no points until it
+// is approved.
 type RewardHandler struct {
 	svc rewardServicer
 }
@@ -162,4 +170,113 @@ func (h *RewardHandler) Library(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.JSON(w, http.StatusOK, listResponse[libraryRewardJSON]{Items: mapSlice(items, toLibraryReward)})
+}
+
+// Redeem records the acting member's request to redeem a reward:
+// {"member_id": "...", "pin": "1234"}. A new request answers 201, a reward
+// the member already has pending answers 200 with that request. A member
+// short of points is a 422 on points.
+func (h *RewardHandler) Redeem(w http.ResponseWriter, r *http.Request) {
+	hid, rid, ok := parseRewardIDs(w, r)
+	if !ok {
+		return
+	}
+	act, ok := decodeQuestAction(w, r)
+	if !ok {
+		return
+	}
+	red, created, err := h.svc.RequestRedemption(r.Context(), currentUser(r), hid, rid, act)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	respond.JSON(w, status, toRewardRedemption(red))
+}
+
+// MemberPendingRedemptions lists one member's requests waiting for approval.
+// The member's PIN travels in X-Member-PIN, or the admin's in X-Admin-PIN.
+// GET /api/v1/households/{householdID}/family-members/{memberID}/reward-redemptions/pending
+func (h *RewardHandler) MemberPendingRedemptions(w http.ResponseWriter, r *http.Request) {
+	hid, mid, ok := parseMemberIDs(w, r)
+	if !ok {
+		return
+	}
+	rows, err := h.svc.ListMemberPending(r.Context(), currentUser(r), hid, mid, r.Header.Get("X-Member-PIN"), r.Header.Get("X-Admin-PIN"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, listResponse[rewardRedemptionJSON]{Items: mapSlice(rows, toRewardRedemption)})
+}
+
+// PendingRedemptions lists the household's requests waiting for approval,
+// oldest first, each with the member's name. The admin PIN travels in
+// X-Admin-PIN. None waiting answers {"items": []}, never null.
+func (h *RewardHandler) PendingRedemptions(w http.ResponseWriter, r *http.Request) {
+	hid, ok := pathUUID(w, r, "householdID")
+	if !ok {
+		return
+	}
+	rows, err := h.svc.ListPending(r.Context(), currentUser(r), hid, r.Header.Get("X-Admin-PIN"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, listResponse[pendingRedemptionJSON]{Items: mapSlice(rows, toPendingRedemption)})
+}
+
+func parseRedemptionIDs(w http.ResponseWriter, r *http.Request) (hid, rid uuid.UUID, ok bool) {
+	if hid, ok = pathUUID(w, r, "householdID"); !ok {
+		return
+	}
+	rid, ok = pathUUID(w, r, "redemptionID")
+	return
+}
+
+// approveRedemptionResponse is the approved request and the member at the
+// new points total.
+type approveRedemptionResponse struct {
+	Redemption rewardRedemptionJSON `json:"redemption"`
+	Member     familyMemberJSON     `json:"member"`
+}
+
+// redemptionResponse wraps a rejected request.
+type redemptionResponse struct {
+	Redemption rewardRedemptionJSON `json:"redemption"`
+}
+
+// ApproveRedemption approves a pending request and takes its cost from the
+// member's points. The admin PIN travels in X-Admin-PIN; the body is empty
+// or {}. A member now short of points is a 422 on points and the request
+// stays pending.
+func (h *RewardHandler) ApproveRedemption(w http.ResponseWriter, r *http.Request) {
+	hid, rid, ok := parseRedemptionIDs(w, r)
+	if !ok || !decodeEmptyBody(w, r) {
+		return
+	}
+	red, member, err := h.svc.Approve(r.Context(), currentUser(r), hid, rid, r.Header.Get("X-Admin-PIN"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, approveRedemptionResponse{Redemption: toRewardRedemption(red), Member: toFamilyMember(member)})
+}
+
+// RejectRedemption rejects a pending request; no points move. The admin PIN
+// travels in X-Admin-PIN; the body is empty or {}.
+func (h *RewardHandler) RejectRedemption(w http.ResponseWriter, r *http.Request) {
+	hid, rid, ok := parseRedemptionIDs(w, r)
+	if !ok || !decodeEmptyBody(w, r) {
+		return
+	}
+	red, err := h.svc.Reject(r.Context(), currentUser(r), hid, rid, r.Header.Get("X-Admin-PIN"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, redemptionResponse{Redemption: toRewardRedemption(red)})
 }

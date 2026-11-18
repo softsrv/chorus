@@ -1,0 +1,45 @@
+{
+  "member": {
+    "id": "m-sam",
+    "household_id": "h1",
+    "name": "Sam",
+    "has_pin": true,
+    "points": 120
+  },
+  "members": [
+    {
+      "id": "m-sam",
+      "household_id": "h1",
+      "name": "Sam",
+      "has_pin": true,
+      "points": 120
+    }
+  ],
+  "rewards": [
+    {
+      "id": "r-movie",
+      "household_id": "h1",
+      "description": "Movie night",
+      "cost": 100,
+      "created_at": "2025-01-01T00:00:00Z",
+      "updated_at": "2025-01-01T00:00:00Z"
+    },
+    {
+      "id": "r-pizza",
+      "household_id": "h1",
+      "description": "Pizza night",
+      "cost": 150,
+      "created_at": "2025-01-01T00:00:00Z",
+      "updated_at": "2025-01-01T00:00:00Z"
+    },
+    {
+      "id": "r-screen",
+      "household_id": "h1",
+      "description": "Extra screen time",
+      "cost": 30,
+      "created_at": "2025-01-01T00:00:00Z",
+      "updated_at": "2025-01-01T00:00:00Z"
+    }
+  ],
+  "pendingRedemptions": []
+}

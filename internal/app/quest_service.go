@@ -763,6 +763,9 @@ const (
 	awardKindStreak = "streak"
 	// awardKindAdmin is an admin's manual adjustment; its points are signed.
 	awardKindAdmin = "admin"
+	// awardKindReward is an approved reward redemption; its points are
+	// always negative (the reward's cost snapshot, taken away).
+	awardKindReward = "reward"
 )
 
 // streakBonusFrom is the streak count from which an approval pays the
@@ -771,7 +774,8 @@ const streakBonusFrom = 3
 
 // creditPoints is the single path that changes a family member's points: it
 // adds the signed delta points to the member's total (negative only for an
-// admin adjustment, whose caller checks the total stays at or above 0) and
+// admin adjustment or an approved reward redemption, whose callers check the
+// total stays at or above 0) and
 // writes the points_awards history row that explains it, both on q, which
 // must be bound to the caller's
 // transaction so that the credit, its history and the caller's own writes
