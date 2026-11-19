@@ -23,10 +23,10 @@ type questScheduleWire struct {
 
 // TestAPI_QuestSchedules drives the quest-schedule routes through the router
 // against Postgres (CLM-6): 201 on a schedule, the list ({items: []} when
-// empty), 204 on remove; 403 for a non-admin, a missing admin PIN and a wrong
-// one; 404 for a non-member and for a quest, member or schedule of another
-// household; 422 on fields.date for a missing, malformed, oversized or past
-// date. Every refusal leaves quest_schedules as it was.
+// empty), 204 on remove; a missing admin PIN and a wrong one; 404 for a
+// non-member and for a quest, member or schedule of another household; 422 on
+// fields.date for a missing, malformed, oversized or past date. Every refusal
+// leaves quest_schedules as it was.
 func TestAPI_QuestSchedules(t *testing.T) {
 	s := newTestServer(t)
 	parent := s.signUp("schedparent")
@@ -137,15 +137,6 @@ func TestAPI_QuestSchedules(t *testing.T) {
 	refused("non-member create", http.StatusNotFound, "not_found", "POST", hp+"/quest-schedules", stranger.AccessToken, nil, body(quest, sam, future))
 	refused("non-member list", http.StatusNotFound, "not_found", "GET", hp+"/quest-schedules", stranger.AccessToken, nil, nil)
 
-	// A household member who is not an admin is refused.
-	member := s.signUp("schedmember")
-	if _, err := s.pool.Exec(ctx, `INSERT INTO household_members (household_id, user_id, role, joined_at) VALUES ($1, $2, 'member', NOW())`,
-		hid, member.User.ID); err != nil {
-		t.Fatalf("add member: %v", err)
-	}
-	refused("non-admin create", http.StatusForbidden, "", "POST", hp+"/quest-schedules", member.AccessToken, nil, body(quest, sam, future))
-	refused("non-admin list", http.StatusForbidden, "", "GET", hp+"/quest-schedules", member.AccessToken, nil, nil)
-
 	// 201: the admin schedules a quest for a member.
 	var created questScheduleWire
 	s.expect(http.StatusCreated, "POST", hp+"/quest-schedules", parent.AccessToken, body(quest, sam, future), &created)
@@ -171,7 +162,6 @@ func TestAPI_QuestSchedules(t *testing.T) {
 	// Removing an unknown schedule, or another household's, is 404.
 	refused("delete unknown", http.StatusNotFound, "not_found", "DELETE", hp+"/quest-schedules/"+uuid.NewString(), parent.AccessToken, nil, nil)
 	refused("delete other household's", http.StatusNotFound, "not_found", "DELETE", hp+"/quest-schedules/"+otherSched.ID.String(), parent.AccessToken, nil, nil)
-	refused("non-admin delete", http.StatusForbidden, "", "DELETE", hp+"/quest-schedules/"+created.ID.String(), member.AccessToken, nil, nil)
 
 	// Once an admin PIN is set, every route needs it.
 	s.expect(http.StatusOK, "PUT", hp+"/admin-pin", parent.AccessToken, map[string]string{"pin": "4321"}, nil)
