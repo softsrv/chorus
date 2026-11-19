@@ -43,6 +43,8 @@ Local stack (`docker-compose.yml`): the app runs in the `app` container (dev ima
 
 ## Architecture
 
+Architecture documentation is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); architecture decisions are in [docs/adr/](docs/adr/).
+
 ```
 cmd/app/main.go                 bootstrap only: config, pool, wiring, graceful shutdown
 internal/http/router.go         all routes + middleware chain + rate limits
