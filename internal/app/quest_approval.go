@@ -202,7 +202,7 @@ func (s *QuestService) Approve(ctx context.Context, userID, householdID, complet
 	}
 	// Re-read under the locks: a concurrent approval, reject or removal that
 	// committed first leaves no pending row, so this one is ErrNotFound.
-	row, err := notFoundIfNoRows(qtx.ApproveCompletion(ctx, db.ApproveCompletionParams{HouseholdID: householdID, ID: completionID, MemberID: markerID}))
+	row, err := notFoundIfNoRows(qtx.ApproveCompletion(ctx, db.ApproveCompletionParams{HouseholdID: householdID, ID: completionID, MemberID: markerID, StatusBy: userID}))
 	if err != nil {
 		return fail(err)
 	}
@@ -410,7 +410,7 @@ func (s *QuestService) Reject(ctx context.Context, userID, householdID, completi
 	}
 	// Re-read under the lock: a concurrent approval, reject or removal that
 	// committed first leaves no pending row, so this one is ErrNotFound.
-	row, err := notFoundIfNoRows(qtx.RejectCompletion(ctx, db.RejectCompletionParams{HouseholdID: householdID, ID: completionID}))
+	row, err := notFoundIfNoRows(qtx.RejectCompletion(ctx, db.RejectCompletionParams{HouseholdID: householdID, ID: completionID, StatusBy: userID}))
 	if err != nil {
 		return Completion{}, err
 	}

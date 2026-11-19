@@ -12,12 +12,26 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/softsrv/chorus/internal/app"
 	"github.com/softsrv/chorus/internal/db"
 )
 
 func num(n int64) app.NumberField { return app.NumberField{Set: true, Value: n} }
+
+// completionStatusBy reads a quest completion's stored status and status_by
+// (nil when NULL) straight from the table.
+func completionStatusBy(t *testing.T, pool *pgxpool.Pool, completionID uuid.UUID) (string, *uuid.UUID) {
+	t.Helper()
+	var status string
+	var by *uuid.UUID
+	if err := pool.QueryRow(context.Background(),
+		`SELECT status, status_by FROM quest_completions WHERE id = $1`, completionID).Scan(&status, &by); err != nil {
+		t.Fatalf("read completion status_by: %v", err)
+	}
+	return status, by
+}
 
 // TestIntegration_QuestCRUD: the administrator's quest is stored with exactly
 // the given name, points, repeat_days and notes, and List and Get return them.

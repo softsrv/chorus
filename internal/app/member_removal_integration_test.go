@@ -204,6 +204,12 @@ func TestIntegration_RemoveMemberHoldingQuests(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM quest_completions WHERE household_id = $1 AND quest_id = $2 AND status = 'cancelled'`, h.ID, pending.ID).Scan(&cancelled); err != nil || cancelled != 1 {
 		t.Errorf("cancelled completions of the removed member's quest = %d (%v), want 1", cancelled, err)
 	}
+	// The cancellation names the admin who removed the member.
+	var cancelledBy *uuid.UUID
+	if err := pool.QueryRow(ctx, `SELECT status_by FROM quest_completions WHERE household_id = $1 AND quest_id = $2 AND status = 'cancelled'`, h.ID, pending.ID).Scan(&cancelledBy); err != nil ||
+		cancelledBy == nil || *cancelledBy != admin {
+		t.Errorf("cancelled completion status_by = %v (%v), want the removing admin %v", cancelledBy, err, admin)
+	}
 	// Ben's approved completion is history and survives, untouched.
 	if got := completionStatuses(ben.ID, warmup.ID); len(got) != 1 || got[0] != "approved" {
 		t.Errorf("Ben's completions = %v, want [approved]", got)
@@ -383,7 +389,11 @@ func TestIntegration_RemoveMemberOnSharedQuests(t *testing.T) {
 
 	// Ben goes: the marker of P1 and the holder of H1.
 	remove(ben)
-	pendingItem(p1, ann, 50, 20, ann, cal)
+	handed := pendingItem(p1, ann, 50, 20, ann, cal)
+	// Handed over, not cancelled: still pending, and no status change to name.
+	if st, by := completionStatusBy(t, pool, handed.ID); st != "pending" || by != nil {
+		t.Errorf("handed-over completion: status %q status_by %v, want pending NULL", st, by)
+	}
 	pendingItem(p2, cal, 34, 20, dee, cal, ann)
 	holding(h1, &ann, ann, dee)
 	holding(h2, &dee, dee, cal)

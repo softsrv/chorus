@@ -140,6 +140,10 @@ func TestIntegration_QuestApproval(t *testing.T) {
 		t.Errorf("pending: %+v", rows)
 	}
 	compID := rows[0].ID
+	// Marking done changes no status by an admin: status_by stays NULL.
+	if st, by := completionStatusBy(t, pool, compID); st != "pending" || by != nil {
+		t.Errorf("after mark done: status %q status_by %v, want pending NULL", st, by)
+	}
 	// Once marked done, the member no longer holds it, so abandon is ErrNotFound.
 	if _, err := quests.Abandon(ctx, alice, h.ID, quest.ID, asBen); !errors.Is(err, app.ErrNotFound) {
 		t.Errorf("abandon after mark done: %v, want ErrNotFound", err)
@@ -150,6 +154,9 @@ func TestIntegration_QuestApproval(t *testing.T) {
 	rejected, err := quests.Reject(ctx, alice, h.ID, compID, "")
 	if err != nil || rejected.ID != compID || rejected.Status != "rejected" || rejected.QuestID != quest.ID {
 		t.Fatalf("reject: %+v %v", rejected, err)
+	}
+	if st, by := completionStatusBy(t, pool, compID); st != "rejected" || by == nil || *by != alice {
+		t.Errorf("after reject: status %q status_by %v, want rejected by %v", st, by, alice)
 	}
 	if p := points(ben.ID); p != 0 {
 		t.Errorf("points after reject: %d, want 0", p)
@@ -278,6 +285,9 @@ func TestIntegration_QuestApproval(t *testing.T) {
 	}
 	if wins != 1 || notFound != N-1 {
 		t.Errorf("concurrent approvals: %d won, %d not found; want 1 and %d", wins, notFound, N-1)
+	}
+	if st, by := completionStatusBy(t, pool, comp2ID); st != "approved" || by == nil || *by != alice {
+		t.Errorf("after approve: status %q status_by %v, want approved by %v", st, by, alice)
 	}
 	if p := points(ben.ID); p != 7 {
 		t.Errorf("Ben's points after approval: %d, want 7", p)
