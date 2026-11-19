@@ -183,6 +183,51 @@ func (q *Queries) ApproveCompletion(ctx context.Context, arg ApproveCompletionPa
 	return i, err
 }
 
+const assignScheduledQuest = `-- name: AssignScheduledQuest :one
+UPDATE household_quests
+SET claimed_by = $1, claimed_at = $2::timestamptz, updated_at = NOW(),
+    claim_expires_at = (
+        SELECT quest_claim_expires_at($2::timestamptz, h.timezone)
+        FROM households h WHERE h.id = household_quests.household_id
+    )
+WHERE household_quests.household_id = $3 AND household_quests.id = $4
+  AND household_quests.claimed_by IS NULL
+  AND (household_quests.available_at IS NULL OR household_quests.available_at <= $2::timestamptz)
+  AND EXISTS (
+      SELECT 1 FROM family_members m
+      JOIN households h ON h.id = m.household_id
+      WHERE m.household_id = $3 AND m.id = $1
+        AND quest_age_eligible(m.birthday, h.timezone, household_quests.min_age, household_quests.max_age)
+  )
+RETURNING household_quests.id
+`
+
+type AssignScheduledQuestParams struct {
+	MemberID    *uuid.UUID         `json:"member_id"`
+	Now         pgtype.Timestamptz `json:"now"`
+	HouseholdID uuid.UUID          `json:"household_id"`
+	ID          uuid.UUID          `json:"id"`
+}
+
+// Assigns a quest to the member a schedule names, at now (the rollover's
+// instant, or the moment a schedule for today is stored), under ClaimQuest's
+// rules: the quest is not held, not resting (available_at at or before now)
+// and the member, read only from this household, is within its age range. The
+// quest is left as Accept leaves it: claimed_by and claimed_at set,
+// claim_expires_at the household-local midnight ending the day of now. No row
+// when the quest is not free. The caller holds the household's member locks.
+func (q *Queries) AssignScheduledQuest(ctx context.Context, arg AssignScheduledQuestParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, assignScheduledQuest,
+		arg.MemberID,
+		arg.Now,
+		arg.HouseholdID,
+		arg.ID,
+	)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
 const cancelMemberPendingCompletions = `-- name: CancelMemberPendingCompletions :exec
 WITH mine AS (
     SELECT c.id, c.household_id,
@@ -386,6 +431,47 @@ type DeleteHouseholdQuestParams struct {
 
 func (q *Queries) DeleteHouseholdQuest(ctx context.Context, arg DeleteHouseholdQuestParams) (int64, error) {
 	result, err := q.db.Exec(ctx, deleteHouseholdQuest, arg.HouseholdID, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const expireHouseholdQuestClaims = `-- name: ExpireHouseholdQuestClaims :execrows
+WITH expired AS (
+    SELECT q.household_id, q.id
+    FROM household_quests q
+    WHERE q.household_id = $1
+      AND q.claimed_by IS NOT NULL AND q.claim_expires_at <= $2::timestamptz
+    ORDER BY q.id
+    FOR UPDATE OF q
+), dropped AS (
+    DELETE FROM household_quest_participants p
+    USING expired e
+    WHERE p.household_id = e.household_id AND p.quest_id = e.id
+    RETURNING p.member_id
+)
+UPDATE household_quests q
+SET claimed_by = NULL, claimed_at = NULL, done_at = NULL, claim_expires_at = NULL,
+    updated_at = NOW()
+FROM expired e
+WHERE q.household_id = e.household_id AND q.id = e.id
+`
+
+type ExpireHouseholdQuestClaimsParams struct {
+	HouseholdID uuid.UUID          `json:"household_id"`
+	Now         pgtype.Timestamptz `json:"now"`
+}
+
+// The household's part of the end-of-day rule (INT-0176), at now: every held
+// quest of the household whose claim has run out (claim_expires_at at or
+// before now) goes back to the pool exactly as ExpireQuestClaim leaves it:
+// every member on it drops it and the holder, claimed_at, done_at and
+// claim_expires_at are cleared. No completion is recorded, no points move and
+// available_at is left as it is. The caller holds the household's member
+// locks first.
+func (q *Queries) ExpireHouseholdQuestClaims(ctx context.Context, arg ExpireHouseholdQuestClaimsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, expireHouseholdQuestClaims, arg.HouseholdID, arg.Now)
 	if err != nil {
 		return 0, err
 	}

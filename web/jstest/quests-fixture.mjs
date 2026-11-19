@@ -59,6 +59,9 @@ export function routes() {
       if (typeof prop === 'string' && prop.startsWith(`GET ${HP}/family-members/`) && prop.endsWith('/reward-history')) {
         return (req) => (srv.rewardHistory ? srv.rewardHistory(req) : [200, { items: [] }]);
       }
+      if (typeof prop === 'string' && prop.startsWith(`GET ${HP}/family-members/`) && prop.endsWith('/upcoming-quests')) {
+        return (req) => (srv.upcoming ? srv.upcoming(req) : [200, { items: [] }]);
+      }
       return undefined;
     },
   });
