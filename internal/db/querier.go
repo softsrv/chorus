@@ -46,8 +46,14 @@ type Querier interface {
 	// Assigns the household's due schedules at now, under ClaimQuest's rules: the
 	// quest is not held (claimed_by IS NULL), not resting (available_at at or
 	// before now) and the member is within its age range (quest_age_eligible).
-	// Due is dated on or before local_date and after after_date (any date when
-	// NULL); schedule_id, when set, narrows it to that one schedule. Of several
+	// A one-off (repeat false) is due when dated on or before local_date and
+	// after after_date (any date when NULL): it fires on its date only. A
+	// repeated schedule is due whenever it is dated on or before local_date,
+	// whatever after_date is, and is never consumed: it assigns its quest each
+	// time the quest is free at a pass, so the quest's own cooldown (available_at,
+	// set from repeat_days when it is marked done) is its cadence and the
+	// schedule stores no interval. schedule_id, when set, narrows it to that one
+	// schedule. Of several
 	// schedules of one quest the earliest eligible one wins. The quest is left as
 	// Accept leaves it: claimed_by and claimed_at set, claim_expires_at the local
 	// midnight ending the day of now. Returns the quests assigned.
@@ -104,7 +110,7 @@ type Querier interface {
 	// on that side.
 	CreateHouseholdQuest(ctx context.Context, arg CreateHouseholdQuestParams) (HouseholdQuest, error)
 	CreateHouseholdReward(ctx context.Context, arg CreateHouseholdRewardParams) (HouseholdReward, error)
-	// Scheduled quests: the admin's one-off schedules and the per-household
+	// Scheduled quests: the admin's one-off and repeated schedules and the per-household
 	// rollover that assigns them at the household's local midnight. Every
 	// statement that reads or writes a household's rows is keyed by its
 	// household_id.
@@ -128,7 +134,8 @@ type Querier interface {
 	// schedule_id): those assigned and those skipped because the quest was held
 	// or resting. A schedule skipped because the member is outside the quest's
 	// age range is kept for the admin to see; it is never due again, since its
-	// date is now at or before the household's last rollover date.
+	// date is now at or before the household's last rollover date. A repeated
+	// schedule is never deleted here: it stays until the admin removes it.
 	DeleteFinishedSchedules(ctx context.Context, arg DeleteFinishedSchedulesParams) (int64, error)
 	// Returns the deleted row so its token can be revoked at Google afterwards.
 	DeleteGoogleCalendarConnectionByUser(ctx context.Context, userID uuid.UUID) (GoogleCalendarConnection, error)
@@ -264,10 +271,13 @@ type Querier interface {
 	ListHouseholdQuests(ctx context.Context, arg ListHouseholdQuestsParams) ([]ListHouseholdQuestsRow, error)
 	ListHouseholdRewards(ctx context.Context, householdID uuid.UUID) ([]HouseholdReward, error)
 	// Households, after after_id in id order and at most max_rows, that have a
-	// schedule still due at now: dated on or before the household's local date
-	// at now (households.timezone) and after its last rollover date (any date,
-	// when it has never rolled over). A household with nothing due is left to
-	// the expiry sweep alone.
+	// schedule still due at now, judged at the household's local date at now
+	// (households.timezone): a one-off dated on or before that date and after
+	// its last rollover date (any date, when it has never rolled over), or a
+	// repeated schedule dated on or before that date while the household has
+	// not yet rolled over to it. A repeated schedule is judged at every local
+	// midnight, so its household is due once each local day. A household with
+	// nothing due is left to the expiry sweep alone.
 	ListHouseholdsDueForRollover(ctx context.Context, arg ListHouseholdsDueForRolloverParams) ([]uuid.UUID, error)
 	ListHouseholdsForUser(ctx context.Context, userID uuid.UUID) ([]ListHouseholdsForUserRow, error)
 	// For each of the given quests of the household, the household's members
