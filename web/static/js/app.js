@@ -212,6 +212,12 @@ function toast(message, kind = 'info') {
 
 const fmtDate = (iso) => new Date(iso).toLocaleString();
 
+const fmtDay = (ymd) => {
+  if (!ymd) return '';
+  const [y, m, d] = ymd.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }).replace(',', '');
+};
+
 // ── API log panel ─────────────────────────────────────────────────────────────
 
 const SECRET_KEYS = /password|token|^code$/i;
@@ -939,6 +945,24 @@ async function takeCard(h, quests, members, rerender, member = activeMember) {
   const rewardHistory = result.rewards.items;
   const rewardHistoryError = result.rewards.error;
 
+  const upcoming = await api('GET', `/households/${h.id}/family-members/${member.id}/upcoming-quests`).then(
+    (res) => ({ items: res?.items || [], error: null }),
+    (err) => {
+      console.error('upcoming quests', err);
+      return { items: [], error: 'Could not load upcoming quests. Reload to try again.' };
+    },
+  );
+  if (activeMember !== member) return null;
+
+  const upcomingBody = upcoming.error
+    ? alertBox('error', upcoming.error)
+    : (upcoming.items.length === 0
+      ? el('p', { class: 'text-xs opacity-60', text: 'You have no upcoming quests.' })
+      : el('ul', {}, upcoming.items.map((i) => el('li', { class: 'flex items-center gap-2' },
+          el('span', { text: `${fmtDay(i.next_date)} — ${i.quest_name}` }),
+          i.repeat && el('span', { class: 'badge badge-sm', text: 'repeats' }),
+        ))));
+
   const act = (verb, q) => action(async () => {
     if (activeMember !== member) return; // this card is stale: never send another member's identity for its quests
     const body = activeMemberAction();
@@ -1067,6 +1091,10 @@ async function takeCard(h, quests, members, rerender, member = activeMember) {
       el('button', { class: 'btn btn-ghost btn-xs', text: 'Abandon', onclick: act('abandon', q) }),
     ), 'You have no quests yet.'),
     $share,
+    el('div', { class: 'space-y-1' },
+      el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Upcoming' }),
+      upcomingBody,
+    ),
     section('Claimed', parts.claimed,
       (q) => row(q, el('span', { class: 'text-xs opacity-70', text: `Taken by ${nameOf[q.claimed_by] || 'a former member'}` }),
         waitingBadge(q)),
