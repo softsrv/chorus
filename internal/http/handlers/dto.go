@@ -201,6 +201,30 @@ func toQuest(v app.QuestView) questJSON {
 	}
 }
 
+// questScheduleJSON is one scheduled quest; start_date is the
+// household-local date it is assigned on, YYYY-MM-DD.
+type questScheduleJSON struct {
+	ID         uuid.UUID `json:"id"`
+	QuestID    uuid.UUID `json:"quest_id"`
+	QuestName  string    `json:"quest_name"`
+	MemberID   uuid.UUID `json:"member_id"`
+	MemberName string    `json:"member_name"`
+	StartDate  string    `json:"start_date"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+func toQuestSchedule(s app.QuestSchedule) questScheduleJSON {
+	return questScheduleJSON{
+		ID:         s.ID,
+		QuestID:    s.QuestID,
+		QuestName:  s.QuestName,
+		MemberID:   s.MemberID,
+		MemberName: s.MemberName,
+		StartDate:  s.StartDate,
+		CreatedAt:  s.CreatedAt.UTC(),
+	}
+}
+
 // int4Ptr is nil for a NULL column, so it marshals as null.
 func int4Ptr(n pgtype.Int4) *int32 {
 	if !n.Valid {
