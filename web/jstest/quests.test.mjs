@@ -1,5 +1,5 @@
 // Unit tests for the Quests tab's take-quest and approval flows (CLM-1..12).
-// Run: node --test web/jstest/
+// Run: node --test web/jstest/quests.test.mjs (whole suite: make test-js)
 //
 // app.js and api.js run as shipped against a minimal DOM; only the server
 // (fetch) is a stub, answering with the JSON shapes internal/http/handlers

@@ -18,7 +18,7 @@ make test-system      # Migrates chorus_test, builds the stylesheet (make tailwi
 make test-system-image # Runs system tests against the built Docker image (Linux-only: host networking)
 make boundaries       # Boundary check (internal/archtest)
 make secret-scan      # Pinned gitleaks full-history scan (--redact) against .gitleaks.toml
-make check            # boundaries + fmt-check + sqlc-check + mod-verify + vet + unit + JS (web JS unit) + integration + system tests (test-system) + govulncheck + secret-scan (what CI runs)
+make check            # boundaries + fmt-check + sqlc-check + mod-verify + vet + unit + JS (web JS unit) + integration + system tests (test-system) + govulncheck + secret-scan (what CI's `ci` job runs)
 make vet / fmt / lint
 make fmt-check | sqlc-check | mod-verify
 
