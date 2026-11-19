@@ -202,6 +202,31 @@ test('CLM-4: Abandon and Mark done only on own quests; Mine row has no badge', a
   assert.doesNotMatch(rowOf('Own quest').textContent, /Waiting for approval/);
 });
 
+test('CLM-14: a held quest shows its claim_expires_at as due-by text; an expired (available) quest is under Available, not Mine', async () => {
+  const due = '2030-06-15T05:00:00Z';
+  srv.quests = [
+    quest({ id: 'q1', name: 'Own quest', available: false, claimed_by: 'm-a', claim_expires_at: due }),
+    quest({ id: 'q2', name: 'Expired quest', available: true, claimed_by: null, claim_expires_at: null }),
+    quest({ id: 'q3', name: 'Bens quest', available: false, claimed_by: 'm-b', claim_expires_at: due }),
+  ];
+  await loadApp();
+  await becomeAnn();
+  const rowOf = (name) => walk(env.$app).find((n) => n.tagName === 'LI' && n.textContent.startsWith(name));
+  assert.ok(rowOf('Own quest').textContent.includes(`Due by ${new Date(due).toLocaleString()}`));
+  assert.match(section(env.$app, 'Available'), /Expired quest/);
+  assert.doesNotMatch(section(env.$app, 'Mine'), /Expired quest/);
+  assert.doesNotMatch(rowOf('Expired quest').textContent, /Due by/);
+  assert.doesNotMatch(rowOf('Bens quest').textContent, /Due by/);
+});
+
+test('CLM-14: due-by text is a text node, never interpreted as HTML', async () => {
+  srv.quests = [quest({ id: 'q1', name: 'Own quest', available: false, claimed_by: 'm-a', claim_expires_at: '<img src=x onerror=1>' })];
+  await loadApp();
+  await becomeAnn();
+  const own = walk(env.$app).find((n) => n.tagName === 'LI' && n.textContent.startsWith('Own quest'));
+  assert.equal(walk(own).filter((n) => n.tagName === 'IMG').length, 0);
+});
+
 test('abandon CLM-2: a 404 on Abandon shows exactly Quest not found.; a wrong PIN shows the PIN error; neither uses another give-up word', async () => {
   const otherWords = /cancel|give up|drop|quit|withdraw|release|put back/i;
   const alerts = (root) => walk(root).filter((n) => n.getAttribute?.('role') === 'alert' || /\balert\b/.test(n.className || '')).map((n) => n.textContent);
