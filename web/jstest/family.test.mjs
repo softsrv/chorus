@@ -14,6 +14,8 @@ import * as withHistory from './fixtures/family-member-history.fixture.mjs';
 import * as noHistory from './fixtures/family-member-no-history.fixture.mjs';
 import * as adminAdjustment from './fixtures/family-member-admin-adjustment.fixture.mjs';
 import * as overRemoval from './fixtures/family-member-over-removal.fixture.mjs';
+import { upcomingTwoItems } from './fixtures/member-upcoming.fixture.mjs';
+import { upcoming as upcomingNone } from './fixtures/member-upcoming-empty.fixture.mjs';
 
 const H = 'h1';
 const HP = `/households/${H}`;
@@ -48,6 +50,7 @@ function routes() {
   for (const m of srv.members) {
     r[`GET ${HP}/family-members/${m.id}/points-history`] = (q) => srv.history(q, m);
     r[`GET ${HP}/family-members/${m.id}/reward-history`] = (q) => srv.rewardHistory(q, m);
+    r[`GET ${HP}/family-members/${m.id}/upcoming-quests`] = (q) => srv.upcoming(q, m);
     r[`POST ${HP}/family-members/${m.id}/points-adjustments`] = (q) => srv.adjust(q, m);
     r[`POST ${HP}/family-members/${m.id}/verify`] = (q) => ((q.body.pin || '') === '' && !m.has_pin ? [204, null] : err(403, 'wrong_pin'));
   }
@@ -63,6 +66,7 @@ beforeEach(() => {
     members: withHistory.members,
     history: (_, m) => [200, { items: srv.fixture.pointsHistory[m.id] }],
     rewardHistory: () => [200, { items: [] }],
+    upcoming: () => [200, { items: [] }],
     adjust: () => err(500, 'unexpected', 'no adjust stub'),
     fixture: withHistory,
     // Scheduled quests: the household's quests for the Quest select, and the
@@ -107,8 +111,8 @@ test('admin points history CLM-1: History opens the member view with heading, Ba
   assert.ok(historyNode, 'Points history section exists');
   // Heading, then Back, then scheduling, then the points history, then the reward history.
   const order = walk(env.$app).filter((n) => (n.tagName === 'H3' && n.textContent.includes('points')) || n.tagName === 'H4' || n === back[0]);
-  assert.deepEqual(order.map((n) => n.tagName), ['H3', 'BUTTON', 'H4', 'H4', 'H4', 'H4']);
-  assert.deepEqual(order.slice(2).map((n) => n.textContent), ['Schedule a quest', 'Scheduled', 'Points history', 'Reward history']);
+  assert.deepEqual(order.map((n) => n.tagName), ['H3', 'BUTTON', 'H4', 'H4', 'H4', 'H4', 'H4']);
+  assert.deepEqual(order.slice(2).map((n) => n.textContent), ['Schedule a quest', 'Scheduled', 'Upcoming', 'Points history', 'Reward history']);
 
   const ths = walk(historyNode).filter((n) => n.tagName === 'TH').map((n) => n.textContent);
   assert.deepEqual(ths, ['Date', 'Points', 'Reason']);
@@ -346,7 +350,7 @@ test('admin points CLM-4: the member view has the heading, Back above the adjust
   assert.deepEqual(h3s(), ['Maya — 42 points']);
   const back = buttons(env.$app, 'Back to family')[0];
   const order = walk(env.$app).filter((n) => n === back || n.tagName === 'LEGEND' || n.tagName === 'H4');
-  assert.deepEqual(order.map((n) => n.textContent), ['Back to family', 'Adjust points', 'Schedule a quest', 'Scheduled', 'Points history', 'Reward history']);
+  assert.deepEqual(order.map((n) => n.textContent), ['Back to family', 'Adjust points', 'Schedule a quest', 'Scheduled', 'Upcoming', 'Points history', 'Reward history']);
   await click(back);
   assert.deepEqual(h3s(), ['Family']);
   assert.equal(adjustForm(), undefined, 'no adjust form on the family list');
@@ -610,4 +614,64 @@ test('scheduled quests CLM-7: a wrong_pin on Remove locks the tab again', async 
   await click(remove);
   await click(remove);
   assert.match(text(), /Enter the admin PIN to manage the family\./);
+});
+
+// ── Upcoming on the admin's member view (INT-0177 CLM-9, CLM-10) ────────────
+
+const upcomingNode = () => sectionNode(env.$app, 'Upcoming');
+const upcomingItemsText = () => walk(upcomingNode()).filter((n) => n.tagName === 'LI').map((n) => n.textContent);
+
+test('scheduled quests CLM-9: the member view reads upcoming-quests and lists them soonest first as "Ddd D Mon — name", repeats on repeated ones', async () => {
+  srv.upcoming = (_, m) => [200, { items: upcomingTwoItems.map((u) => ({ ...u, member_id: m.id })) }];
+  await loadApp();
+  await openFamily();
+  await click(buttons(env.$app, 'History')[0]);
+  const reads = calls.filter((c) => c.method === 'GET' && c.path === `${HP}/family-members/${srv.members[0].id}/upcoming-quests`);
+  assert.equal(reads.length, 1, 'one upcoming read per open');
+  assert.deepEqual(upcomingItemsText(), ['Thu 21 Nov — Clean your room', 'Fri 22 Nov — Feed the catrepeats']);
+  const badges = walk(upcomingNode()).filter((n) => n.className === 'badge badge-sm');
+  assert.deepEqual(badges.map((n) => n.textContent), ['repeats']);
+  // Beside the schedule controls: after Scheduled, before the histories.
+  const order = walk(env.$app).filter((n) => n.tagName === 'H4').map((n) => n.textContent);
+  assert.equal(order.indexOf('Upcoming'), order.indexOf('Scheduled') + 1, order.join(','));
+});
+
+test('scheduled quests CLM-9: with nothing upcoming the section says "No upcoming quests."', async () => {
+  srv.upcoming = () => [200, { items: upcomingNone }];
+  await loadApp();
+  await openFamily();
+  await click(buttons(env.$app, 'History')[0]);
+  assert.equal(upcomingNode().textContent, 'UpcomingNo upcoming quests.');
+  assert.equal(walk(upcomingNode()).filter((n) => n.tagName === 'LI').length, 0);
+});
+
+test('scheduled quests CLM-9: a failed upcoming read shows an inline error in Upcoming only; the other sections render', async () => {
+  srv.upcoming = () => err(500, 'internal', 'boom');
+  await loadApp();
+  await openFamily();
+  await click(buttons(env.$app, 'History')[0]);
+  const node = upcomingNode();
+  assert.ok(walk(node).some((n) => n.attributes.role === 'alert'), 'inline error');
+  assert.match(node.textContent, /Could not load upcoming quests\. Reload to try again\./);
+  for (const title of ['Scheduled', 'Points history', 'Reward history']) {
+    assert.doesNotMatch(sectionNode(env.$app, title).textContent, /Could not load/, title);
+  }
+  assert.match(sectionNode(env.$app, 'Scheduled').textContent, /No quests are scheduled\./);
+  assert.match(sectionNode(env.$app, 'Points history').textContent, /Feed the cat/);
+  assert.deepEqual(h3s(), ['Maya — 42 points']);
+});
+
+test('scheduled quests CLM-10: a quest named as markup shows as literal text in the admin Upcoming list and creates no element or style', async () => {
+  const markup = '<img src=x onerror=alert(1)>';
+  srv.upcoming = () => [200, { items: [{ ...upcomingTwoItems[1], quest_name: markup }] }];
+  await loadApp();
+  await openFamily();
+  await click(buttons(env.$app, 'History')[0]);
+  const node = upcomingNode();
+  assert.ok(node.textContent.includes(`Fri 22 Nov — ${markup}`), node.textContent);
+  for (const n of walk(node)) {
+    assert.notEqual(n.tagName, 'IMG', 'no img element');
+    assert.equal(n.attributes?.style, undefined, 'no style attribute');
+    assert.equal(n.attributes?.onerror, undefined, 'no handler attribute');
+  }
 });

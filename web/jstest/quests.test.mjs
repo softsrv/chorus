@@ -2236,3 +2236,17 @@ test('INT-0177 CLM-8: a failed upcoming read shows an error inside Upcoming only
   assert.equal(sessionStorage.getItem(REFRESH_KEY), 'rt');
   assert.equal(signedOut, 0);
 });
+
+test('INT-0177 CLM-10: a quest named as markup shows as literal text in the member\'s Upcoming and creates no element or style', async () => {
+  const markup = '<img src=x onerror=alert(1)>';
+  srv.upcoming = () => [200, { items: [{ ...upcomingTwoItems[1], quest_name: markup }] }];
+  await loadApp();
+  await becomeAnn();
+  const node = sectionNode(env.$app, 'Upcoming');
+  assert.ok(node.textContent.includes(`Fri 22 Nov — ${markup}`), node.textContent);
+  for (const n of walk(node)) {
+    assert.notEqual(n.tagName, 'IMG', 'no img element');
+    assert.equal(n.attributes?.style, undefined, 'no style attribute');
+    assert.equal(n.attributes?.onerror, undefined, 'no handler attribute');
+  }
+});
