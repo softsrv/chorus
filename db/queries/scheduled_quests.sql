@@ -9,15 +9,15 @@
 -- quest or member of another household (or none) matches no row and nothing
 -- is written. Returns the schedule with the quest's and member's names.
 WITH ins AS (
-    INSERT INTO quest_schedules (id, household_id, quest_id, member_id, start_date)
-    SELECT sqlc.arg(id)::uuid, q.household_id, q.id, m.id, sqlc.arg(start_date)::date
+    INSERT INTO quest_schedules (id, household_id, quest_id, member_id, start_date, repeat)
+    SELECT sqlc.arg(id)::uuid, q.household_id, q.id, m.id, sqlc.arg(start_date)::date, sqlc.arg(repeat)::boolean
     FROM household_quests q
     JOIN family_members m ON m.household_id = q.household_id
     WHERE q.household_id = sqlc.arg(household_id)::uuid AND q.id = sqlc.arg(quest_id)::uuid
       AND m.id = sqlc.arg(member_id)::uuid
-    RETURNING id, household_id, quest_id, member_id, start_date, created_at
+    RETURNING id, household_id, quest_id, member_id, start_date, repeat, created_at
 )
-SELECT ins.id, ins.household_id, ins.quest_id, ins.member_id, ins.start_date, ins.created_at,
+SELECT ins.id, ins.household_id, ins.quest_id, ins.member_id, ins.start_date, ins.repeat, ins.created_at,
        q.name AS quest_name, m.name AS member_name
 FROM ins
 JOIN household_quests q ON q.household_id = ins.household_id AND q.id = ins.quest_id
@@ -26,7 +26,7 @@ JOIN family_members m ON m.household_id = ins.household_id AND m.id = ins.member
 -- name: ListQuestSchedules :many
 -- The household's schedules, soonest date first, with the quest's and
 -- member's names.
-SELECT s.id, s.household_id, s.quest_id, s.member_id, s.start_date, s.created_at,
+SELECT s.id, s.household_id, s.quest_id, s.member_id, s.start_date, s.repeat, s.created_at,
        q.name AS quest_name, m.name AS member_name
 FROM quest_schedules s
 JOIN household_quests q ON q.household_id = s.household_id AND q.id = s.quest_id
@@ -148,7 +148,7 @@ SET last_rollover_date = GREATEST(household_quest_rollovers.last_rollover_date, 
 
 -- name: ListMemberUpcomingSchedules :many
 -- The member's schedules with quest details, filtered by household_id and member_id.
-SELECT s.id, s.household_id, s.quest_id, s.member_id, s.start_date, s.created_at,
+SELECT s.id, s.household_id, s.quest_id, s.member_id, s.start_date, s.repeat, s.created_at,
        q.name AS quest_name, q.available_at
 FROM quest_schedules s
 JOIN household_quests q ON q.household_id = s.household_id AND q.id = s.quest_id

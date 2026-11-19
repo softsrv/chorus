@@ -13,6 +13,7 @@ CREATE TABLE quest_schedules (
     quest_id     UUID        NOT NULL,
     member_id    UUID        NOT NULL,
     start_date   DATE        NOT NULL,
+    repeat       BOOLEAN     NOT NULL DEFAULT false,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     FOREIGN KEY (household_id, quest_id)
         REFERENCES household_quests (household_id, id)

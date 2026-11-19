@@ -91,15 +91,15 @@ func (q *Queries) AssignDueSchedules(ctx context.Context, arg AssignDueSchedules
 const createQuestSchedule = `-- name: CreateQuestSchedule :one
 
 WITH ins AS (
-    INSERT INTO quest_schedules (id, household_id, quest_id, member_id, start_date)
-    SELECT $1::uuid, q.household_id, q.id, m.id, $2::date
+    INSERT INTO quest_schedules (id, household_id, quest_id, member_id, start_date, repeat)
+    SELECT $1::uuid, q.household_id, q.id, m.id, $2::date, $3::boolean
     FROM household_quests q
     JOIN family_members m ON m.household_id = q.household_id
-    WHERE q.household_id = $3::uuid AND q.id = $4::uuid
-      AND m.id = $5::uuid
-    RETURNING id, household_id, quest_id, member_id, start_date, created_at
+    WHERE q.household_id = $4::uuid AND q.id = $5::uuid
+      AND m.id = $6::uuid
+    RETURNING id, household_id, quest_id, member_id, start_date, repeat, created_at
 )
-SELECT ins.id, ins.household_id, ins.quest_id, ins.member_id, ins.start_date, ins.created_at,
+SELECT ins.id, ins.household_id, ins.quest_id, ins.member_id, ins.start_date, ins.repeat, ins.created_at,
        q.name AS quest_name, m.name AS member_name
 FROM ins
 JOIN household_quests q ON q.household_id = ins.household_id AND q.id = ins.quest_id
@@ -109,6 +109,7 @@ JOIN family_members m ON m.household_id = ins.household_id AND m.id = ins.member
 type CreateQuestScheduleParams struct {
 	ID          uuid.UUID   `json:"id"`
 	StartDate   pgtype.Date `json:"start_date"`
+	Repeat      bool        `json:"repeat"`
 	HouseholdID uuid.UUID   `json:"household_id"`
 	QuestID     uuid.UUID   `json:"quest_id"`
 	MemberID    uuid.UUID   `json:"member_id"`
@@ -120,6 +121,7 @@ type CreateQuestScheduleRow struct {
 	QuestID     uuid.UUID          `json:"quest_id"`
 	MemberID    uuid.UUID          `json:"member_id"`
 	StartDate   pgtype.Date        `json:"start_date"`
+	Repeat      bool               `json:"repeat"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	QuestName   string             `json:"quest_name"`
 	MemberName  string             `json:"member_name"`
@@ -137,6 +139,7 @@ func (q *Queries) CreateQuestSchedule(ctx context.Context, arg CreateQuestSchedu
 	row := q.db.QueryRow(ctx, createQuestSchedule,
 		arg.ID,
 		arg.StartDate,
+		arg.Repeat,
 		arg.HouseholdID,
 		arg.QuestID,
 		arg.MemberID,
@@ -148,6 +151,7 @@ func (q *Queries) CreateQuestSchedule(ctx context.Context, arg CreateQuestSchedu
 		&i.QuestID,
 		&i.MemberID,
 		&i.StartDate,
+		&i.Repeat,
 		&i.CreatedAt,
 		&i.QuestName,
 		&i.MemberName,
@@ -287,7 +291,7 @@ func (q *Queries) ListHouseholdsDueForRollover(ctx context.Context, arg ListHous
 }
 
 const listMemberUpcomingSchedules = `-- name: ListMemberUpcomingSchedules :many
-SELECT s.id, s.household_id, s.quest_id, s.member_id, s.start_date, s.created_at,
+SELECT s.id, s.household_id, s.quest_id, s.member_id, s.start_date, s.repeat, s.created_at,
        q.name AS quest_name, q.available_at
 FROM quest_schedules s
 JOIN household_quests q ON q.household_id = s.household_id AND q.id = s.quest_id
@@ -307,6 +311,7 @@ type ListMemberUpcomingSchedulesRow struct {
 	QuestID     uuid.UUID          `json:"quest_id"`
 	MemberID    uuid.UUID          `json:"member_id"`
 	StartDate   pgtype.Date        `json:"start_date"`
+	Repeat      bool               `json:"repeat"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	QuestName   string             `json:"quest_name"`
 	AvailableAt pgtype.Timestamptz `json:"available_at"`
@@ -328,6 +333,7 @@ func (q *Queries) ListMemberUpcomingSchedules(ctx context.Context, arg ListMembe
 			&i.QuestID,
 			&i.MemberID,
 			&i.StartDate,
+			&i.Repeat,
 			&i.CreatedAt,
 			&i.QuestName,
 			&i.AvailableAt,
@@ -343,7 +349,7 @@ func (q *Queries) ListMemberUpcomingSchedules(ctx context.Context, arg ListMembe
 }
 
 const listQuestSchedules = `-- name: ListQuestSchedules :many
-SELECT s.id, s.household_id, s.quest_id, s.member_id, s.start_date, s.created_at,
+SELECT s.id, s.household_id, s.quest_id, s.member_id, s.start_date, s.repeat, s.created_at,
        q.name AS quest_name, m.name AS member_name
 FROM quest_schedules s
 JOIN household_quests q ON q.household_id = s.household_id AND q.id = s.quest_id
@@ -358,6 +364,7 @@ type ListQuestSchedulesRow struct {
 	QuestID     uuid.UUID          `json:"quest_id"`
 	MemberID    uuid.UUID          `json:"member_id"`
 	StartDate   pgtype.Date        `json:"start_date"`
+	Repeat      bool               `json:"repeat"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	QuestName   string             `json:"quest_name"`
 	MemberName  string             `json:"member_name"`
@@ -380,6 +387,7 @@ func (q *Queries) ListQuestSchedules(ctx context.Context, householdID uuid.UUID)
 			&i.QuestID,
 			&i.MemberID,
 			&i.StartDate,
+			&i.Repeat,
 			&i.CreatedAt,
 			&i.QuestName,
 			&i.MemberName,

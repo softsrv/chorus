@@ -165,4 +165,23 @@ func TestIntegration_QuestSchedulesMigration(t *testing.T) {
 			t.Errorf("%s missing after re-up", table)
 		}
 	}
+
+	// Repeat column exists with default false.
+	var repeatDefault, repeatNullable, repeatType string
+	if err := tx.QueryRow(ctx, `
+		SELECT column_default, is_nullable, data_type
+		FROM information_schema.columns
+		WHERE table_name = 'quest_schedules' AND column_name = 'repeat'
+	`).Scan(&repeatDefault, &repeatNullable, &repeatType); err != nil {
+		t.Fatalf("query repeat column: %v", err)
+	}
+	if repeatType != "boolean" {
+		t.Errorf("repeat data_type = %q, want boolean", repeatType)
+	}
+	if repeatNullable != "NO" {
+		t.Errorf("repeat is_nullable = %q, want NO", repeatNullable)
+	}
+	if repeatDefault != "false" {
+		t.Errorf("repeat column_default = %q, want false", repeatDefault)
+	}
 }
