@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -101,7 +100,6 @@ func main() {
 		googleCalendar = app.NewGoogleCalendar(queries, cipher, app.GoogleCalendarConfig{
 			ClientID:     cfg.Google.ClientID,
 			ClientSecret: cfg.Google.ClientSecret,
-			RedirectURL:  strings.TrimRight(cfg.AppBaseURL, "/") + "/api/v1/me/google-calendar/callback",
 		})
 	} else if cfg.Google.Enabled && cfg.Google.TokenKey == "" {
 		slog.Warn("Google Calendar is disabled: GOOGLE_TOKEN_KEY is not set")

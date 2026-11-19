@@ -20,12 +20,9 @@ import (
 	"github.com/softsrv/chorus/internal/users"
 )
 
-// Google's public endpoints. GoogleCalendar can override each so tests can
-// point it at a fake.
-const (
-	googleAuthURL  = "https://accounts.google.com/o/oauth2/v2/auth"
-	googleTokenURL = "https://oauth2.googleapis.com/token"
-)
+// googleTokenURL is Google's public token endpoint. GoogleCalendar can
+// override it so tests can point it at a fake.
+const googleTokenURL = "https://oauth2.googleapis.com/token"
 
 const googleHTTPTimeout = 10 * time.Second
 

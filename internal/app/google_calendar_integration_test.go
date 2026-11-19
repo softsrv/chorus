@@ -16,8 +16,7 @@ import (
 	"github.com/softsrv/chorus/internal/db"
 )
 
-// seedCalendarData stores a calendar connection and a pending calendar state
-// for userID.
+// seedCalendarData stores a calendar connection for userID.
 func seedCalendarData(t *testing.T, pool *pgxpool.Pool, userID uuid.UUID) {
 	t.Helper()
 	ctx := context.Background()
@@ -34,26 +33,17 @@ func seedCalendarData(t *testing.T, pool *pgxpool.Pool, userID uuid.UUID) {
 	}); err != nil {
 		t.Fatalf("seed connection: %v", err)
 	}
-	uid := userID
-	if _, err := q.InsertOAuthState(ctx, db.InsertOAuthStateParams{
-		ID: uuid.Must(uuid.NewV7()), StateHash: auth.HashToken("state-" + uuid.NewString()),
-		Purpose: "calendar", UserID: &uid, PkceVerifier: "verifier",
-		ExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(10 * time.Minute), Valid: true},
-	}); err != nil {
-		t.Fatalf("seed state: %v", err)
-	}
-	if n := calendarRows(t, pool, userID); n != 2 {
-		t.Fatalf("seeded rows = %d, want 2", n)
+	if n := calendarRows(t, pool, userID); n != 1 {
+		t.Fatalf("seeded rows = %d, want 1", n)
 	}
 }
 
-// calendarRows counts userID's connection and calendar state rows.
+// calendarRows counts userID's connection rows.
 func calendarRows(t *testing.T, pool *pgxpool.Pool, userID uuid.UUID) int {
 	t.Helper()
 	var n int
 	if err := pool.QueryRow(context.Background(), `SELECT
-		(SELECT COUNT(*) FROM google_calendar_connections WHERE user_id = $1) +
-		(SELECT COUNT(*) FROM oauth_states WHERE user_id = $1 AND purpose = 'calendar')`, userID).Scan(&n); err != nil {
+		(SELECT COUNT(*) FROM google_calendar_connections WHERE user_id = $1)`, userID).Scan(&n); err != nil {
 		t.Fatalf("count calendar rows: %v", err)
 	}
 	return n

@@ -107,6 +107,8 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, app.ErrGoogleUnavailable):
 		w.Header().Set("Retry-After", "30")
 		respond.Error(w, http.StatusServiceUnavailable, "google_unavailable", "Google Calendar is temporarily unavailable. Try again shortly.")
+	case errors.Is(err, app.ErrGoogleCalendarFailed):
+		respond.Error(w, http.StatusBadRequest, "google_calendar_failed", "Google Calendar connection failed. Try again.")
 	case errors.Is(err, app.ErrEntryGone):
 		respond.Error(w, http.StatusNotFound, "entry_gone", "This calendar entry no longer exists.")
 	case errors.Is(err, app.ErrEntryNotEditable):
