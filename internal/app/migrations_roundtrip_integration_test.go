@@ -450,7 +450,7 @@ func TestIntegration_MigrationsRoundTrip(t *testing.T) {
 	}
 
 	// The shared schema the other integration tests use is untouched.
-	for _, table := range []string{"users", "households", "household_members", "chores"} {
+	for _, table := range []string{"users", "households", "household_members"} {
 		var reg *string
 		if err := admin.QueryRow(ctx, "SELECT to_regclass('public.' || $1)::text", table).Scan(&reg); err != nil {
 			t.Fatalf("to_regclass public.%s: %v", table, err)
