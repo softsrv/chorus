@@ -258,6 +258,11 @@ func TestIntegration_QuestSchedules(t *testing.T) {
 		if len(up) != 1 || up[0].ID != roomS.ID {
 			t.Errorf("Upcoming after rollover = %+v, want only Clean your room (the assigned one-off gone)", up)
 		}
+		// Leave nothing due behind: the test database is shared, and a later
+		// subtest's rollover counts every due household.
+		if err := w.schedules.Cancel(w.ctx, w.admin, w.h, roomS.ID, w.pin); err != nil {
+			t.Fatalf("cancel leftover schedule: %v", err)
+		}
 	})
 
 	t.Run("expiry_runs_before_assignment", func(t *testing.T) {
@@ -642,6 +647,11 @@ func TestIntegration_QuestScheduleUpcoming(t *testing.T) {
 	}
 	if len(up) != 1 || up[0].ID != laundryS.ID {
 		t.Errorf("Upcoming after rollover = %+v, want only Laundry", up)
+	}
+	// Leave nothing due behind: the test database is shared, and another
+	// test's rollover counts every due household.
+	if err := w.schedules.Cancel(w.ctx, w.admin, w.h, laundryS.ID, w.pin); err != nil {
+		t.Fatalf("cancel leftover schedule: %v", err)
 	}
 
 	if _, err := w.schedules.Upcoming(w.ctx, w.admin, w.h, uuid.New()); !errors.Is(err, app.ErrNotFound) {
