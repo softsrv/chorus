@@ -43,3 +43,7 @@ Each migration ships a `.down.sql` restoring the schema before it. `TestIntegrat
 ## CI and images
 
 GitHub Actions (`.github/workflows/ci.yml`) runs the full test suite and system tests (job `ci`) against Postgres on pushes to `main` and on every pull request before any image build or push. CI runs gitleaks via `make secret-scan` and `.gitleaks.toml` holds the dev/test allowlist. Fixtures and config must use obviously fake values or be added to `.gitleaks.toml` on purpose. Both image jobs (PR build-only and `main` build-push) run the system tests against the built image beside Postgres and a capture SMTP server. Passing merges to `main` push the tested image (`trriplejay/chorus:latest` and `trriplejay/chorus:sha-<commit>`) to Docker Hub only after they pass. The repo needs the secrets `DOCKER_USERNAME` and `DOCKER_PASSWORD` (a Docker Hub access token).
+
+## Review
+
+`.github/CODEOWNERS` names the owner of each path (today `@trriplejay` for everything). Every PR needs a passing `ci` and an approval from a CODEOWNER. A PR authored by the quarterback bot (`app/quarterback-ai-dev-environment`) must be approved by a named human CODEOWNER and is never merged by the bot; changes under `db/migrations/` and `.github/` always need that human review. This rule is enforced by GitHub branch protection on `main` (require code-owner review), a setting the tree cannot hold.
