@@ -270,3 +270,53 @@ func TestQuestAgeRangeJSON(t *testing.T) {
 		}
 	}
 }
+
+// TestQuestClaimExpiresAtJSON pins claim_expires_at in quest JSON: null for an
+// unheld quest, the RFC3339 UTC instant for a held one.
+func TestQuestClaimExpiresAtJSON(t *testing.T) {
+	t.Parallel()
+
+	decode := func(v any) map[string]any {
+		t.Helper()
+		data, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("json.Marshal failed: %v", err)
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(data, &raw); err != nil {
+			t.Fatalf("json.Unmarshal failed: %v", err)
+		}
+		return raw
+	}
+
+	unheld := decode(toQuest(app.QuestView{
+		HouseholdQuest: db.HouseholdQuest{
+			ID:   uuid.New(),
+			Name: "Unheld Quest",
+		},
+	}))
+	val, ok := unheld["claim_expires_at"]
+	if !ok {
+		t.Errorf("claim_expires_at key missing from unheld quest JSON")
+	} else if val != nil {
+		t.Errorf("unheld claim_expires_at = %v, want null", val)
+	}
+
+	instant := time.Date(2026, 11, 20, 5, 0, 0, 0, time.UTC)
+	heldMember := uuid.New()
+	held := decode(toQuest(app.QuestView{
+		HouseholdQuest: db.HouseholdQuest{
+			ID:             uuid.New(),
+			Name:           "Held Quest",
+			ClaimedBy:      &heldMember,
+			ClaimedAt:      pgtype.Timestamptz{Time: instant.Add(-1 * time.Hour), Valid: true},
+			ClaimExpiresAt: pgtype.Timestamptz{Time: instant, Valid: true},
+		},
+	}))
+	val, ok = held["claim_expires_at"]
+	if !ok {
+		t.Errorf("claim_expires_at key missing from held quest JSON")
+	} else if got, ok := val.(string); !ok || got != instant.Format(time.RFC3339) {
+		t.Errorf("held claim_expires_at = %v, want %s", val, instant.Format(time.RFC3339))
+	}
+}
