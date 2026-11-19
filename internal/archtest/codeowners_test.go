@@ -167,10 +167,10 @@ func TestCodeowners(t *testing.T) {
 
 	t.Run("RejectBotsAndMalformed", func(t *testing.T) {
 		tests := []struct {
-			name        string
-			content     string
-			wantErrSub  string
-			checkTree   bool
+			name       string
+			content    string
+			wantErrSub string
+			checkTree  bool
 		}{
 			{
 				name:       "bot app prefix",
@@ -198,20 +198,20 @@ func TestCodeowners(t *testing.T) {
 				wantErrSub: "must begin with @",
 			},
 			{
-				name: "missing catch-all",
-				content: "/db/migrations/ @trriplejay\n/.github/ @trriplejay\n/.github/CODEOWNERS @trriplejay\n",
+				name:       "missing catch-all",
+				content:    "/db/migrations/ @trriplejay\n/.github/ @trriplejay\n/.github/CODEOWNERS @trriplejay\n",
 				wantErrSub: "missing '*' catch-all",
 				checkTree:  true,
 			},
 			{
-				name: "missing explicit rule",
-				content: "* @trriplejay\n/db/migrations/ @trriplejay\n/.github/ @trriplejay\n",
+				name:       "missing explicit rule",
+				content:    "* @trriplejay\n/db/migrations/ @trriplejay\n/.github/ @trriplejay\n",
 				wantErrSub: "missing required explicit rule for \"/.github/CODEOWNERS\"",
 				checkTree:  true,
 			},
 			{
-				name: "non-wildcard pattern matches nothing",
-				content: "* @trriplejay\n/db/migrations/ @trriplejay\n/.github/ @trriplejay\n/.github/CODEOWNERS @trriplejay\n/nonexistent/path/ @trriplejay\n",
+				name:       "non-wildcard pattern matches nothing",
+				content:    "* @trriplejay\n/db/migrations/ @trriplejay\n/.github/ @trriplejay\n/.github/CODEOWNERS @trriplejay\n/nonexistent/path/ @trriplejay\n",
 				wantErrSub: "matches nothing in the tree",
 				checkTree:  true,
 			},
