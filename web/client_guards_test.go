@@ -147,6 +147,49 @@ func TestClient_NoInlineMarkupStylesOrScripts(t *testing.T) {
 	}
 }
 
+// removedGoogleRedirectFlow are the strings only the retired Google redirect
+// sign-in and calendar-connect flows used: the /google-sign-in landing page,
+// the hand-off code redeem, the start route and the Account page's
+// ?google_calendar= return parsing. The SDK flows need none of them.
+var removedGoogleRedirectFlow = []string{
+	"/api/v1/auth/google/start", "/auth/google/redeem", "/google-sign-in",
+	"google_calendar=", "googleRedeem",
+}
+
+func findGoogleRedirectFlow(src string) []string {
+	var hits []string
+	for _, tok := range removedGoogleRedirectFlow {
+		if strings.Contains(src, tok) {
+			hits = append(hits, tok)
+		}
+	}
+	return hits
+}
+
+func TestClientJS_NoGoogleRedirectFlow(t *testing.T) {
+	t.Run("detector fires", func(t *testing.T) {
+		for _, bad := range []string{
+			"window.location = '/api/v1/auth/google/start';",
+			"await publicApi('POST', '/auth/google/redeem', { code });",
+			"if (location.pathname === '/google-sign-in') {",
+			"location.search = '?google_calendar=connected';",
+			"export async function googleRedeem(code) {",
+		} {
+			if len(findGoogleRedirectFlow(bad)) == 0 {
+				t.Errorf("expected detector to flag %q", bad)
+			}
+		}
+		if hits := findGoogleRedirectFlow("await publicApi('POST', '/auth/google', { id_token: idToken });"); len(hits) != 0 {
+			t.Errorf("detector flagged the SDK sign-in route: %v", hits)
+		}
+	})
+	for name, src := range clientJS(t) {
+		if hits := findGoogleRedirectFlow(src); len(hits) != 0 {
+			t.Errorf("%s still references the Google redirect flow: %v", name, hits)
+		}
+	}
+}
+
 // pinToStorage matches a statement that hands something PIN-named to browser
 // storage, a cookie or the URL.
 var pinToStorage = regexp.MustCompile(`(?i)(localStorage|sessionStorage|document\.cookie|history\.(push|replace)State|location\.(href|search|hash))[^;\n]*pin`)
