@@ -471,8 +471,14 @@ func TestGoogle_RefusesBadTokens(t *testing.T) {
 	for i, tc := range cases {
 		before := s.counts()
 		status, _, body := s.googleSignIn(tc.token, "bad")
-		if status < 400 || status >= 500 {
-			t.Errorf("%s: status %d, want 4xx", tc.name, status)
+		if status != http.StatusUnauthorized {
+			t.Errorf("%s: status %d, want %d", tc.name, status, http.StatusUnauthorized)
+		}
+		var e apiError
+		if err := json.Unmarshal([]byte(body), &e); err != nil {
+			t.Errorf("%s: body %q is not a JSON error: %v", tc.name, body, err)
+		} else if e.Error.Code != "google_sign_in_failed" {
+			t.Errorf("%s: error.code %q, want %q", tc.name, e.Error.Code, "google_sign_in_failed")
 		}
 		if i == 0 {
 			firstStatus, firstBody = status, body
