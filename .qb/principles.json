@@ -1,5 +1,1 @@
-{
-  "on": [
-    "checks-run-before-the-pr"
-  ]
-}
+{ "on": ["safe-by-default", "checks-run-before-the-pr"] }
