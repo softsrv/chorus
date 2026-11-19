@@ -39,7 +39,8 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - run: make mod-verify
+      - name: Verify modules against go.sum (go mod download && go mod verify)
+        run: make mod-verify
       - name: Secret scan
         run: make secret-scan
       - name: Verify sqlc output is up to date

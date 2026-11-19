@@ -11,20 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-type Chore struct {
-	ID          uuid.UUID          `json:"id"`
-	HouseholdID uuid.UUID          `json:"household_id"`
-	Title       string             `json:"title"`
-	Description string             `json:"description"`
-	AssigneeID  *uuid.UUID         `json:"assignee_id"`
-	DueOn       pgtype.Date        `json:"due_on"`
-	CompletedAt pgtype.Timestamptz `json:"completed_at"`
-	CompletedBy *uuid.UUID         `json:"completed_by"`
-	CreatedBy   *uuid.UUID         `json:"created_by"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
-}
-
 type Combo struct {
 	ID          uuid.UUID          `json:"id"`
 	HouseholdID uuid.UUID          `json:"household_id"`
@@ -129,25 +115,7 @@ type HouseholdCalendar struct {
 	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
 }
 
-type HouseholdInvite struct {
-	ID          uuid.UUID          `json:"id"`
-	HouseholdID uuid.UUID          `json:"household_id"`
-	TokenHash   string             `json:"token_hash"`
-	CreatedBy   *uuid.UUID         `json:"created_by"`
-	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	UsedBy      *uuid.UUID         `json:"used_by"`
-	UsedAt      pgtype.Timestamptz `json:"used_at"`
-}
-
 type HouseholdMember struct {
-	HouseholdID uuid.UUID          `json:"household_id"`
-	UserID      uuid.UUID          `json:"user_id"`
-	Role        string             `json:"role"`
-	JoinedAt    pgtype.Timestamptz `json:"joined_at"`
-}
-
-type HouseholdMembersRetired struct {
 	HouseholdID uuid.UUID          `json:"household_id"`
 	UserID      uuid.UUID          `json:"user_id"`
 	Role        string             `json:"role"`

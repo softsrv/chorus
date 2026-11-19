@@ -23,7 +23,7 @@ Then open http://localhost:8080. Register, then open the verification email in s
 - **Chores:** CRUD, assign to a member, due dates, complete/reopen, filters, pagination
 - **Events:** CRUD, date-range queries for calendar views
 
-The API contract is in [docs/API.md](docs/API.md). Development notes are in [CLAUDE.md](CLAUDE.md).
+The API contract is in [docs/API.md](docs/API.md). Architecture documentation is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and architecture decisions are in [docs/adr/](docs/adr/). Development notes are in [CLAUDE.md](CLAUDE.md).
 
 ## Testing
 
