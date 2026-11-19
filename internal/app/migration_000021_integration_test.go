@@ -115,7 +115,7 @@ func TestIntegration_QuestClaimExpiryMigration(t *testing.T) {
 		{"same instant in Auckland is the next local day", time.Date(2026, 6, 15, 4, 59, 0, 0, time.UTC), "Pacific/Auckland", time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)},
 		{"exactly local midnight starts a new day", time.Date(2026, 6, 15, 5, 0, 0, 0, time.UTC), "America/Chicago", time.Date(2026, 6, 16, 5, 0, 0, 0, time.UTC)},
 		{"Chicago fall-back day is 25 hours long", time.Date(2026, 11, 1, 5, 30, 0, 0, time.UTC), "America/Chicago", time.Date(2026, 11, 2, 6, 0, 0, 0, time.UTC)},
-		{"Auckland spring-forward-end day", time.Date(2026, 3, 15, 10, 0, 0, 0, time.UTC), "Pacific/Auckland", time.Date(2026, 3, 15, 11, 0, 0, 0, time.UTC)},
+		{"Auckland summer time (UTC+13) day", time.Date(2026, 3, 15, 10, 0, 0, 0, time.UTC), "Pacific/Auckland", time.Date(2026, 3, 15, 11, 0, 0, 0, time.UTC)},
 		{"UTC", time.Date(2026, 5, 5, 17, 45, 0, 0, time.UTC), "UTC", time.Date(2026, 5, 6, 0, 0, 0, 0, time.UTC)},
 	} {
 		if got := expiresAt(c.at, c.tz); !got.Equal(c.want) {
