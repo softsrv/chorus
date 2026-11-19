@@ -200,6 +200,12 @@ export function toast(message, kind = 'info') {
 
 export const fmtDate = (iso) => new Date(iso).toLocaleString();
 
+export const fmtDay = (ymd) => {
+  if (!ymd) return '';
+  const [y, m, d] = ymd.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }).replace(',', '');
+};
+
 // ── API log panel ─────────────────────────────────────────────────────────────
 
 const SECRET_KEYS = /password|token|^code$/i;
