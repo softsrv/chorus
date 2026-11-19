@@ -30,7 +30,7 @@ func TestIntegration_HouseholdIsolation_Birthdays(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 
 	alice := registerVerified(t, pool, authSvc, mailer, "bdayalice").User.ID

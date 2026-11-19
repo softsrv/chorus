@@ -191,7 +191,7 @@ func TestIntegration_QuestWritesNeedAdminPin(t *testing.T) {
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
 	quests := app.NewQuestService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 
 	alice := registerVerified(t, pool, authSvc, mailer, "questpin").User.ID
@@ -235,7 +235,7 @@ func TestIntegration_QuestAccept(t *testing.T) {
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
 	quests := app.NewQuestService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 
 	alice := registerVerified(t, pool, authSvc, mailer, "questaccept").User.ID
@@ -315,7 +315,7 @@ func TestIntegration_QuestAcceptConcurrent(t *testing.T) {
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
 	quests := app.NewQuestService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 
 	alice := registerVerified(t, pool, authSvc, mailer, "questacceptconc").User.ID

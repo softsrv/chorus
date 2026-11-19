@@ -41,7 +41,7 @@ func newAgeRangeFixture(t *testing.T, prefix string) *ageRangeFixture {
 	q := db.New(pool)
 	f := &ageRangeFixture{
 		t: t, ctx: context.Background(), pool: pool, q: q,
-		quests: app.NewQuestService(q, pool), family: app.NewFamilyService(q, pool, 10),
+		quests: app.NewQuestService(q, pool), family: app.NewFamilyService(q, pool, 4),
 		tz: "America/Chicago", nameByID: map[uuid.UUID]string{},
 	}
 	f.admin = registerVerified(t, pool, authSvc, mailer, prefix).User.ID

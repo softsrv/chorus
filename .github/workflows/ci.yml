@@ -53,7 +53,7 @@ jobs:
       - run: make fmt-check
       - run: go vet ./... && go vet -tags integration ./... && go vet -tags systest ./...
       - name: Check part boundaries
-        run: go test -run 'TestImportBoundaries|TestWebClientImportsStayInWeb' ./internal/archtest/
+        run: go test -run 'TestImportBoundaries|TestWebClientImportsStayInWeb|TestCodeowners' ./internal/archtest/
       - run: go test -race ./...
       - uses: actions/setup-node@v4
         with:

@@ -40,7 +40,7 @@ func newAdjustWorld(t *testing.T, prefix string) *adjustWorld {
 	if err != nil {
 		t.Fatalf("Create household: %v", err)
 	}
-	return &adjustWorld{t: t, ctx: ctx, pool: pool, family: app.NewFamilyService(q, pool, 10), admin: admin, h: h}
+	return &adjustWorld{t: t, ctx: ctx, pool: pool, family: app.NewFamilyService(q, pool, 4), admin: admin, h: h}
 }
 
 func (w *adjustWorld) member(name string) app.Member {

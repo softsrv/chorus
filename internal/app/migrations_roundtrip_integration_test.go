@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -21,7 +22,10 @@ import (
 // looks up database-wide.
 const scratchSchemaPrefix = "mig_roundtrip_"
 
-var migrationFileRE = regexp.MustCompile(`^(\d+)_(.+)\.(up|down)\.sql$`)
+var (
+	migrationFileRE          = regexp.MustCompile(`^(\d+)_(.+)\.(up|down)\.sql$`)
+	migrationNameInCommentRE = regexp.MustCompile(`\b\d+_[a-zA-Z0-9_]+\.(?:up|down)\.sql\b`)
+)
 
 type migrationPair struct {
 	version int
@@ -68,6 +72,25 @@ func loadMigrationPairs(t *testing.T) []migrationPair {
 			h.up = e.Name()
 		} else {
 			h.down = e.Name()
+		}
+
+		content, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		lines := strings.SplitN(string(content), "\n", 2)
+		if len(lines) > 0 && strings.HasPrefix(strings.TrimSpace(lines[0]), "--") {
+			firstLine := lines[0]
+			matches := migrationNameInCommentRE.FindAllString(firstLine, -1)
+			pairName := m[1] + "_" + m[2] + ".down.sql"
+			if m[3] == "down" {
+				pairName = m[1] + "_" + m[2] + ".up.sql"
+			}
+			for _, match := range matches {
+				if match != e.Name() && match != pairName {
+					t.Errorf("%s: first-line comment names %s, want its own name or its pair's", e.Name(), match)
+				}
+			}
 		}
 	}
 	versions := make([]int, 0, len(byVersion))

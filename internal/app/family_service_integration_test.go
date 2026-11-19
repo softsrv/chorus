@@ -21,7 +21,7 @@ func TestIntegration_FamilyMemberLifecycle(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 
 	admin := registerVerified(t, pool, authSvc, mailer, "familyadmin").User.ID
@@ -148,7 +148,7 @@ func TestIntegration_FamilyMemberValidation(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 
 	admin := registerVerified(t, pool, authSvc, mailer, "valadmin").User.ID
@@ -206,7 +206,7 @@ func TestIntegration_FamilyMemberBirthday(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 
 	admin := registerVerified(t, pool, authSvc, mailer, "bdayadmin").User.ID
@@ -353,7 +353,7 @@ func TestIntegration_FamilyMemberIsolation(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 
 	admin := registerVerified(t, pool, authSvc, mailer, "aliceadmin").User.ID
@@ -400,7 +400,7 @@ func TestIntegration_VerifyMemberPin(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 
 	admin := registerVerified(t, pool, authSvc, mailer, "pinadmin").User.ID
@@ -487,7 +487,7 @@ func TestIntegration_AdminPin(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 
 	admin := registerVerified(t, pool, authSvc, mailer, "adminpinuser").User.ID

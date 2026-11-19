@@ -26,7 +26,7 @@ func TestIntegration_QuestApproval(t *testing.T) {
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
 	quests := app.NewQuestService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	combos := app.NewComboService(q, pool)
 	ctx := context.Background()
 

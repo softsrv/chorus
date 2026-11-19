@@ -69,7 +69,7 @@ test-cover:
 	go tool cover -html=coverage.out
 
 boundaries:
-	go test -run 'TestImportBoundaries|TestWebClientImportsStayInWeb' ./internal/archtest/
+	go test -run 'TestImportBoundaries|TestWebClientImportsStayInWeb|TestCodeowners' ./internal/archtest/
 
 fmt:
 	gofmt -w .

@@ -48,7 +48,7 @@ func newRedeemWorld(t *testing.T, prefix string) *redeemWorld {
 			t.Errorf("delete household %s: %v", h.ID, err)
 		}
 	})
-	return &redeemWorld{t: t, ctx: ctx, pool: pool, family: app.NewFamilyService(q, pool, 10),
+	return &redeemWorld{t: t, ctx: ctx, pool: pool, family: app.NewFamilyService(q, pool, 4),
 		rewards: app.NewRewardService(q, pool), admin: admin, h: h}
 }
 
@@ -126,8 +126,8 @@ func TestIntegration_RewardRedemption(t *testing.T) {
 		sam := w.member("Sam", 120)
 		movie := w.reward("Movie night", 100)
 		red := w.request(sam, movie)
-		if red.Status != "pending" || red.Description != "Movie night" || red.Cost != 100 || red.RewardID == nil || *red.RewardID != movie.ID || red.DecidedAt.Valid {
-			t.Errorf("request = %+v, want pending Movie night at 100", red)
+		if red.Status != "pending" || red.Description != "Movie night" || red.Cost != 100 || red.RewardID == nil || *red.RewardID != movie.ID || red.DecidedAt.Valid || red.StatusBy != nil {
+			t.Errorf("request = %+v, want pending Movie night at 100 with nil status_by", red)
 		}
 		again, created, err := w.rewards.RequestRedemption(w.ctx, w.admin, w.h.ID, movie.ID, app.MemberAction{MemberID: sam.ID, PIN: "1234"})
 		if err != nil || created || again.ID != red.ID {
@@ -186,8 +186,8 @@ func TestIntegration_RewardRedemption(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Approve: %v", err)
 		}
-		if approved.Status != "approved" || !approved.DecidedAt.Valid || member.Points != 20 {
-			t.Errorf("Approve = %+v, member points %d; want approved with decided_at, 20", approved, member.Points)
+		if approved.Status != "approved" || !approved.DecidedAt.Valid || member.Points != 20 || approved.StatusBy == nil || *approved.StatusBy != w.admin {
+			t.Errorf("Approve = %+v, member points %d; want approved with decided_at and status_by=%v, 20", approved, member.Points, w.admin)
 		}
 		if total, rows, sum, reasons, _ := w.state(ben); total != 20 || rows != 1 || sum != -100 || reasons != "Redeemed: Movie night" {
 			t.Errorf("after approve: total %d, reward awards %d sum %d %q; want 20, 1, -100, Redeemed: Movie night", total, rows, sum, reasons)
@@ -299,8 +299,8 @@ func TestIntegration_RewardRedemption(t *testing.T) {
 			t.Errorf("status after short approve = %q, want pending", s)
 		}
 		rejected, err := w.rewards.Reject(w.ctx, w.admin, w.h.ID, red.ID, "")
-		if err != nil || rejected.Status != "rejected" || !rejected.DecidedAt.Valid {
-			t.Fatalf("Reject: %+v, %v; want rejected with decided_at", rejected, err)
+		if err != nil || rejected.Status != "rejected" || !rejected.DecidedAt.Valid || rejected.StatusBy == nil || *rejected.StatusBy != w.admin {
+			t.Fatalf("Reject: %+v, %v; want rejected with decided_at and status_by=%v", rejected, err, w.admin)
 		}
 		if total, rows, _, _, _ := w.state(dee); total != 70 || rows != 0 {
 			t.Errorf("after reject: total %d, reward awards %d; want 70, 0", total, rows)
@@ -317,9 +317,9 @@ func TestIntegration_RewardRedemption(t *testing.T) {
 		// The member delete cascades to the request, so record each status
 		// change inside Remove's transaction to see the cancel itself.
 		for _, stmt := range []string{
-			`CREATE TABLE IF NOT EXISTS test_redemption_status_log (id UUID, status TEXT)`,
+			`CREATE TABLE IF NOT EXISTS test_redemption_status_log (id UUID, status TEXT, status_by UUID)`,
 			`CREATE OR REPLACE FUNCTION test_log_redemption_status() RETURNS trigger LANGUAGE plpgsql AS $$
-			 BEGIN INSERT INTO test_redemption_status_log VALUES (NEW.id, NEW.status); RETURN NEW; END $$`,
+			 BEGIN INSERT INTO test_redemption_status_log VALUES (NEW.id, NEW.status, NEW.status_by); RETURN NEW; END $$`,
 			`CREATE OR REPLACE TRIGGER test_redemption_status_log AFTER UPDATE ON reward_redemptions
 			 FOR EACH ROW EXECUTE FUNCTION test_log_redemption_status()`,
 		} {
@@ -342,11 +342,15 @@ func TestIntegration_RewardRedemption(t *testing.T) {
 			t.Fatalf("Remove: %v", err)
 		}
 		var logged string
-		if err := w.pool.QueryRow(w.ctx, `SELECT COALESCE(string_agg(status, ','), '') FROM test_redemption_status_log WHERE id = $1`, red.ID).Scan(&logged); err != nil {
+		var loggedBy *uuid.UUID
+		if err := w.pool.QueryRow(w.ctx, `SELECT COALESCE(string_agg(status, ','), ''), status_by FROM test_redemption_status_log WHERE id = $1 GROUP BY status_by`, red.ID).Scan(&logged, &loggedBy); err != nil {
 			t.Fatalf("read status log: %v", err)
 		}
 		if logged != "cancelled" {
 			t.Errorf("Remove moved the request through %q, want cancelled", logged)
+		}
+		if loggedBy == nil || *loggedBy != w.admin {
+			t.Errorf("Remove set status_by = %v, want %v", loggedBy, w.admin)
 		}
 		if _, _, err := w.rewards.Approve(w.ctx, w.admin, w.h.ID, red.ID, ""); !errors.Is(err, app.ErrNotFound) {
 			t.Errorf("approve after removal: %v, want ErrNotFound", err)
