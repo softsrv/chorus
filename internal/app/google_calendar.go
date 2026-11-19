@@ -88,9 +88,9 @@ type CalendarStatus struct {
 // GoogleCalendar connects a Chorus user's Google Calendar: storing the tokens
 // encrypted, one connection per user.
 type GoogleCalendar struct {
-	q         *db.Queries
-	cipher    *TokenCipher
-	oauth     oauth2.Config
+	q            *db.Queries
+	cipher       *TokenCipher
+	oauth        oauth2.Config
 	revokeURL    string
 	tokenInfoURL string
 	apiURL       string

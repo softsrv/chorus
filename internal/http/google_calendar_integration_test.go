@@ -713,7 +713,10 @@ func TestGoogleCalendar_NoRefreshToken(t *testing.T) {
 	t.Run("stored refresh token kept", func(t *testing.T) {
 		u := s.signUp("calkeeprefresh")
 		s.seedConnection(u.User.ID, "old-access", "stored-refresh-R", "read_write", time.Now().Add(time.Hour), false)
-		fake.set(func(f *fakeCalendarGoogle) { f.codeSub = "google-sub-A"; f.refreshSubs["stored-refresh-R"] = "google-sub-A" })
+		fake.set(func(f *fakeCalendarGoogle) {
+			f.codeSub = "google-sub-A"
+			f.refreshSubs["stored-refresh-R"] = "google-sub-A"
+		})
 		status, st := s.connectCode(u.AccessToken, "code-keeprefresh")
 		if status != http.StatusOK {
 			t.Fatalf("status %d, want 200", status)
@@ -735,7 +738,10 @@ func TestGoogleCalendar_NoRefreshToken(t *testing.T) {
 	t.Run("different Google account refused", func(t *testing.T) {
 		u := s.signUp("calswitchacct")
 		s.seedConnection(u.User.ID, "old-access-A", "stored-refresh-A", "read_write", time.Now().Add(time.Hour), false)
-		fake.set(func(f *fakeCalendarGoogle) { f.codeSub = "google-sub-B"; f.refreshSubs["stored-refresh-A"] = "google-sub-A" })
+		fake.set(func(f *fakeCalendarGoogle) {
+			f.codeSub = "google-sub-B"
+			f.refreshSubs["stored-refresh-A"] = "google-sub-A"
+		})
 		status, body := s.doRaw("POST", "/api/v1/me/google-calendar/connect", u.AccessToken, map[string]string{"code": "code-switch"})
 		if status != http.StatusBadRequest {
 			t.Fatalf("status %d, want 400", status)
