@@ -592,6 +592,83 @@ func TestIntegration_QuestScheduleUpcoming(t *testing.T) {
 	}
 }
 
+// TestIntegration_QuestScheduleUpcomingAfterRollover proves CLM-2 against real
+// Postgres: before the household's midnight on a schedule's date the schedule
+// is in Upcoming and its quest is unheld, and a rollover one minute early
+// changes nothing; the rollover at that local midnight gives the quest to the
+// member, drops the one-off from Upcoming and keeps the repeated schedule
+// there with a next date no earlier than that day (the quest's rest date once
+// the member has marked it done).
+func TestIntegration_QuestScheduleUpcomingAfterRollover(t *testing.T) {
+	w := newScheduleWorld(t, "schedupcomingroll")
+	sam := w.member("Sam")
+	w.setAdminPin("4321")
+	oneOff := w.quest(app.QuestInput{Name: "Clean your room", Points: num(5)})
+	repeated := w.quest(app.QuestInput{Name: "Water plants", Points: num(5), RepeatDays: num(7)})
+	day := 1
+	oneOffSched := w.schedule(oneOff, sam, day)
+	repSched := w.schedule(repeated, sam, day)
+	if _, err := w.pool.Exec(w.ctx, `UPDATE quest_schedules SET repeat = TRUE WHERE household_id = $1 AND id = $2`, w.h, repSched.ID); err != nil {
+		t.Fatalf("set repeat: %v", err)
+	}
+	upcoming := func() map[uuid.UUID]app.UpcomingQuest {
+		t.Helper()
+		items, err := w.schedules.Upcoming(w.ctx, w.admin, w.h, sam)
+		if err != nil {
+			t.Fatalf("Upcoming: %v", err)
+		}
+		m := make(map[uuid.UUID]app.UpcomingQuest, len(items))
+		for _, it := range items {
+			m[it.ID] = it
+		}
+		return m
+	}
+	midnight := w.localMidnight(day)
+
+	// Before the day: both are upcoming and nobody holds either quest, also
+	// after a rollover one minute before the household's midnight.
+	for _, step := range []string{"before any rollover", "rollover one minute before midnight"} {
+		if step != "before any rollover" {
+			w.rollover(midnight.Add(-time.Minute))
+		}
+		got := upcoming()
+		if _, ok := got[oneOffSched.ID]; !ok || len(got) != 2 {
+			t.Fatalf("%s: Upcoming = %+v, want both schedules", step, got)
+		}
+		for _, q := range []uuid.UUID{oneOff, repeated} {
+			if h := w.holder(q); h != nil {
+				t.Fatalf("%s: quest %s held by %v, want nobody", step, q, h)
+			}
+		}
+	}
+
+	// At the local midnight of the schedule's date both quests are Sam's.
+	w.rollover(midnight)
+	for _, q := range []uuid.UUID{oneOff, repeated} {
+		if h := w.holder(q); !isHeldBy(h, sam) {
+			t.Fatalf("after the rollover quest %s claimed_by = %v, want Sam %v", q, h, sam)
+		}
+	}
+	got := upcoming()
+	if _, ok := got[oneOffSched.ID]; ok {
+		t.Errorf("one-off still upcoming after its day: %+v", got[oneOffSched.ID])
+	}
+	rep, ok := got[repSched.ID]
+	if !ok || !rep.Repeat || rep.NextDate < w.date(day) {
+		t.Fatalf("repeated schedule after the rollover = %+v (listed %v), want it kept with next_date >= %s", rep, ok, w.date(day))
+	}
+
+	// Once Sam marks the 7-day quest done it rests, and the repeated
+	// schedule's next date is the day its cooldown ends, after the first one.
+	if _, err := w.quests.MarkDone(w.ctx, w.admin, w.h, repeated, app.MemberAction{MemberID: sam}); err != nil {
+		t.Fatalf("mark done: %v", err)
+	}
+	rep = upcoming()[repSched.ID]
+	if rep.NextDate != w.date(7) || rep.NextDate <= w.date(day) {
+		t.Errorf("resting repeated schedule next_date = %q, want %s, after %s", rep.NextDate, w.date(7), w.date(day))
+	}
+}
+
 type lockedWriter struct {
 	w  *bytes.Buffer
 	mu *sync.Mutex
