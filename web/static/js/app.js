@@ -275,6 +275,11 @@ function renderNav() {
 const GIS_WAIT_TRIES = 50; // the GIS script loads async; wait up to ~5s for it
 const GIS_WAIT_MS = 100;
 const PERSON_CANCELLED = new Set(['user_cancel', 'tap_outside']);
+// The rendered button opens Google's own window and reports nothing when it
+// is closed. After a click, the page getting focus back with no credential
+// following within this grace period is the person cancelling.
+const GIS_CANCEL_GRACE_MS = 300;
+let removeButtonFocusListener = null;
 
 // googleButton returns the divider and a container that Google Identity
 // Services renders its own button into. The credential (a Google ID token)
@@ -285,6 +290,8 @@ function googleButton(cfg) {
   const $status = el('div');
   const $btn = el('div', { class: 'flex justify-center', 'data-google-button': '' });
   let inFlight = false;
+  let clicked = false; // the button opened Google's window, no credential yet
+  let graceTimer = null;
 
   const show = (msg) => {
     $status.replaceChildren(alertBox('error', msg));
@@ -293,6 +300,8 @@ function googleButton(cfg) {
   const cancelled = () => show('Google sign-in was cancelled');
 
   const onCredential = async (resp) => {
+    clicked = false;
+    clearTimeout(graceTimer);
     const idToken = resp?.credential;
     if (typeof idToken !== 'string' || idToken === '') return cancelled();
     if (inFlight) return;
@@ -315,7 +324,27 @@ function googleButton(cfg) {
       return;
     }
     gis.initialize({ client_id: cfg.google_client_id, callback: onCredential });
-    gis.renderButton($btn, { type: 'standard', theme: 'outline', size: 'large', text: 'signin_with' });
+    gis.renderButton($btn, {
+      type: 'standard', theme: 'outline', size: 'large', text: 'signin_with',
+      click_listener: () => { clicked = true; },
+    });
+    // One focus listener at a time: a re-rendered sign-in view replaces the
+    // previous button's.
+    removeButtonFocusListener?.();
+    const onFocus = () => {
+      if (!clicked) return;
+      clearTimeout(graceTimer);
+      graceTimer = setTimeout(() => {
+        if (!clicked || inFlight) return;
+        clicked = false;
+        cancelled();
+      }, GIS_CANCEL_GRACE_MS);
+    };
+    window.addEventListener('focus', onFocus);
+    removeButtonFocusListener = () => {
+      window.removeEventListener('focus', onFocus);
+      clearTimeout(graceTimer);
+    };
     gis.prompt((n) => {
       // One Tap closed by the person without a credential. Auto-cancels and
       // "not displayed" (no Google session) are not the person cancelling.
@@ -2115,8 +2144,17 @@ async function accountView() {
     let st;
     try {
       st = await api('POST', '/me/google-calendar/connect', { code, platform: 'web' });
-    } catch {
-      return calFailed();
+    } catch (err) {
+      // A lost or timed-out response (status 0) or a 5xx may follow a connect
+      // the server completed: ask for the status instead of trusting the
+      // failure. A 4xx refusal stored nothing, so it stays a failure.
+      if (!(err?.status === 0 || err?.status >= 500)) return calFailed();
+      try {
+        st = await api('GET', '/me/google-calendar');
+      } catch {
+        return calFailed();
+      }
+      if (st?.status !== 'connected') return calFailed();
     } finally {
       connecting = false;
     }

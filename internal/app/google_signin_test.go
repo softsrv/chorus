@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -372,6 +373,103 @@ func TestIDTokenVerifier_FailClosed(t *testing.T) {
 		}
 		if elapsed > 1*time.Second {
 			t.Errorf("expected fail-closed within bounded client timeout, took %v", elapsed)
+		}
+	})
+}
+
+// A failing JWKS endpoint is asked at most once per throttle window: not for
+// repeated tokens, not for forged tokens with made-up key ids, not from
+// concurrent callers, and the failure is recorded so the throttle is not
+// skipped while no keys are cached.
+func TestIDTokenVerifier_FailedFetchIsThrottled(t *testing.T) {
+	const kid = "failing-kid"
+	const clientWeb = "web-client.test"
+
+	newFailing := func(t *testing.T, delay time.Duration) (*fakeJWKSServer, *idTokenVerifier) {
+		jwks := newFakeJWKSServer(t, kid)
+		jwks.handler = func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(delay)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		return jwks, newIDTokenVerifier([]string{clientWeb}, jwks.server.URL, jwks.server.Client())
+	}
+
+	t.Run("sequential callers and made-up kids", func(t *testing.T) {
+		jwks, verifier := newFailing(t, 0)
+		for i := 0; i < 5; i++ {
+			if _, err := verifier.verify(context.Background(), signIDToken(t, jwks.privKey, kid, "RS256", baseValidClaims(clientWeb))); err == nil {
+				t.Fatal("expected an error while the key endpoint fails")
+			}
+			forged := signIDToken(t, jwks.privKey, "made-up-"+string(rune('a'+i)), "RS256", baseValidClaims(clientWeb))
+			if _, err := verifier.verify(context.Background(), forged); err == nil {
+				t.Fatal("expected an error for a made-up kid")
+			}
+		}
+		if hits := jwks.hitCount.Load(); hits != 1 {
+			t.Fatalf("failing JWKS hit %d times in one window, want 1", hits)
+		}
+
+		// Once the window has passed, one more attempt is allowed.
+		verifier.mu.Lock()
+		verifier.failedAt = time.Now().Add(-2 * time.Minute)
+		verifier.mu.Unlock()
+		_, _ = verifier.verify(context.Background(), signIDToken(t, jwks.privKey, kid, "RS256", baseValidClaims(clientWeb)))
+		_, _ = verifier.verify(context.Background(), signIDToken(t, jwks.privKey, kid, "RS256", baseValidClaims(clientWeb)))
+		if hits := jwks.hitCount.Load(); hits != 2 {
+			t.Fatalf("hits after the window = %d, want 2", hits)
+		}
+	})
+
+	t.Run("concurrent callers share one slow fetch", func(t *testing.T) {
+		jwks, verifier := newFailing(t, 100*time.Millisecond)
+		token := signIDToken(t, jwks.privKey, kid, "RS256", baseValidClaims(clientWeb))
+		var wg sync.WaitGroup
+		for i := 0; i < 20; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if _, err := verifier.verify(context.Background(), token); err == nil {
+					t.Error("expected an error while the key endpoint fails")
+				}
+			}()
+		}
+		wg.Wait()
+		if hits := jwks.hitCount.Load(); hits != 1 {
+			t.Fatalf("failing JWKS hit %d times for concurrent callers, want 1", hits)
+		}
+	})
+
+	t.Run("a stale cache is not refetched in a loop after a failure", func(t *testing.T) {
+		jwks := newFakeJWKSServer(t, kid)
+		var fail atomic.Bool
+		jwks.handler = func(w http.ResponseWriter, r *http.Request) {
+			if fail.Load() {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			nBytes, eBytes := jwks.privKey.N.Bytes(), big.NewInt(int64(jwks.privKey.E)).Bytes()
+			_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]any{{
+				"kty": "RSA", "kid": kid,
+				"n": base64.RawURLEncoding.EncodeToString(nBytes),
+				"e": base64.RawURLEncoding.EncodeToString(eBytes),
+			}}})
+		}
+		verifier := newIDTokenVerifier([]string{clientWeb}, jwks.server.URL, jwks.server.Client())
+		token := signIDToken(t, jwks.privKey, kid, "RS256", baseValidClaims(clientWeb))
+		if _, err := verifier.verify(context.Background(), token); err != nil {
+			t.Fatalf("initial verify: %v", err)
+		}
+		fail.Store(true)
+		verifier.mu.Lock()
+		verifier.fetchedAt = time.Now().Add(-2 * time.Hour) // keys past their TTL
+		verifier.mu.Unlock()
+		for i := 0; i < 5; i++ {
+			if _, err := verifier.verify(context.Background(), token); err == nil {
+				t.Fatal("expected stale keys to fail closed while the refresh fails")
+			}
+		}
+		if hits := jwks.hitCount.Load(); hits != 2 {
+			t.Fatalf("hits = %d, want 2 (initial fetch plus one failed refresh)", hits)
 		}
 	})
 }

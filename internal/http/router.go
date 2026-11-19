@@ -105,7 +105,12 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	// it on member selection, and a correct read must never spend the
 	// budget member actions (accept, abandon, done) need.
 	historyRL := middleware.NewRateLimiter(ctx, pinLimit, 10*time.Minute, userKey)
+	// The two routes that spend a Google exchange (an ID-token check or a
+	// code-for-token exchange) each get 30 per 15 minutes per IP, what the
+	// removed redirect callbacks had. Connect is charged after sign-in and
+	// verification, so anonymous traffic cannot spend a user's budget.
 	googleSignInRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
+	calendarConnectRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
 
 	limit := func(rl *middleware.RateLimiter, h http.HandlerFunc) http.Handler { return rl.Middleware(h) }
 
@@ -145,7 +150,7 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	// without contacting Google. Connect exchanges a one-time server auth
 	// code from Google SDK for tokens.
 	api.Handle("GET /api/v1/me/google-calendar", verified(calendarH.Status))
-	api.Handle("POST /api/v1/me/google-calendar/connect", verified(calendarH.Connect))
+	api.Handle("POST /api/v1/me/google-calendar/connect", authMW(middleware.RequireEmailVerified(limit(calendarConnectRL, calendarH.Connect))))
 	api.Handle("DELETE /api/v1/me/google-calendar", verified(calendarH.Disconnect))
 	api.Handle("GET /api/v1/me/google-calendar/calendars", verified(familyH.MyCalendars))
 

@@ -53,9 +53,24 @@ type idTokenVerifier struct {
 	jwksURL   string
 	client    *http.Client
 
-	mu        sync.Mutex
+	mu sync.Mutex
+	// keys were fetched successfully at fetchedAt; failedAt is the last
+	// failed attempt. Both count against the refetch throttle, so a failing
+	// key endpoint is asked at most once per googleKeysMinRefetch.
 	keys      map[string]*rsa.PublicKey
 	fetchedAt time.Time
+	failedAt  time.Time
+	// flight is the fetch in progress, shared by every caller that needs
+	// keys meanwhile (single-flight); the mutex is never held across it.
+	flight *keyFetch
+}
+
+// keyFetch is one in-flight fetch of Google's key set. keys and err are set
+// before done is closed.
+type keyFetch struct {
+	done chan struct{}
+	keys map[string]*rsa.PublicKey
+	err  error
 }
 
 func newIDTokenVerifier(clientIDs []string, jwksURL string, client *http.Client) *idTokenVerifier {
@@ -116,28 +131,72 @@ func (v *idTokenVerifier) audienceOK(aud jwt.ClaimStrings) bool {
 }
 
 // key returns the public key for kid, fetching Google's key set when the
-// cache is empty or stale, or (at most once per googleKeysMinRefetch) when
-// kid is unknown, as happens after Google rotates its keys.
+// cache is empty or stale, or when kid is unknown, as happens after Google
+// rotates its keys. Fetches, failed ones included, are throttled to one per
+// googleKeysMinRefetch, so tokens with made-up key ids cannot make us hammer
+// Google, and concurrent callers share one fetch without queueing on the
+// mutex.
 func (v *idTokenVerifier) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 	v.mu.Lock()
-	defer v.mu.Unlock()
-	age := time.Since(v.fetchedAt)
-	if k, ok := v.keys[kid]; ok && age < googleKeysTTL {
+	if k, ok := v.keys[kid]; ok && time.Since(v.fetchedAt) < googleKeysTTL {
+		v.mu.Unlock()
 		return k, nil
 	}
-	if v.keys != nil && age < googleKeysMinRefetch {
-		return nil, errors.New("unknown key id")
+	f := v.flight
+	if f == nil {
+		last := v.fetchedAt
+		if v.failedAt.After(last) {
+			last = v.failedAt
+		}
+		if !last.IsZero() && time.Since(last) < googleKeysMinRefetch {
+			failed := v.failedAt.After(v.fetchedAt)
+			v.mu.Unlock()
+			if failed {
+				return nil, errors.New("signing keys unavailable")
+			}
+			return nil, errors.New("unknown key id")
+		}
+		f = &keyFetch{done: make(chan struct{})}
+		v.flight = f
+		// The fetch outlives this caller's cancellation (others wait on it)
+		// but is bounded by its own timeout.
+		go v.refresh(context.WithoutCancel(ctx), f)
 	}
-	keys, err := v.fetch(ctx)
-	if err != nil {
-		slog.ErrorContext(ctx, "google sign-in: fetch signing keys", "error", err)
-		return nil, err
+	v.mu.Unlock()
+
+	select {
+	case <-f.done:
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	v.keys, v.fetchedAt = keys, time.Now()
-	if k, ok := keys[kid]; ok {
+	if f.err != nil {
+		return nil, f.err
+	}
+	if k, ok := f.keys[kid]; ok {
 		return k, nil
 	}
 	return nil, errors.New("unknown key id")
+}
+
+// refresh runs the fetch f stands for and records its outcome, success or
+// failure, for the throttle.
+func (v *idTokenVerifier) refresh(ctx context.Context, f *keyFetch) {
+	ctx, cancel := context.WithTimeout(ctx, googleHTTPTimeout)
+	defer cancel()
+	keys, err := v.fetch(ctx)
+	if err != nil {
+		slog.ErrorContext(ctx, "google sign-in: fetch signing keys", "error", err)
+	}
+	v.mu.Lock()
+	if err != nil {
+		v.failedAt = time.Now()
+	} else {
+		v.keys, v.fetchedAt = keys, time.Now()
+	}
+	v.flight = nil
+	v.mu.Unlock()
+	f.keys, f.err = keys, err
+	close(f.done)
 }
 
 type jwkSet struct {

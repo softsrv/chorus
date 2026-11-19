@@ -83,6 +83,44 @@ test('CLM-3: dismissing Google\'s prompt shows the cancelled message and sends n
   assert.deepEqual(serverCallsBesidesConfig(), []);
 });
 
+// The rendered button opens Google's own window, which reports nothing when
+// it is closed. The fake GIS exposes the button's click_listener, and the
+// person returning to the page (window focus) with no credential is a cancel.
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const clickGoogleButton = () => gis.renderButton[gis.renderButton.length - 1].opts.click_listener();
+const returnToPage = () => window.dispatchEvent(new Event('focus'));
+
+test('CLM-3: closing the chooser opened by the rendered button shows the cancelled message and sends nothing', async () => {
+  await loadApp();
+  assert.equal(typeof gis.renderButton[0].opts.click_listener, 'function', 'the button reports its click');
+  clickGoogleButton();
+  returnToPage();
+  await wait(450);
+  await settle();
+  assert.match(text(), /Google sign-in was cancelled/);
+  assert.deepEqual(serverCallsBesidesConfig(), []);
+  assert.equal(sessionStorage.getItem(REFRESH_KEY), null);
+});
+
+test('CLM-3: returning to the page without having used the button is not a cancel', async () => {
+  await loadApp();
+  returnToPage();
+  await wait(450);
+  assert.doesNotMatch(text(), /cancelled/);
+});
+
+test('CLM-3: a credential that follows the button click is not reported as a cancel', async () => {
+  await loadApp();
+  clickGoogleButton();
+  returnToPage();
+  await gis.callback({ credential: 'tok' });
+  await wait(450);
+  await settle();
+  assert.doesNotMatch(env.document.body.textContent, /cancelled/);
+  assert.match(text(), /Google sign-in failed/);
+  assert.equal(calls.filter((c) => c.method === 'POST' && c.path === '/auth/google').length, 1);
+});
+
 test('CLM-3: an empty credential shows the cancelled message and sends nothing', async () => {
   await loadApp();
   await gis.callback({ credential: '' });
@@ -247,5 +285,43 @@ test('CLM-4: a popup error or a response without a code shows the fixed message 
   assert.match(calCard().textContent, new RegExp(CAL_FAIL.replace(/\./g, '\\.')));
   assert.ok(!env.$app.textContent.includes(CAL_SENTINEL));
   assert.equal(connectPosts().length, 0, 'no connect request without a code');
+  assert.ok(connectButton(), 'card unchanged');
+});
+
+test('CLM-4: a lost connect response, after the server stored the connection, still shows the connected card', async () => {
+  let statusReads = 0;
+  await openAccount(() => [200, { status: 'connected', access: 'read_write' }]);
+  // The connect request never returns (network error); the status read does.
+  const ok = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    if (init.method === 'POST' && url.endsWith('/me/google-calendar/connect')) throw new Error('network down');
+    if (init.method === 'GET' && url.endsWith('/me/google-calendar')) {
+      statusReads += 1;
+      return { ok: true, status: 200, json: async () => ({ status: 'connected', access: 'read_only' }) };
+    }
+    return ok(url, init);
+  };
+  await click(connectButton());
+  await codeClient.configs[0].callback({ code: 'c-lost' });
+  await settle();
+  assert.equal(statusReads, 1, 'the status was asked for after the lost response');
+  const card = calCard().textContent;
+  assert.match(card, /Connected/);
+  assert.match(card, /Read-only access/);
+  assert.match(card, new RegExp(CAL_OK.replace('.', '\\.')));
+  assert.doesNotMatch(card, new RegExp(CAL_FAIL.replace(/\./g, '\\.')));
+});
+
+test('CLM-4: a lost connect response when the server has no connection shows the failure and keeps the card', async () => {
+  await openAccount(() => [200, { status: 'connected', access: 'read_write' }]);
+  const ok = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    if (init.method === 'POST' && url.endsWith('/me/google-calendar/connect')) throw new Error('network down');
+    return ok(url, init); // GET /me/google-calendar answers not_connected
+  };
+  await click(connectButton());
+  await codeClient.configs[0].callback({ code: 'c-lost-2' });
+  await settle();
+  assert.match(calCard().textContent, new RegExp(CAL_FAIL.replace(/\./g, '\\.')));
   assert.ok(connectButton(), 'card unchanged');
 });
