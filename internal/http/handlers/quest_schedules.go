@@ -14,6 +14,7 @@ type questScheduleServicer interface {
 	Schedule(ctx context.Context, userID, householdID uuid.UUID, in app.ScheduleInput, adminPin string) (app.QuestSchedule, error)
 	List(ctx context.Context, userID, householdID uuid.UUID, adminPin string) ([]app.QuestSchedule, error)
 	Cancel(ctx context.Context, userID, householdID, scheduleID uuid.UUID, adminPin string) error
+	Upcoming(ctx context.Context, userID, householdID, memberID uuid.UUID) ([]app.UpcomingQuest, error)
 }
 
 // QuestScheduleHandler serves /api/v1/households/{householdID}/quest-schedules.
