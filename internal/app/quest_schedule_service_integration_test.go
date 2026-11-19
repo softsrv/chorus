@@ -32,6 +32,9 @@ type scheduleWorld struct {
 	quests    *app.QuestService
 	family    *app.FamilyService
 	schedules *app.QuestScheduleService
+	// pin is the household's admin PIN once setAdminPin set one; the
+	// helpers pass it on every admin-gated call.
+	pin string
 }
 
 func newScheduleWorld(t *testing.T, prefix string) *scheduleWorld {
@@ -58,9 +61,18 @@ func newScheduleWorld(t *testing.T, prefix string) *scheduleWorld {
 	}
 }
 
+// setAdminPin sets the household's admin PIN; later helper calls pass it.
+func (w *scheduleWorld) setAdminPin(pin string) {
+	w.t.Helper()
+	if err := w.family.SetAdminPin(w.ctx, w.admin, w.h, pin, w.pin); err != nil {
+		w.t.Fatalf("set admin pin: %v", err)
+	}
+	w.pin = pin
+}
+
 func (w *scheduleWorld) member(name string) uuid.UUID {
 	w.t.Helper()
-	m, err := w.family.Create(w.ctx, w.admin, w.h, app.FamilyMemberInput{Name: name}, "")
+	m, err := w.family.Create(w.ctx, w.admin, w.h, app.FamilyMemberInput{Name: name}, w.pin)
 	if err != nil {
 		w.t.Fatalf("create member %s: %v", name, err)
 	}
@@ -69,7 +81,7 @@ func (w *scheduleWorld) member(name string) uuid.UUID {
 
 func (w *scheduleWorld) quest(in app.QuestInput) uuid.UUID {
 	w.t.Helper()
-	qv, err := w.quests.Create(w.ctx, w.admin, w.h, in, "")
+	qv, err := w.quests.Create(w.ctx, w.admin, w.h, in, w.pin)
 	if err != nil {
 		w.t.Fatalf("create quest %s: %v", in.Name, err)
 	}
@@ -88,7 +100,7 @@ func (w *scheduleWorld) date(days int) string {
 
 func (w *scheduleWorld) schedule(quest, member uuid.UUID, days int) app.QuestSchedule {
 	w.t.Helper()
-	s, err := w.schedules.Schedule(w.ctx, w.admin, w.h, app.ScheduleInput{QuestID: quest, MemberID: member, Date: w.date(days)}, "")
+	s, err := w.schedules.Schedule(w.ctx, w.admin, w.h, app.ScheduleInput{QuestID: quest, MemberID: member, Date: w.date(days)}, w.pin)
 	if err != nil {
 		w.t.Fatalf("schedule: %v", err)
 	}
@@ -123,7 +135,7 @@ func (w *scheduleWorld) holder(quest uuid.UUID) *uuid.UUID {
 
 func (w *scheduleWorld) scheduleIDs() []uuid.UUID {
 	w.t.Helper()
-	list, err := w.schedules.List(w.ctx, w.admin, w.h, "")
+	list, err := w.schedules.List(w.ctx, w.admin, w.h, w.pin)
 	if err != nil {
 		w.t.Fatalf("list schedules: %v", err)
 	}
@@ -144,9 +156,7 @@ func TestIntegration_QuestSchedules(t *testing.T) {
 	t.Run("assigned_at_local_midnight", func(t *testing.T) {
 		w := newScheduleWorld(t, "schedmidnight")
 		sam := w.member("Sam")
-		if err := w.family.SetAdminPin(w.ctx, w.admin, w.h, "4321", ""); err != nil {
-			t.Fatalf("set admin pin: %v", err)
-		}
+		w.setAdminPin("4321")
 		cat := w.quest(app.QuestInput{Name: "Feed the cat", Points: num(5)})
 		s, err := w.schedules.Schedule(w.ctx, w.admin, w.h, app.ScheduleInput{QuestID: cat, MemberID: sam, Date: w.date(1)}, "4321")
 		if err != nil {
@@ -336,9 +346,7 @@ func TestIntegration_QuestSchedules(t *testing.T) {
 		if _, err := w.schedules.Schedule(w.ctx, other.admin, w.h, app.ScheduleInput{QuestID: q, MemberID: ann, Date: w.date(1)}, ""); !errors.Is(err, app.ErrNotFound) {
 			t.Errorf("non-member: err = %v, want ErrNotFound", err)
 		}
-		if err := w.family.SetAdminPin(w.ctx, w.admin, w.h, "4321", ""); err != nil {
-			t.Fatalf("set admin pin: %v", err)
-		}
+		w.setAdminPin("4321")
 		in := app.ScheduleInput{QuestID: q, MemberID: ann, Date: w.date(1)}
 		if _, err := w.schedules.Schedule(w.ctx, w.admin, w.h, in, ""); !errors.Is(err, app.ErrAdminPinRequired) {
 			t.Errorf("no admin pin: err = %v, want ErrAdminPinRequired", err)
