@@ -3,35 +3,31 @@ package handlers
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"net/http"
-	"net/url"
+	"strings"
 
 	"github.com/softsrv/chorus/internal/app"
 	"github.com/softsrv/chorus/internal/http/respond"
 )
 
-// googleSignInReturnPath is the web client page the callback lands on. It
-// reads either ?code=<hand-off code> or ?error=cancelled|failed.
-const googleSignInReturnPath = "/google-sign-in"
-
 // googleSignInServicer is the subset of app.GoogleSignIn the handler needs.
 type googleSignInServicer interface {
-	Start(ctx context.Context) (string, error)
-	Callback(ctx context.Context, state, code, errParam string) (string, error)
-	Redeem(ctx context.Context, code string, meta app.DeviceMeta) (app.TokenResult, error)
+	SignIn(ctx context.Context, idToken string, meta app.DeviceMeta) (app.TokenResult, error)
+	WebClientID() string
 }
 
-// GoogleHandler serves the public auth config and the Google sign-in routes.
+// GoogleHandler serves the public auth config and Google sign-in.
 // A nil service means Google sign-in is not configured.
 type GoogleHandler struct {
-	svc  googleSignInServicer
-	meta *AuthHandler // reuses deviceMeta so sessions are labelled like Login's
+	svc             googleSignInServicer
+	calendarEnabled bool
+	meta            *AuthHandler // reuses deviceMeta so sessions are labelled like Login's
 }
 
-// NewGoogleHandler constructs a GoogleHandler. svc may be nil (disabled).
-func NewGoogleHandler(svc *app.GoogleSignIn, trustedProxyCount int) *GoogleHandler {
-	h := &GoogleHandler{meta: &AuthHandler{trustedProxyCount: trustedProxyCount}}
+// NewGoogleHandler constructs a GoogleHandler. svc may be nil (disabled);
+// calendarEnabled reports whether the Google Calendar service is configured.
+func NewGoogleHandler(svc *app.GoogleSignIn, calendarEnabled bool, trustedProxyCount int) *GoogleHandler {
+	h := &GoogleHandler{calendarEnabled: calendarEnabled, meta: &AuthHandler{trustedProxyCount: trustedProxyCount}}
 	if svc != nil {
 		h.svc = svc
 	}
@@ -41,77 +37,55 @@ func NewGoogleHandler(svc *app.GoogleSignIn, trustedProxyCount int) *GoogleHandl
 // Enabled reports whether Google sign-in is configured.
 func (h *GoogleHandler) Enabled() bool { return h.svc != nil }
 
-// AuthConfig tells clients which optional sign-in features are available.
-// Public: the sign-in page needs it before anyone is signed in.
+// authConfigJSON is the public GET /auth/config body. It carries only the web
+// client ID, never the secret or the iOS and Android client IDs.
+type authConfigJSON struct {
+	GoogleSignIn   bool   `json:"google_sign_in"`
+	GoogleCalendar bool   `json:"google_calendar"`
+	GoogleClientID string `json:"google_client_id"`
+}
+
+// AuthConfig tells clients which optional sign-in features are available and
+// the web client ID Google's sign-in needs. Public: the sign-in page needs it
+// before anyone is signed in.
 func (h *GoogleHandler) AuthConfig(w http.ResponseWriter, r *http.Request) {
-	respond.JSON(w, http.StatusOK, map[string]bool{
-		"google_sign_in":  h.Enabled(),
-		"google_calendar": false,
-	})
+	body := authConfigJSON{GoogleSignIn: h.Enabled(), GoogleCalendar: h.Enabled() && h.calendarEnabled}
+	if h.Enabled() {
+		body.GoogleClientID = h.svc.WebClientID()
+	}
+	respond.JSON(w, http.StatusOK, body)
 }
 
-// GoogleStart sends the browser to Google's consent screen.
-func (h *GoogleHandler) GoogleStart(w http.ResponseWriter, r *http.Request) {
-	if !h.Enabled() {
-		notFound(w)
-		return
-	}
-	target, err := h.svc.Start(r.Context())
-	if err != nil {
-		slog.ErrorContext(r.Context(), "google sign-in start", "error", err)
-		redirectToSPA(w, r, url.Values{"error": {"failed"}})
-		return
-	}
-	http.Redirect(w, r, target, http.StatusFound)
-}
-
-// GoogleCallback is where Google sends the browser back. It always redirects
-// to the web client: with a hand-off code on success, otherwise with only a
-// generic reason. No internal or Google error text is ever passed on.
-func (h *GoogleHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
-	if !h.Enabled() {
-		notFound(w)
-		return
-	}
-	q := r.URL.Query()
-	code, err := h.svc.Callback(r.Context(), q.Get("state"), q.Get("code"), q.Get("error"))
-	switch {
-	case err == nil:
-		redirectToSPA(w, r, url.Values{"code": {code}})
-	case errors.Is(err, app.ErrGoogleSignInCancelled):
-		redirectToSPA(w, r, url.Values{"error": {"cancelled"}})
-	default:
-		redirectToSPA(w, r, url.Values{"error": {"failed"}})
-	}
-}
-
-// GoogleRedeem exchanges a hand-off code for the same token JSON as login.
-func (h *GoogleHandler) GoogleRedeem(w http.ResponseWriter, r *http.Request) {
+// GoogleSignIn exchanges a Google ID token from any configured app (web, iOS,
+// Android) for the same token JSON as login. Every refusal of the token or
+// the identity gets one generic error; the cause is only logged.
+func (h *GoogleHandler) GoogleSignIn(w http.ResponseWriter, r *http.Request) {
 	if !h.Enabled() {
 		notFound(w)
 		return
 	}
 	var req struct {
-		Code       string `json:"code"`
+		IDToken    string `json:"id_token"`
 		DeviceName string `json:"device_name"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	result, err := h.svc.Redeem(r.Context(), req.Code, h.meta.deviceMeta(r, req.DeviceName))
+	idToken := strings.TrimSpace(req.IDToken)
+	if idToken == "" {
+		respond.ValidationError(w, map[string]string{"id_token": "is required"})
+		return
+	}
+	result, err := h.svc.SignIn(r.Context(), idToken, h.meta.deviceMeta(r, req.DeviceName))
 	if err != nil {
-		if errors.Is(err, app.ErrSignInCodeInvalid) {
-			respond.Error(w, http.StatusBadRequest, "invalid_code", "Google sign-in could not be completed. Try again.")
+		if errors.Is(err, app.ErrGoogleSignInFailed) {
+			respond.Error(w, http.StatusUnauthorized, "google_sign_in_failed", "Google sign-in could not be completed. Try again.")
 			return
 		}
 		writeError(w, r, err)
 		return
 	}
 	respond.JSON(w, http.StatusOK, toTokens(result))
-}
-
-func redirectToSPA(w http.ResponseWriter, r *http.Request, v url.Values) {
-	http.Redirect(w, r, googleSignInReturnPath+"?"+v.Encode(), http.StatusFound)
 }
 
 func notFound(w http.ResponseWriter) {
