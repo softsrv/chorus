@@ -1,0 +1,147 @@
+# QB · Starting Eleven (#6613). Installed by a pull request QB opened when your team set a principle to
+# Enforce. `.github/workflows/qb-starting-eleven.yml` only starts this: everything else is in `.qb`.
+#
+# On every pull request it runs `ai-readiness --eval`, which reads the pull request and its merge base
+# with the same tool, so it needs no baseline and old debt never fails it. A NEW precise finding under
+# a principle in `.qb/principles.json` fails the job. Everything else only reports.
+#
+# THE BASE BRANCH JUDGES. The list and the tool are read from it with `git show`, so a pull request
+# cannot take a principle off, or bring its own copy of the tool, to get itself through. Changing either
+# is a pull request of its own, and takes effect once it has merged. The Playbook is how a team asks.
+#
+# It never contacts QB: it needs no credentials and works when QB is down. It reads the repository and
+# its git history only: it installs nothing from your repo, runs none of your code, and needs no secrets
+# beyond the workflow's read-only token.
+name: QB · Starting Eleven
+description: Fails a pull request on a new precise finding under a principle your team enforces.
+
+runs:
+  using: composite
+  steps:
+    # The tool is one file and needs only Node. A repo may not use Node at all.
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: '22'
+    - name: Resolve the base
+      id: base
+      shell: bash
+      # THE BASE is the commit this pull request's merge was built on: the merge's first parent, never
+      # the payload's `pull_request.base.sha`, which goes stale on a pull request behind its base
+      # branch and then counts the base branch's newer findings as this one's. A base that cannot be
+      # resolved fails the job; it is never guessed.
+      env:
+        # >>> diff-base twin: inputs
+        EVENT_NAME: ${{ github.event_name }}
+        PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        MG_BASE: ${{ github.event.merge_group.base_sha }}
+        BEFORE: ${{ github.event.before }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        # <<< diff-base twin: inputs
+      run: |
+        set -euo pipefail
+        # >>> diff-base twin
+        # The rules of QB's diff base (scripts/ci/lib/pr-base.mjs), in bash: this action runs in your
+        # repository, where that script is not. A parity test runs both over the same repositories.
+        #   pull_request  HEAD^1, once HEAD^2 is the pull request's head
+        #   merge_group   merge_group.base_sha, which must be an ancestor of HEAD
+        #   push          before when an ancestor; merge-base after a force push; a new branch as below
+        #   otherwise     merge-base with a freshly fetched origin/<default branch>
+        qb_diff_base() {
+          local head first="" second="" sha="" n branch ref
+          head=$(git rev-parse --verify 'HEAD^{commit}') || return 1
+          qb_err() { echo "::error title=diff base::$1" >&2; }
+          qb_shallow() { [ "$(git rev-parse --is-shallow-repository)" = true ]; }
+          qb_commit() { git rev-parse --verify -q "$1^{commit}" 2>/dev/null; }
+          qb_anc() { git merge-base --is-ancestor "$1" "$2" 2>/dev/null; }
+          qb_parents() {
+            if ! qb_commit HEAD^1 >/dev/null && qb_shallow; then
+              git fetch --no-tags -q --deepen=1 origin "$head" 2>/dev/null || true
+            fi
+            first=$(qb_commit HEAD^1 || true)
+            second=$(qb_commit HEAD^2 || true)
+          }
+          qb_deepen_to() { # deepen HEAD's history until $1 is an ancestor, or the history is whole
+            for n in 8 64 512; do
+              if qb_anc "$1" "$head" || ! qb_shallow; then break; fi
+              git fetch --no-tags -q --deepen=$n origin "$head" 2>/dev/null || true
+            done
+            if ! qb_anc "$1" "$head" && qb_shallow; then
+              git fetch --no-tags -q --unshallow origin "$head" 2>/dev/null || true
+            fi
+            qb_anc "$1" "$head"
+          }
+          qb_have() {
+            qb_commit "$1" >/dev/null \
+              || { git fetch --no-tags -q --depth=1 origin "$1" 2>/dev/null && qb_commit "$1" >/dev/null; }
+          }
+          qb_default() {
+            branch=${DEFAULT_BRANCH:-main}
+            ref="refs/remotes/origin/$branch"
+            if qb_shallow; then git fetch --no-tags -q --unshallow origin "$head" || return 1; fi
+            git fetch --no-tags -q origin "+refs/heads/$branch:$ref" || return 1
+            git merge-base "$ref" "$head" || { qb_err "HEAD shares no history with origin/$branch."; return 1; }
+          }
+          case "$EVENT_NAME" in
+            pull_request | pull_request_target)
+              qb_parents
+              if [ -z "$second" ]; then qb_err "HEAD $head is not a merge commit."; return 1; fi
+              if [ -z "$PR_HEAD" ] || [ "$second" != "$PR_HEAD" ]; then
+                qb_err "HEAD^2 is $second but pull_request.head.sha is ${PR_HEAD:-(absent)}."; return 1
+              fi
+              sha=$first ;;
+            merge_group)
+              if [ -z "$MG_BASE" ]; then qb_err "merge_group.base_sha is absent from the event."; return 1; fi
+              if ! qb_have "$MG_BASE"; then qb_err "merge_group.base_sha $MG_BASE cannot be fetched."; return 1; fi
+              if qb_deepen_to "$MG_BASE"; then
+                sha=$(qb_commit "$MG_BASE")
+              elif qb_shallow; then
+                qb_err "could not fetch enough history to tell whether merge_group.base_sha $MG_BASE is an ancestor of HEAD."; return 1
+              else
+                qb_err "merge_group.base_sha $MG_BASE is not an ancestor of HEAD $head."; return 1
+              fi ;;
+            push)
+              if [ -z "$BEFORE" ] || [ -z "${BEFORE//0/}" ]; then
+                sha=$(qb_default) || return 1
+              elif ! qb_have "$BEFORE"; then
+                qb_err "the push's before $BEFORE cannot be fetched."; return 1
+              else
+                if qb_deepen_to "$BEFORE"; then
+                  sha=$(qb_commit "$BEFORE")
+                elif qb_shallow; then
+                  qb_err "could not fetch enough history to tell whether before $BEFORE is an ancestor of HEAD."; return 1
+                else
+                  sha=$(git merge-base "$BEFORE" "$head") || { qb_err "before $BEFORE shares no history with HEAD $head."; return 1; }
+                  echo "::warning title=diff base::before $BEFORE is not an ancestor of HEAD (a force push); diffing against their merge-base $sha." >&2
+                fi
+              fi ;;
+            *)
+              sha=$(qb_default) || return 1 ;;
+          esac
+          if [ -z "$sha" ] || ! qb_commit "$sha" >/dev/null; then qb_err "the base (${sha:-none}) is not a commit in this checkout."; return 1; fi
+          if ! qb_anc "$sha" "$head"; then qb_err "the base $sha is not an ancestor of HEAD $head."; return 1; fi
+          qb_commit "$sha"
+        }
+        # <<< diff-base twin
+        BASE=$(qb_diff_base)
+        echo "sha=$BASE" >>"$GITHUB_OUTPUT"
+    - name: New findings under the enforced principles fail
+      shell: bash
+      env:
+        BASE: ${{ steps.base.outputs.sha }}
+      run: |
+        set -euo pipefail
+        if [ -z "$BASE" ]; then
+          echo "::error::No base commit was resolved, so nothing can be judged: this is red rather than a pass."
+          exit 1
+        fi
+        tool="$RUNNER_TEMP/qb-ai-readiness.mjs"
+        if git cat-file -e "$BASE:.qb/ai-readiness.mjs" 2>/dev/null; then
+          git show "$BASE:.qb/ai-readiness.mjs" >"$tool"
+        elif git cat-file -e "$BASE:.qb/principles.json" 2>/dev/null; then
+          echo "::error::.qb/principles.json is on the base branch without .qb/ai-readiness.mjs: nothing can judge this pull request."
+          exit 1
+        else
+          # The pull request that installs this: nothing is held yet, and this reports.
+          cp "$GITHUB_ACTION_PATH/ai-readiness.mjs" "$tool"
+        fi
+        node "$tool" . --eval "$BASE" --block
