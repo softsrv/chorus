@@ -5,7 +5,7 @@ BIN_DIR          := ./bin
 -include .env
 export
 
-.PHONY: dev run build test test-js test-integration test-system test-system-image test-cover boundaries fmt vet lint vulncheck secret-scan check \
+.PHONY: dev run build test test-js test-integration test-system test-system-image test-cover boundaries fmt fmt-check vet lint vulncheck secret-scan mod-verify sqlc-check check \
         services-up services-down services-reset \
         daisyui-install tailwind tailwind-watch app \
         migrate-up migrate-down migrate-create migrate-status require-test-db migrate-test migrate-roundtrip-test \
@@ -48,7 +48,7 @@ test:
 
 # Web client unit tests: app.js against a minimal DOM and a stubbed fetch.
 test-js:
-	node --test web/jstest/quests.test.mjs web/jstest/rewards.test.mjs web/jstest/combos.test.mjs web/jstest/family.test.mjs web/jstest/google.test.mjs
+	node --test web/jstest/*.test.mjs
 
 # Integration tests run against TEST_DATABASE_URL (the chorus_test database).
 test-integration: migrate-test migrate-roundtrip-test
@@ -74,6 +74,9 @@ boundaries:
 fmt:
 	gofmt -w .
 
+fmt-check:
+	@out=$$(gofmt -l .); if [ -n "$$out" ]; then echo "$$out" >&2; exit 1; fi
+
 vet:
 	go vet ./...
 	go vet -tags integration ./...
@@ -89,8 +92,11 @@ GITLEAKS_VERSION ?= 8.24.0
 secret-scan:
 	go run github.com/zricethezav/gitleaks/v8@v$(GITLEAKS_VERSION) git --redact --config .gitleaks.toml
 
+mod-verify:
+	go mod download && go mod verify
+
 # Everything CI runs.
-check: boundaries vet test test-js test-integration test-system vulncheck secret-scan
+check: boundaries vet test test-js test-integration test-system vulncheck secret-scan fmt-check sqlc-check mod-verify
 
 ## ── CSS ──────────────────────────────────────────────────────────────────────
 
@@ -143,6 +149,10 @@ migrate-status:
 
 sqlc-generate:
 	sqlc generate -f db/sqlc.yaml
+
+sqlc-check:
+	go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1 generate -f db/sqlc.yaml
+	git diff --exit-code internal/db
 
 ## ── Docker ───────────────────────────────────────────────────────────────────
 
