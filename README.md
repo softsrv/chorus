@@ -32,7 +32,7 @@ make test               # unit tests
 make test-integration   # against the chorus_test DB (docker compose creates it)
 make test-system        # system tests: build the stylesheet (needs tailwindcss), run the real app binary against Postgres and a capture SMTP server
 make test-system-image  # same tests against the built Docker image (Linux-only: host networking)
-make check              # everything CI runs, including boundary check, system tests, govulncheck and secret-scan
+make check              # boundaries, fmt-check (gofmt check), sqlc-check (sqlc staleness check), mod-verify (module verify), vet, unit, JS, integration, system tests, govulncheck and secret-scan (everything CI runs)
 ```
 
 ## CI and images

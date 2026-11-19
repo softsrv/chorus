@@ -12,14 +12,15 @@ make tailwind-watch   # Rebuild CSS on change (host); run separately while editi
 make app              # Just the app container, foreground, hot reload (Ctrl-C stops it)
 make run              # One-off app container without hot reload
 make test             # Unit tests (-race)
-make test-js          # Web client unit tests (node --test web/jstest/quests.test.mjs; needs Node 22+)
+make test-js          # Web client unit tests (runs node --test over every web/jstest/*.test.mjs; needs Node 22+)
 make test-integration # Migrates chorus_test, runs round-trip test, then runs integration tests
 make test-system      # Migrates chorus_test, builds the stylesheet (make tailwind; needs tailwindcss), runs system tests against the built binary
 make test-system-image # Runs system tests against the built Docker image (Linux-only: host networking)
 make boundaries       # Boundary check (internal/archtest)
 make secret-scan      # Pinned gitleaks full-history scan (--redact) against .gitleaks.toml
-make check            # boundaries + vet + unit + web JS unit + integration + test-system + govulncheck + secret-scan (what CI runs)
+make check            # boundaries + fmt-check + sqlc-check + mod-verify + vet + unit + JS (web JS unit) + integration + system tests (test-system) + govulncheck + secret-scan (what CI runs)
 make vet / fmt / lint
+make fmt-check | sqlc-check | mod-verify
 
 # Database
 make migrate-up | migrate-down | migrate-status
