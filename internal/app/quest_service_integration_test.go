@@ -22,6 +22,19 @@ import (
 
 func num(n int64) app.NumberField { return app.NumberField{Set: true, Value: n} }
 
+// completionStatusBy reads a quest completion's stored status and status_by
+// (nil when NULL) straight from the table.
+func completionStatusBy(t *testing.T, pool *pgxpool.Pool, completionID uuid.UUID) (string, *uuid.UUID) {
+	t.Helper()
+	var status string
+	var by *uuid.UUID
+	if err := pool.QueryRow(context.Background(),
+		`SELECT status, status_by FROM quest_completions WHERE id = $1`, completionID).Scan(&status, &by); err != nil {
+		t.Fatalf("read completion status_by: %v", err)
+	}
+	return status, by
+}
+
 // TestIntegration_QuestCRUD: the administrator's quest is stored with exactly
 // the given name, points, repeat_days and notes, and List and Get return them.
 func TestIntegration_QuestCRUD(t *testing.T) {
@@ -889,6 +902,10 @@ func TestIntegration_QuestApproval(t *testing.T) {
 		t.Errorf("pending: %+v", rows)
 	}
 	compID := rows[0].ID
+	// Marking done changes no status by an admin: status_by stays NULL.
+	if st, by := completionStatusBy(t, pool, compID); st != "pending" || by != nil {
+		t.Errorf("after mark done: status %q status_by %v, want pending NULL", st, by)
+	}
 	// Once marked done, the member no longer holds it, so abandon is ErrNotFound.
 	if _, err := quests.Abandon(ctx, alice, h.ID, quest.ID, asBen); !errors.Is(err, app.ErrNotFound) {
 		t.Errorf("abandon after mark done: %v, want ErrNotFound", err)
@@ -899,6 +916,9 @@ func TestIntegration_QuestApproval(t *testing.T) {
 	rejected, err := quests.Reject(ctx, alice, h.ID, compID, "")
 	if err != nil || rejected.ID != compID || rejected.Status != "rejected" || rejected.QuestID != quest.ID {
 		t.Fatalf("reject: %+v %v", rejected, err)
+	}
+	if st, by := completionStatusBy(t, pool, compID); st != "rejected" || by == nil || *by != alice {
+		t.Errorf("after reject: status %q status_by %v, want rejected by %v", st, by, alice)
 	}
 	if p := points(ben.ID); p != 0 {
 		t.Errorf("points after reject: %d, want 0", p)
@@ -1027,6 +1047,9 @@ func TestIntegration_QuestApproval(t *testing.T) {
 	}
 	if wins != 1 || notFound != N-1 {
 		t.Errorf("concurrent approvals: %d won, %d not found; want 1 and %d", wins, notFound, N-1)
+	}
+	if st, by := completionStatusBy(t, pool, comp2ID); st != "approved" || by == nil || *by != alice {
+		t.Errorf("after approve: status %q status_by %v, want approved by %v", st, by, alice)
 	}
 	if p := points(ben.ID); p != 7 {
 		t.Errorf("Ben's points after approval: %d, want 7", p)
