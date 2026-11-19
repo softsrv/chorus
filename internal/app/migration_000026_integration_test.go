@@ -13,14 +13,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// TestIntegration_DropUnusedTablesMigration proves CLM-1 and CLM-3:
-//   - CLM-1: In a scratch schema migrated to version 25, apply 000026 up and assert
+// TestIntegration_DropUnusedTablesMigration proves the drop check, the survivors check,
+// and the latest-schema check:
+//   - drop check: In a scratch schema migrated to version 25, apply 000026 up and assert
 //     to_regclass is NULL for household_invites, chores, and household_members_retired,
 //     and no leftover idx_household_invites_* or idx_chores_* indexes exist.
 //     DROP TABLE IF EXISTS makes a second run of 000026 up change nothing and error free.
-//   - CLM-3: Applying 000026 up removes only the three named tables: every other table,
+//   - survivors check: Applying 000026 up removes only the three named tables: every other table,
 //     and seeded rows (including households, household_members, and household_quests
 //     migrated from chores with matching IDs) survives unchanged with identical counts.
+//   - latest-schema check: On the shared public schema migrated to latest, assert that
+//     to_regclass is NULL for household_invites, chores, and household_members_retired.
 func TestIntegration_DropUnusedTablesMigration(t *testing.T) {
 	admin := testDB(t)
 	ctx := context.Background()
@@ -149,7 +152,7 @@ func TestIntegration_DropUnusedTablesMigration(t *testing.T) {
 	p26 := pairs[idx26]
 	execMigration(t, pool, "up "+p26.name, p26.up)
 
-	// CLM-1: Verify the 3 tables are gone (to_regclass is NULL)
+	// drop check: Verify the 3 tables are gone (to_regclass is NULL)
 	for _, tbl := range []string{"household_invites", "chores", "household_members_retired"} {
 		var reg *string
 		if err := pool.QueryRow(ctx, `SELECT to_regclass($1)::text`, fmt.Sprintf(`%s."%s"`, schema, tbl)).Scan(&reg); err != nil {
@@ -160,7 +163,7 @@ func TestIntegration_DropUnusedTablesMigration(t *testing.T) {
 		}
 	}
 
-	// CLM-1: Verify no leftover idx_household_invites_* or idx_chores_* indexes exist
+	// drop check: Verify no leftover idx_household_invites_* or idx_chores_* indexes exist
 	var indexCount int
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*)
@@ -174,7 +177,7 @@ func TestIntegration_DropUnusedTablesMigration(t *testing.T) {
 		t.Errorf("found %d leftover indexes matching idx_household_invites_%% or idx_chores_%%", indexCount)
 	}
 
-	// CLM-3: Assert table set differs ONLY by the 3 dropped tables
+	// survivors check: Assert table set differs ONLY by the 3 dropped tables
 	tablesAt26 := listTables(t, pool, schema)
 	var dropped []string
 	for _, tbl := range tablesAt25 {
@@ -198,7 +201,7 @@ func TestIntegration_DropUnusedTablesMigration(t *testing.T) {
 		t.Errorf("unexpected tables added by 000026 up: %v", added)
 	}
 
-	// CLM-3: Assert surviving row counts are unchanged
+	// survivors check: Assert surviving row counts are unchanged
 	if got := countRows("households"); got != hhCountBefore {
 		t.Errorf("households row count changed: %d -> %d", hhCountBefore, got)
 	}
@@ -225,7 +228,7 @@ func TestIntegration_DropUnusedTablesMigration(t *testing.T) {
 		t.Errorf("quest fields mismatch: got (%s, %s), want ('Carried Chore', 'Desc')", qName, qNotes)
 	}
 
-	// CLM-1: Apply 000026 up again (idempotent, DROP TABLE IF EXISTS makes second run change nothing)
+	// drop check: Apply 000026 up again (idempotent, DROP TABLE IF EXISTS makes second run change nothing)
 	execMigration(t, pool, "re-up "+p26.name, p26.up)
 
 	// Verify again all 3 tables still do not exist and counts remain unchanged
@@ -240,6 +243,17 @@ func TestIntegration_DropUnusedTablesMigration(t *testing.T) {
 	}
 	if got := countRows("household_quests"); got != hqCountBefore {
 		t.Errorf("household_quests row count changed after re-up: %d -> %d", hqCountBefore, got)
+	}
+
+	// latest-schema check: Verify none of the dropped tables exist in the shared public schema
+	for _, tbl := range []string{"household_invites", "chores", "household_members_retired"} {
+		var reg *string
+		if err := admin.QueryRow(ctx, `SELECT to_regclass('public.' || $1)::text`, tbl).Scan(&reg); err != nil {
+			t.Fatalf("to_regclass public.%s: %v", tbl, err)
+		}
+		if reg != nil {
+			t.Errorf("table %s still exists at the latest schema: %s", tbl, *reg)
+		}
 	}
 }
 
