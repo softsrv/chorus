@@ -346,7 +346,7 @@ test('admin points CLM-4: the member view has the heading, Back above the adjust
   assert.deepEqual(h3s(), ['Maya — 42 points']);
   const back = buttons(env.$app, 'Back to family')[0];
   const order = walk(env.$app).filter((n) => n === back || n.tagName === 'LEGEND' || n.tagName === 'H4');
-  assert.deepEqual(order.map((n) => n.textContent), ['Back to family', 'Adjust points', 'Points history', 'Reward history']);
+  assert.deepEqual(order.map((n) => n.textContent), ['Back to family', 'Adjust points', 'Schedule a quest', 'Scheduled', 'Points history', 'Reward history']);
   await click(back);
   assert.deepEqual(h3s(), ['Family']);
   assert.equal(adjustForm(), undefined, 'no adjust form on the family list');
