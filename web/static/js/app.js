@@ -211,6 +211,18 @@ function toast(message, kind = 'info') {
 
 const fmtDate = (iso) => new Date(iso).toLocaleString();
 
+// fmtLocalDay writes a household-local YYYY-MM-DD as 'Thu 21 Nov'. It reads
+// the date's own digits (no Date parsing in the browser's timezone), so the
+// day never shifts.
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function fmtLocalDay(ymd) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd || '');
+  if (!m) return String(ymd ?? '');
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  return `${WEEKDAYS[d.getUTCDay()]} ${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
+}
+
 // ── API log panel ─────────────────────────────────────────────────────────────
 
 const SECRET_KEYS = /password|token|^code$/i;
@@ -849,6 +861,15 @@ async function takeCard(h, quests, members, rerender, member = activeMember) {
   // The reward history (approved redemptions) is read alongside it, under the
   // same rules: once per selection, its own failure shown only in its own
   // section, a wrong_pin handed to memberActionFailed.
+  // The member's upcoming scheduled quests are read once per render (any
+  // household member may read them, no PIN). A failed read shows inside the
+  // Upcoming section only: it never signs out or changes the member.
+  const upcomingRead = api('GET', `/households/${h.id}/family-members/${member.id}/upcoming-quests`).then(
+    (res) => ({ items: res?.items || [], error: null }),
+    (err) => {
+      console.error('upcoming quests', err);
+      return { items: [], error: 'Could not load upcoming quests. Reload to try again.' };
+    });
   if (memberHistory?.member !== member) {
     const read = (path, label) => api('GET', `/households/${h.id}/family-members/${member.id}/${path}`, undefined, {
       headers: { 'X-Member-PIN': member.pin ?? '' },
@@ -874,6 +895,11 @@ async function takeCard(h, quests, members, rerender, member = activeMember) {
   const historyError = result.points.error;
   const rewardHistory = result.rewards.items;
   const rewardHistoryError = result.rewards.error;
+  const upcoming = await upcomingRead;
+  if (activeMember !== member) return null;
+  // A quest the member holds shows in Mine, not in Upcoming.
+  const mineIds = new Set(parts.mine.map((q) => q.id));
+  const upcomingItems = upcoming.items.filter((u) => !mineIds.has(u.quest_id));
 
   const act = (verb, q) => action(async () => {
     if (activeMember !== member) return; // this card is stale: never send another member's identity for its quests
@@ -1003,6 +1029,15 @@ async function takeCard(h, quests, members, rerender, member = activeMember) {
       el('button', { class: 'btn btn-ghost btn-xs', text: 'Abandon', onclick: act('abandon', q) }),
     ), 'You have no quests yet.'),
     $share,
+    upcoming.error
+      ? el('div', { class: 'space-y-1' },
+        el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Upcoming' }),
+        alertBox('error', upcoming.error))
+      : section('Upcoming', upcomingItems,
+        (u) => el('li', { class: 'flex flex-wrap items-center gap-2 py-1 text-sm' },
+          el('span', { text: `${fmtLocalDay(u.next_date)} — ${u.quest_name}` }),
+          u.repeat && el('small', { class: 'badge badge-sm', text: 'repeats' })),
+        'You have no upcoming quests.'),
     section('Claimed', parts.claimed,
       (q) => row(q, el('span', { class: 'text-xs opacity-70', text: `Taken by ${nameOf[q.claimed_by] || 'a former member'}` }),
         waitingBadge(q)),

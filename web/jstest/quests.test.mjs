@@ -12,6 +12,8 @@ import {
   click, submit, section, sectionNode,
 } from './harness.mjs';
 import * as memberCardAdminRows from './fixtures/member-card-admin-rows.fixture.mjs';
+import { upcomingTwoItems } from './fixtures/member-upcoming.fixture.mjs';
+import { upcoming as upcomingNone } from './fixtures/member-upcoming-empty.fixture.mjs';
 import {
   MEMBERS, SAM, AVA, LEO, RANGE_QUESTS, FEED_CAT, MOW_LAWN, READ_CHAPTER, WATER_PLANTS, TIDY_ROOM, RAKE_LEAVES,
   BIRTHDAYS, MIN_ABOVE_MAX, RANGE_422, ageQuest,
@@ -66,6 +68,9 @@ function routes() {
       }
       if (typeof prop === 'string' && prop.startsWith(`GET ${HP}/family-members/`) && prop.endsWith('/reward-history')) {
         return (req) => (srv.rewardHistory ? srv.rewardHistory(req) : [200, { items: [] }]);
+      }
+      if (typeof prop === 'string' && prop.startsWith(`GET ${HP}/family-members/`) && prop.endsWith('/upcoming-quests')) {
+        return (req) => (srv.upcoming ? srv.upcoming(req) : [200, { items: [] }]);
       }
       return undefined;
     },
@@ -2159,4 +2164,75 @@ test('1.1/8: a 404 on reward approve or reject (already decided or cancelled) re
     assert.equal(sessionStorage.getItem(REFRESH_KEY), 'rt');
     delete srv.extra[`POST ${HP}/reward-redemptions/red-1/${verb}`];
   }
+});
+
+// ── Upcoming scheduled quests on the member's card (INT-0177 CLM-6..8) ──────
+
+const upcomingReads = () => calls.filter((c) => c.method === 'GET' && c.path === `${HP}/family-members/m-a/upcoming-quests`);
+const headingOrder = () => walk(env.$app).filter((n) => n.tagName === 'H4').map((n) => n.textContent);
+
+test('INT-0177 CLM-6: Upcoming lists the member\'s schedules soonest first as "Ddd D Mon — name", repeats on repeated ones, between Available and Claimed, read once per render', async () => {
+  // q1 (Feed the cat) is held by Ann: it shows in Mine, and a schedule of it
+  // is left out of Upcoming.
+  srv.quests = [quest({ available: false, claimed_by: 'm-a', claimed_at: '2025-01-02T00:00:00Z' })];
+  srv.upcoming = () => [200, { items: [...upcomingTwoItems, { ...upcomingTwoItems[0], id: 's3', quest_id: 'q1', quest_name: 'Held quest', next_date: '2024-11-23' }] }];
+  await loadApp();
+  await becomeAnn();
+
+  const up = section(env.$app, 'Upcoming');
+  assert.ok(up, 'Upcoming section present');
+  assert.match(up, /Thu 21 Nov — Clean your room.*Fri 22 Nov — Feed the cat/);
+  assert.doesNotMatch(up, /Held quest/);
+  assert.match(section(env.$app, 'Mine'), /Feed the cat/);
+  const items = walk(sectionNode(env.$app, 'Upcoming')).filter((n) => n.tagName === 'LI');
+  assert.equal(items.length, 2);
+  assert.doesNotMatch(items[0].textContent, /repeats/);
+  assert.match(items[1].textContent, /repeats$/);
+
+  const order = headingOrder();
+  assert.ok(order.indexOf('Available') < order.indexOf('Upcoming'), order.join(','));
+  assert.ok(order.indexOf('Upcoming') < order.indexOf('Claimed'), order.join(','));
+
+  // One read per render: re-reading the tab renders the card once more.
+  const before = upcomingReads().length;
+  assert.ok(before >= 1);
+  await click(walk(env.$app).find((n) => n.tagName === 'A' && n.textContent === 'Quests'));
+  assert.equal(upcomingReads().length, before + 1);
+});
+
+test('INT-0177 CLM-6: next_date is shown as the household-local day, never shifted by the browser timezone', async () => {
+  const tz = process.env.TZ;
+  process.env.TZ = 'Pacific/Honolulu'; // UTC-10: a Date-parsed '2024-11-21' would read as Wed 20 Nov
+  try {
+    srv.upcoming = () => [200, { items: [upcomingTwoItems[0]] }];
+    await loadApp();
+    await becomeAnn();
+    assert.match(section(env.$app, 'Upcoming'), /Thu 21 Nov — Clean your room/);
+  } finally {
+    if (tz === undefined) delete process.env.TZ; else process.env.TZ = tz;
+  }
+});
+
+test('INT-0177 CLM-7: with nothing scheduled the Upcoming section says "You have no upcoming quests."', async () => {
+  srv.upcoming = () => [200, { items: upcomingNone }];
+  await loadApp();
+  await becomeAnn();
+  assert.equal(section(env.$app, 'Upcoming'), 'UpcomingYou have no upcoming quests.');
+});
+
+test('INT-0177 CLM-8: a failed upcoming read shows an error inside Upcoming only; the lists, member and session stay', async () => {
+  srv.upcoming = () => err(500, 'internal', 'boom');
+  await loadApp();
+  await becomeAnn();
+  const node = sectionNode(env.$app, 'Upcoming');
+  assert.ok(node, 'Upcoming section present');
+  assert.ok(walk(node).some((n) => n.attributes.role === 'alert'), 'inline error');
+  assert.match(node.textContent, /Could not load upcoming quests\./);
+  assert.match(section(env.$app, 'Available'), /Feed the cat/);
+  assert.equal(section(env.$app, 'Mine'), 'MineYou have no quests yet.');
+  assert.equal(section(env.$app, 'Claimed'), 'ClaimedNobody else has a quest.');
+  assert.doesNotMatch(section(env.$app, 'Available'), /Could not load/);
+  assert.match(text(), /Quests for Ann/);
+  assert.equal(sessionStorage.getItem(REFRESH_KEY), 'rt');
+  assert.equal(signedOut, 0);
 });
