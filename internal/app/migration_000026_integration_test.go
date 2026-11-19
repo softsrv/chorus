@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -15,13 +14,13 @@ import (
 )
 
 // TestIntegration_DropUnusedTablesMigration proves CLM-1 and CLM-3:
-// - CLM-1: In a scratch schema migrated to version 25, apply 000026 up and assert
-//   to_regclass is NULL for household_invites, chores, and household_members_retired,
-//   and no leftover idx_household_invites_* or idx_chores_* indexes exist.
-//   DROP TABLE IF EXISTS makes a second run of 000026 up change nothing and error free.
-// - CLM-3: Applying 000026 up removes only the three named tables: every other table,
-//   and seeded rows (including households, household_members, and household_quests
-//   migrated from chores with matching IDs) survives unchanged with identical counts.
+//   - CLM-1: In a scratch schema migrated to version 25, apply 000026 up and assert
+//     to_regclass is NULL for household_invites, chores, and household_members_retired,
+//     and no leftover idx_household_invites_* or idx_chores_* indexes exist.
+//     DROP TABLE IF EXISTS makes a second run of 000026 up change nothing and error free.
+//   - CLM-3: Applying 000026 up removes only the three named tables: every other table,
+//     and seeded rows (including households, household_members, and household_quests
+//     migrated from chores with matching IDs) survives unchanged with identical counts.
 func TestIntegration_DropUnusedTablesMigration(t *testing.T) {
 	admin := testDB(t)
 	ctx := context.Background()
