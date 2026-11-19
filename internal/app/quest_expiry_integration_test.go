@@ -7,7 +7,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"log/slog"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -698,5 +703,128 @@ func TestIntegration_QuestExpiry_Race(t *testing.T) {
 		if t.Failed() {
 			return
 		}
+	}
+}
+
+// assertExpirySweepOnlyFromRunQuestExpiry: in the repo's production code
+// (every non-test .go file), ExpireOverdueQuests is called from exactly one
+// place, RunQuestExpiry in internal/app/quest_expiry.go, so no handler or
+// member action reaches the sweep.
+func assertExpirySweepOnlyFromRunQuestExpiry(t *testing.T) {
+	t.Helper()
+	const repoRoot = "../.."
+	var callers []string
+	fset := token.NewFileSet()
+	err := filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", "vendor":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return fmt.Errorf("parse %s: %w", path, err)
+		}
+		rel, err := filepath.Rel(repoRoot, path)
+		if err != nil {
+			return err
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "ExpireOverdueQuests" {
+					callers = append(callers, filepath.ToSlash(rel)+":"+fn.Name.Name)
+				}
+				return true
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk repo: %v", err)
+	}
+	want := []string{"internal/app/quest_expiry.go:RunQuestExpiry"}
+	if !reflect.DeepEqual(callers, want) {
+		t.Errorf("production callers of ExpireOverdueQuests: %v, want only %v", callers, want)
+	}
+}
+
+// TestIntegration_QuestExpiry_SharedQuestThreeMembersExpiry: a quest shared
+// among three members whose day has ended is dropped by all of them when the
+// sweep releases it: no participant row is left (not even a lone one), the
+// holder is cleared, the household's quest list shows it unshared with no
+// participants, and no completion or completion member row is written for
+// anyone on it.
+func TestIntegration_QuestExpiry_SharedQuestThreeMembersExpiry(t *testing.T) {
+	w := newExpiryWorld(t, "questexpirytrio", "Trio")
+	ann, ben, cara := w.member("Ann"), w.member("Ben"), w.member("Cara")
+	quest := w.quest(app.QuestInput{Name: "Clean the garage", Points: num(30), Shareable: true, TeamworkBonus: num(5)})
+	if _, err := w.quests.Accept(w.ctx, w.admin, w.h, quest, ann); err != nil {
+		t.Fatalf("Ann accepts: %v", err)
+	}
+	for _, m := range []app.MemberAction{ben, cara} {
+		if _, err := w.quests.Share(w.ctx, w.admin, w.h, quest, ann, m); err != nil {
+			t.Fatalf("share: %v", err)
+		}
+	}
+	if n := participantRows(t, w.pool, quest); n != 3 {
+		t.Fatalf("participants before expiry: %d, want 3", n)
+	}
+	w.backDate(quest)
+
+	if _, err := w.quests.ExpireOverdueQuests(w.ctx); err != nil {
+		t.Fatalf("ExpireOverdueQuests: %v", err)
+	}
+
+	if n := participantRows(t, w.pool, quest); n != 0 {
+		t.Errorf("participant rows after expiry: %d, want 0", n)
+	}
+	if got := w.get(quest); got.ClaimedBy != nil || got.ClaimedAt.Valid || got.ClaimExpiresAt.Valid {
+		t.Errorf("after expiry claimed_by=%v claimed_at=%v claim_expires_at=%v, want all NULL",
+			got.ClaimedBy, got.ClaimedAt, got.ClaimExpiresAt)
+	}
+	list, _, err := w.quests.List(w.ctx, w.admin, w.h, app.QuestPage{Limit: 50})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	found := false
+	for _, v := range list {
+		if v.ID != quest {
+			continue
+		}
+		found = true
+		if v.Shared() || len(v.Participants) != 0 || v.ClaimedBy != nil || v.AwaitingApproval {
+			t.Errorf("listed quest after expiry: shared=%v participants=%v claimed_by=%v awaiting=%v, want unshared, [], unheld, not awaiting",
+				v.Shared(), v.Participants, v.ClaimedBy, v.AwaitingApproval)
+		}
+	}
+	if !found {
+		t.Fatalf("expired quest missing from the household list")
+	}
+	if n := completionRows(t, w.pool, quest); n != 0 {
+		t.Errorf("completions after expiry: %d, want 0", n)
+	}
+	var members int
+	if err := w.pool.QueryRow(w.ctx,
+		`SELECT count(*) FROM quest_completion_members WHERE household_id = $1`, w.h).Scan(&members); err != nil {
+		t.Fatalf("count completion members: %v", err)
+	}
+	if members != 0 {
+		t.Errorf("completion member rows after expiry: %d, want 0", members)
 	}
 }

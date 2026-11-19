@@ -958,6 +958,78 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		t.Fatalf("restore bob member points: %v", err)
 	}
 
+	// CLM-8: the quest expiry sweep keys every statement by the household of
+	// the quest it releases. Household B holds a shared quest with a deadline
+	// still ahead; household A holds an overdue one.
+	bobKid, err := familySvc.Create(ctx, bob, bh.ID, app.FamilyMemberInput{Name: "Bob Kid"}, "")
+	if err != nil {
+		t.Fatalf("Create bob kid: %v", err)
+	}
+	bobTeam, err := quests.Create(ctx, bob, bh.ID, app.QuestInput{Name: "Bob Team", Points: num(10), Shareable: true}, "")
+	if err != nil {
+		t.Fatalf("Create bob team quest: %v", err)
+	}
+	if _, err := quests.Accept(ctx, bob, bh.ID, bobTeam.ID, asBob); err != nil {
+		t.Fatalf("Accept bob team quest: %v", err)
+	}
+	if _, err := quests.Share(ctx, bob, bh.ID, bobTeam.ID, asBob, app.MemberAction{MemberID: bobKid.ID}); err != nil {
+		t.Fatalf("Share bob team quest: %v", err)
+	}
+	bobTeamSnapshot := func() string {
+		t.Helper()
+		return rowJSON(t, pool, `SELECT to_jsonb(q)::text FROM household_quests q WHERE id = $1`, bobTeam.ID) +
+			rowJSON(t, pool, `SELECT coalesce(jsonb_agg(to_jsonb(p) ORDER BY p.member_id), '[]')::text
+				FROM household_quest_participants p WHERE quest_id = $1`, bobTeam.ID)
+	}
+	bobTeamBefore := bobTeamSnapshot()
+	if n := participantRows(t, pool, bobTeam.ID); n != 2 {
+		t.Fatalf("bob team participants before expiry: %d, want 2", n)
+	}
+	bobTeamRow, err := q.GetHouseholdQuest(ctx, db.GetHouseholdQuestParams{HouseholdID: bh.ID, ID: bobTeam.ID})
+	if err != nil || bobTeamRow.ClaimedBy == nil || !bobTeamRow.ClaimExpiresAt.Valid || !bobTeamRow.ClaimExpiresAt.Time.After(time.Now()) {
+		t.Fatalf("bob team quest before expiry: %+v, %v; want held with a future deadline", bobTeamRow, err)
+	}
+
+	// Probe: releasing B's quest through household A's id matches no row even
+	// when B's deadline has passed, and changes nothing.
+	if _, err := pool.Exec(ctx, `UPDATE household_quests SET claim_expires_at = NOW() - INTERVAL '1 minute' WHERE household_id = $1 AND id = $2`, bh.ID, bobTeam.ID); err != nil {
+		t.Fatalf("back-date bob team deadline: %v", err)
+	}
+	if _, err := q.ExpireQuestClaim(ctx, db.ExpireQuestClaimParams{HouseholdID: h.ID, ID: bobTeam.ID}); !errors.Is(err, pgx.ErrNoRows) {
+		t.Errorf("ExpireQuestClaim with household A and B's quest: %v, want pgx.ErrNoRows", err)
+	}
+	if n := participantRows(t, pool, bobTeam.ID); n != 2 {
+		t.Errorf("bob team participants after cross-household ExpireQuestClaim: %d, want 2", n)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE household_quests SET claim_expires_at = $3 WHERE household_id = $1 AND id = $2`, bh.ID, bobTeam.ID, bobTeamRow.ClaimExpiresAt); err != nil {
+		t.Fatalf("restore bob team deadline: %v", err)
+	}
+	if got := bobTeamSnapshot(); got != bobTeamBefore {
+		t.Errorf("cross-household ExpireQuestClaim changed B's quest:\n got %s\nwant %s", got, bobTeamBefore)
+	}
+
+	aliceOverdue, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "Overdue in A", Points: num(3)}, "")
+	if err != nil {
+		t.Fatalf("Create alice overdue quest: %v", err)
+	}
+	if _, err := quests.Accept(ctx, alice, h.ID, aliceOverdue.ID, asAlice); err != nil {
+		t.Fatalf("Accept alice overdue quest: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE household_quests SET claim_expires_at = NOW() - INTERVAL '1 minute' WHERE household_id = $1 AND id = $2`, h.ID, aliceOverdue.ID); err != nil {
+		t.Fatalf("back-date alice overdue deadline: %v", err)
+	}
+	if _, err := quests.ExpireOverdueQuests(ctx); err != nil {
+		t.Fatalf("ExpireOverdueQuests: %v", err)
+	}
+	gotAliceOverdue, err := q.GetHouseholdQuest(ctx, db.GetHouseholdQuestParams{HouseholdID: h.ID, ID: aliceOverdue.ID})
+	if err != nil || gotAliceOverdue.ClaimedBy != nil || gotAliceOverdue.ClaimedAt.Valid || gotAliceOverdue.ClaimExpiresAt.Valid {
+		t.Errorf("alice overdue quest after sweep: %+v, %v; want released", gotAliceOverdue, err)
+	}
+	if got := bobTeamSnapshot(); got != bobTeamBefore {
+		t.Errorf("sweep of household A changed B's held quest:\n got %s\nwant %s", got, bobTeamBefore)
+	}
+	assertExpirySweepOnlyFromRunQuestExpiry(t)
+
 	// Non-member (Mallory) gets ErrNotFound deleting household A, and A stays intact.
 	if err := households.Delete(ctx, mallory, h.ID); !errors.Is(err, app.ErrNotFound) {
 		t.Errorf("mallory delete household A: expected ErrNotFound, got %v", err)
