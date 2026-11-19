@@ -30,10 +30,15 @@ The API contract is in [docs/API.md](docs/API.md). Development notes are in [CLA
 ```bash
 make test               # unit tests
 make test-integration   # against the chorus_test DB (docker compose creates it)
+make migrate-roundtrip-test # round-trip migrations test (down -all then up)
 make test-system        # system tests: build the stylesheet (needs tailwindcss), run the real app binary against Postgres and a capture SMTP server
 make test-system-image  # same tests against the built Docker image (Linux-only: host networking)
 make check              # everything CI runs, including boundary check, system tests, govulncheck and secret-scan
 ```
+
+## Migrations
+
+Each migration ships a `.down.sql` restoring the schema before it. `TestIntegration_MigrationsRoundTrip` (`make test-integration`) checks this per version and end to end. `make migrate-roundtrip-test` runs the CLI down -all/up. A schema change adds the new structure before removing the old so old and new code both keep running (expand before contract). An applied migration is never edited.
 
 ## CI and images
 
