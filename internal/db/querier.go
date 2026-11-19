@@ -80,9 +80,6 @@ type Querier interface {
 	// today (quest_claim_expires_at), after which the expiry sweep returns the
 	// quest to the pool.
 	ClaimQuest(ctx context.Context, arg ClaimQuestParams) (HouseholdQuest, error)
-	// Single use: conditional on used_at IS NULL, unexpired, and the flow's
-	// purpose, so a state can't be replayed or used to complete another flow.
-	ConsumeOAuthState(ctx context.Context, arg ConsumeOAuthStateParams) (OauthState, error)
 	CountHouseholdQuestsByIDs(ctx context.Context, arg CountHouseholdQuestsByIDsParams) (int64, error)
 	CountRecentPasswordResetsByEmail(ctx context.Context, email string) (int64, error)
 	CountRecentVerificationCodesByUserID(ctx context.Context, userID uuid.UUID) (int64, error)
@@ -119,9 +116,7 @@ type Querier interface {
 	DeleteHouseholdReward(ctx context.Context, arg DeleteHouseholdRewardParams) (int64, error)
 	// Deletes every household where the user is the only member.
 	DeleteSoleMemberHouseholds(ctx context.Context, userID uuid.UUID) error
-	DeleteStaleOAuthStates(ctx context.Context) (int64, error)
 	DeleteStalePasswordResetTokens(ctx context.Context) (int64, error)
-	DeleteStaleSignInHandoffs(ctx context.Context) (int64, error)
 	DeleteStaleVerificationCodes(ctx context.Context) (int64, error)
 	DeleteUserByID(ctx context.Context, id uuid.UUID) error
 	// Returns a quest whose claim has run out to the pool: every member on it
@@ -182,7 +177,6 @@ type Querier interface {
 	InsertComboAward(ctx context.Context, arg InsertComboAwardParams) (ComboAward, error)
 	InsertComboQuest(ctx context.Context, arg InsertComboQuestParams) error
 	InsertEmailVerificationCode(ctx context.Context, arg InsertEmailVerificationCodeParams) (EmailVerificationCode, error)
-	InsertOAuthState(ctx context.Context, arg InsertOAuthStateParams) (OauthState, error)
 	InsertPasswordResetToken(ctx context.Context, arg InsertPasswordResetTokenParams) (PasswordResetToken, error)
 	// Points awards are the history of every points credit. Each row is written
 	// by the service layer's creditPoints in the same transaction as the
@@ -190,7 +184,6 @@ type Querier interface {
 	// household_id; the service checks membership first.
 	InsertPointsAward(ctx context.Context, arg InsertPointsAwardParams) (PointsAward, error)
 	InsertRefreshToken(ctx context.Context, arg InsertRefreshTokenParams) (RefreshToken, error)
-	InsertSignInHandoff(ctx context.Context, arg InsertSignInHandoffParams) (GoogleSignInHandoff, error)
 	ListActiveRefreshTokensByUserID(ctx context.Context, userID uuid.UUID) ([]RefreshToken, error)
 	ListComboQuests(ctx context.Context, arg ListComboQuestsParams) ([]uuid.UUID, error)
 	// The combos containing the quest that the member has just finished: the
@@ -359,9 +352,6 @@ type Querier interface {
 	// member_quest_streaks and quest_completions.streak_count: never the quest
 	// or its cooldown. The caller holds the member row's lock.
 	RecomputeMemberQuestStreak(ctx context.Context, arg RecomputeMemberQuestStreakParams) error
-	// Single use: conditional on used_at IS NULL and unexpired, so two concurrent
-	// redemptions can't both succeed.
-	RedeemSignInHandoff(ctx context.Context, codeHash string) (uuid.UUID, error)
 	// Rejects one pending completion: no points. If it started the quest's
 	// running cooldown (the quest's completed_at is its done_at) and that
 	// cooldown has not ended, the cooldown is cancelled so the chore is available

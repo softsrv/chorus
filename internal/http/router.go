@@ -78,7 +78,7 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 		comboSvc = app.NewComboService(cfg.Queries, cfg.Pool)
 	}
 	comboH := handlers.NewComboHandler(comboSvc)
-	googleH := handlers.NewGoogleHandler(cfg.GoogleSignIn, cfg.TrustedProxyCount)
+	googleH := handlers.NewGoogleHandler(cfg.GoogleSignIn, cfg.GoogleCalendar != nil, cfg.TrustedProxyCount)
 	calendarH := handlers.NewGoogleCalendarHandler(cfg.GoogleCalendar)
 
 	// ── Rate limiters ─────────────────────────────────────────────────────────
@@ -105,10 +105,12 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	// it on member selection, and a correct read must never spend the
 	// budget member actions (accept, abandon, done) need.
 	historyRL := middleware.NewRateLimiter(ctx, pinLimit, 10*time.Minute, userKey)
-	googleStartRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
-	googleCallbackRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
-	googleRedeemRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
-	calendarCallbackRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
+	// The two routes that spend a Google exchange (an ID-token check or a
+	// code-for-token exchange) each get 30 per 15 minutes per IP, what the
+	// removed redirect callbacks had. Connect is charged after sign-in and
+	// verification, so anonymous traffic cannot spend a user's budget.
+	googleSignInRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
+	calendarConnectRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
 
 	limit := func(rl *middleware.RateLimiter, h http.HandlerFunc) http.Handler { return rl.Middleware(h) }
 
@@ -128,11 +130,11 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("POST /api/v1/auth/logout", authed(authH.Logout))
 
 	// ── Google sign-in (public). When Google isn't configured, config reports
-	// it off and the other three answer the JSON 404 without contacting Google.
+	// it off and POST /auth/google answers the JSON 404 without contacting
+	// Google. One route for every app: web, iOS and Android post a Google ID
+	// token.
 	api.HandleFunc("GET /api/v1/auth/config", googleH.AuthConfig)
-	api.Handle("GET /api/v1/auth/google/start", limit(googleStartRL, googleH.GoogleStart))
-	api.Handle("GET /api/v1/auth/google/callback", limit(googleCallbackRL, googleH.GoogleCallback))
-	api.Handle("POST /api/v1/auth/google/redeem", limit(googleRedeemRL, googleH.GoogleRedeem))
+	api.Handle("POST /api/v1/auth/google", limit(googleSignInRL, googleH.GoogleSignIn))
 
 	// ── Current user ──────────────────────────────────────────────────────────
 	api.Handle("GET /api/v1/me", authed(meH.Get))
@@ -144,14 +146,12 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("DELETE /api/v1/me/sessions/{id}", verified(meH.RevokeSession))
 
 	// ── Google Calendar connection. Status reports "unavailable" when Google
-	// isn't configured; connect, disconnect and callback then answer the JSON
-	// 404 without contacting Google. The callback carries no bearer token:
-	// Google redirects the browser there; the state names the user and the
-	// HttpOnly binding cookie set by connect proves it is the same browser.
+	// isn't configured; connect and disconnect then answer the JSON 404
+	// without contacting Google. Connect exchanges a one-time server auth
+	// code from Google SDK for tokens.
 	api.Handle("GET /api/v1/me/google-calendar", verified(calendarH.Status))
-	api.Handle("POST /api/v1/me/google-calendar/connect", verified(calendarH.Connect))
+	api.Handle("POST /api/v1/me/google-calendar/connect", authMW(middleware.RequireEmailVerified(limit(calendarConnectRL, calendarH.Connect))))
 	api.Handle("DELETE /api/v1/me/google-calendar", verified(calendarH.Disconnect))
-	api.Handle("GET /api/v1/me/google-calendar/callback", limit(calendarCallbackRL, calendarH.Callback))
 	api.Handle("GET /api/v1/me/google-calendar/calendars", verified(familyH.MyCalendars))
 
 	// ── Households ────────────────────────────────────────────────────────────
@@ -259,13 +259,13 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 
 	staticFS := web.Static(!cfg.Secure)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(staticFS)))
-	// The web client is a single page; these are the paths emailed links (and
-	// the Google sign-in and calendar callback redirects) land on.
+	// The web client is a single page; these are the paths emailed links and
+	// the Account page land on.
 	serveIndex := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache")
 		http.ServeFileFS(w, r, staticFS, "index.html")
 	}
-	for _, p := range []string{"/{$}", "/verify-email", "/reset-password", "/forgot-password", "/google-sign-in", "/account"} {
+	for _, p := range []string{"/{$}", "/verify-email", "/reset-password", "/forgot-password", "/account"} {
 		mux.HandleFunc("GET "+p, serveIndex)
 	}
 

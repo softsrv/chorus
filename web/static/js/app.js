@@ -1,7 +1,7 @@
 // Chorus web test client. Plain DOM, no framework. All user-supplied text is
 // inserted with textContent (never innerHTML), so API data can't inject markup.
 
-import { api, publicApi, refresh, setTokens, clearTokens, setLogger, session, ApiError, DEVICE_NAME, authConfig, googleRedeem } from './api.js';
+import { api, publicApi, refresh, setTokens, clearTokens, setLogger, session, ApiError, DEVICE_NAME, authConfig, googleSignIn } from './api.js';
 
 let authConfigPromise = null;
 
@@ -207,6 +207,7 @@ function toast(message, kind = 'info') {
   const t = el('div', { class: 'toast toast-top toast-center z-50' }, alertBox(kind, message));
   document.body.append(t);
   setTimeout(() => t.remove(), 4000);
+  return t;
 }
 
 const fmtDate = (iso) => new Date(iso).toLocaleString();
@@ -237,31 +238,6 @@ async function boot() {
   if (location.pathname === '/verify-email' && params.get('token')) return verifyEmailView(params.get('token'));
   if (location.pathname === '/reset-password' && params.get('token')) return resetPasswordView(params.get('token'));
   if (location.pathname === '/forgot-password') return authView('forgot');
-
-  if (location.pathname === '/google-sign-in') {
-    const errorParam = params.get('error');
-    const codeParam = params.get('code');
-    if (errorParam) {
-      history.replaceState(null, '', '/');
-      const msg = errorParam === 'cancelled' ? 'Google sign-in was cancelled' : 'Google sign-in failed';
-      toast(msg, 'error');
-      return authView('login', msg);
-    }
-    if (codeParam) {
-      $app.replaceChildren(el('div', { class: 'max-w-md mx-auto' }, card('Signing in with Google…')));
-      try {
-        await googleRedeem(codeParam);
-        history.replaceState(null, '', '/');
-        return homeView();
-      } catch (err) {
-        history.replaceState(null, '', '/');
-        toast('Google sign-in failed', 'error');
-        return authView('login', 'Google sign-in failed');
-      }
-    }
-    history.replaceState(null, '', '/');
-    return authView('login');
-  }
 
   if (!session.user) await refresh();
   if (session.user) {
@@ -297,6 +273,104 @@ function renderNav() {
 
 // ── Auth views ────────────────────────────────────────────────────────────────
 
+const GIS_WAIT_TRIES = 50; // the GIS script loads async; wait up to ~5s for it
+const GIS_WAIT_MS = 100;
+const PERSON_CANCELLED = new Set(['user_cancel', 'tap_outside']);
+// The rendered button opens Google's own window and reports nothing when it
+// is closed. After a click, the page getting focus back with no credential
+// following within this grace period is taken as the person cancelling. A
+// guess can be wrong (a slow credential), so a credential that arrives after
+// the cancel message withdraws it: the message only stands while nothing
+// has arrived.
+const GIS_CANCEL_GRACE_MS = 300;
+let removeButtonFocusListener = null;
+
+// googleButton returns the divider and a container that Google Identity
+// Services renders its own button into. The credential (a Google ID token)
+// goes to POST /auth/google; a dismissed prompt or an empty credential sends
+// nothing. Messages are fixed strings shown via textContent, never server or
+// Google error text.
+function googleButton(cfg) {
+  const $status = el('div');
+  const $btn = el('div', { class: 'flex justify-center', 'data-google-button': '' });
+  let inFlight = false;
+  let clicked = false; // the button opened Google's window, no credential yet
+  let graceTimer = null;
+  let cancelToast = null; // the shown cancel toast, withdrawn by a credential
+
+  const show = (msg) => {
+    $status.replaceChildren(alertBox('error', msg));
+    return toast(msg, 'error');
+  };
+  const cancelled = () => {
+    cancelToast?.remove();
+    cancelToast = show('Google sign-in was cancelled');
+  };
+  // withdrawCancel clears a cancel message shown by the focus timer or the
+  // One Tap notification once a real credential arrives after all.
+  const withdrawCancel = () => {
+    cancelToast?.remove();
+    cancelToast = null;
+    $status.replaceChildren();
+  };
+
+  const onCredential = async (resp) => {
+    clicked = false;
+    clearTimeout(graceTimer);
+    const idToken = resp?.credential;
+    if (typeof idToken !== 'string' || idToken === '') return cancelled();
+    if (inFlight) return;
+    inFlight = true;
+    withdrawCancel();
+    try {
+      await googleSignIn(idToken);
+    } catch {
+      inFlight = false;
+      return show('Google sign-in failed');
+    }
+    goHome();
+  };
+
+  const render = (tries) => {
+    const gis = window.google?.accounts?.id;
+    if (!gis) {
+      if (tries > 0) setTimeout(() => render(tries - 1), GIS_WAIT_MS);
+      else $status.replaceChildren(alertBox('warning', 'Google sign-in is unavailable right now.'));
+      return;
+    }
+    gis.initialize({ client_id: cfg.google_client_id, callback: onCredential });
+    gis.renderButton($btn, {
+      type: 'standard', theme: 'outline', size: 'large', text: 'signin_with',
+      click_listener: () => { clicked = true; },
+    });
+    // One focus listener at a time: a re-rendered sign-in view replaces the
+    // previous button's.
+    removeButtonFocusListener?.();
+    const onFocus = () => {
+      if (!clicked) return;
+      clearTimeout(graceTimer);
+      graceTimer = setTimeout(() => {
+        if (!clicked || inFlight) return;
+        clicked = false;
+        cancelled();
+      }, GIS_CANCEL_GRACE_MS);
+    };
+    window.addEventListener('focus', onFocus);
+    removeButtonFocusListener = () => {
+      window.removeEventListener('focus', onFocus);
+      clearTimeout(graceTimer);
+    };
+    gis.prompt((n) => {
+      // One Tap closed by the person without a credential. Auto-cancels and
+      // "not displayed" (no Google session) are not the person cancelling.
+      if (n?.isSkippedMoment?.() && PERSON_CANCELLED.has(n.getSkippedReason?.())) cancelled();
+    });
+  };
+  render(GIS_WAIT_TRIES);
+
+  return [el('div', { class: 'divider', text: 'or' }), $btn, $status];
+}
+
 async function authView(tab, alertMsg = null) {
   renderNav();
   const cfg = await getAuthConfig();
@@ -323,12 +397,7 @@ async function authView(tab, alertMsg = null) {
         goHome();
       },
     }));
-    if (cfg?.google_sign_in === true) {
-      $body.append(
-        el('div', { class: 'divider', text: 'or' }),
-        el('a', { class: 'btn btn-outline w-full', href: '/api/v1/auth/google/start', text: 'Sign in with Google' })
-      );
-    }
+    if (cfg?.google_sign_in === true) $body.append(...googleButton(cfg));
   } else if (tab === 'register') {
     $body.append(form({
       fields: [
@@ -342,12 +411,7 @@ async function authView(tab, alertMsg = null) {
         $form.replaceWith(alertBox('success', `${res.message} (Local dev: open smtp4dev at http://localhost:5080.)`));
       },
     }));
-    if (cfg?.google_sign_in === true) {
-      $body.append(
-        el('div', { class: 'divider', text: 'or' }),
-        el('a', { class: 'btn btn-outline w-full', href: '/api/v1/auth/google/start', text: 'Sign in with Google' })
-      );
-    }
+    if (cfg?.google_sign_in === true) $body.append(...googleButton(cfg));
   } else {
     $body.append(form({
       fields: [{ name: 'email', label: 'Email', type: 'email', required: true, autocomplete: 'email' }],
@@ -2049,22 +2113,15 @@ async function eventsTab(h, $root) {
 
 // ── Account ───────────────────────────────────────────────────────────────────
 
+// The calendar scopes the server asks Google for; it derives read-only or
+// read/write from what Google actually grants.
+const CALENDAR_SCOPES = 'https://www.googleapis.com/auth/calendar.calendarlist.readonly https://www.googleapis.com/auth/calendar.events';
+const CAL_CONNECTED = 'Google Calendar connected.';
+const CAL_CONNECT_FAILED = 'Could not connect Google Calendar. Please try again.';
+
 async function accountView() {
   renderNav();
-  const calOutcome = new URLSearchParams(location.search).get('google_calendar');
-  let $outcomeAlert = null;
-  if (calOutcome) {
-    history.replaceState(null, '', location.pathname);
-    if (calOutcome === 'connected') {
-      const msg = 'Google Calendar connected.';
-      $outcomeAlert = alertBox('success', msg);
-      toast(msg, 'success');
-    } else {
-      const msg = 'Could not connect Google Calendar. Please try again.';
-      $outcomeAlert = alertBox('error', msg);
-      toast(msg, 'error');
-    }
-  }
+  const cfg = await getAuthConfig();
 
   const { items: sessions } = await api('GET', '/me/sessions');
   const $sessionsErr = el('div');
@@ -2087,12 +2144,56 @@ async function accountView() {
   const $calErr = el('div');
   const $calCard = el('div', { class: 'card bg-base-100 shadow' });
 
-  const onConnect = action(async () => {
-    const resp = await api('POST', '/me/google-calendar/connect');
-    if (resp?.url) {
-      window.location = resp.url;
+  // Connecting opens Google's code-client popup; the page never navigates. The
+  // one-time code goes to the server, which exchanges it with Google. Every
+  // failure (popup error or closed, no code, the server refusing the code)
+  // shows one fixed message and leaves the card as it was; no server or Google
+  // text is shown.
+  const calFailed = () => {
+    $calErr.replaceChildren(alertBox('error', CAL_CONNECT_FAILED));
+    toast(CAL_CONNECT_FAILED, 'error');
+  };
+  let connecting = false;
+  const onCalendarCode = async (resp) => {
+    const code = resp?.code;
+    if (typeof code !== 'string' || code === '') return calFailed();
+    if (connecting) return;
+    connecting = true;
+    let st;
+    try {
+      st = await api('POST', '/me/google-calendar/connect', { code, platform: 'web' });
+    } catch (err) {
+      // A lost or timed-out response (status 0) or a 5xx may follow a connect
+      // the server completed: ask for the status instead of trusting the
+      // failure. A 4xx refusal stored nothing, so it stays a failure.
+      if (!(err?.status === 0 || err?.status >= 500)) return calFailed();
+      try {
+        st = await api('GET', '/me/google-calendar');
+      } catch {
+        return calFailed();
+      }
+      if (st?.status !== 'connected') return calFailed();
+    } finally {
+      connecting = false;
     }
-  }, $calErr);
+    renderCalendarCard(st);
+    $calErr.replaceChildren(alertBox('success', CAL_CONNECTED));
+    toast(CAL_CONNECTED, 'success');
+  };
+  const onConnect = (e) => {
+    e?.preventDefault?.();
+    const oauth2 = window.google?.accounts?.oauth2;
+    if (!oauth2 || !cfg?.google_client_id) return calFailed();
+    $calErr.replaceChildren();
+    // requestCode runs inside the click so the browser allows the popup.
+    oauth2.initCodeClient({
+      client_id: cfg.google_client_id,
+      scope: CALENDAR_SCOPES,
+      ux_mode: 'popup',
+      callback: onCalendarCode,
+      error_callback: () => calFailed(),
+    }).requestCode();
+  };
 
   const onDisconnect = action(async () => {
     await api('DELETE', '/me/google-calendar');
@@ -2234,7 +2335,7 @@ async function accountView() {
           el('p', { class: 'text-sm font-medium', text: 'Connected' }),
           cal.access === 'read_only'
             ? el('p', { class: 'text-xs opacity-70', text: 'Read-only access (Chorus cannot modify your calendar).' })
-            : null,
+            : el('p', { class: 'text-xs opacity-70', text: 'Read and write access.' }),
           el('button', { class: 'btn btn-outline btn-error btn-sm', text: 'Disconnect', onclick: onDisconnect }),
           $familySection,
         ];
@@ -2272,7 +2373,6 @@ async function accountView() {
 
   $app.replaceChildren(el('div', { class: 'max-w-2xl mx-auto space-y-6' },
     el('button', { class: 'btn btn-ghost btn-sm', text: '← Back', onclick: () => homeView() }),
-    $outcomeAlert,
     card('Profile', el('p', { class: 'text-sm opacity-70', text: session.user.email }), form({
       fields: [{ name: 'display_name', label: 'Display name', required: true, value: session.user.display_name }],
       submit: 'Save',
