@@ -2066,22 +2066,15 @@ async function eventsTab(h, $root) {
 
 // ── Account ───────────────────────────────────────────────────────────────────
 
+// The calendar scopes the server asks Google for; it derives read-only or
+// read/write from what Google actually grants.
+const CALENDAR_SCOPES = 'https://www.googleapis.com/auth/calendar.calendarlist.readonly https://www.googleapis.com/auth/calendar.events';
+const CAL_CONNECTED = 'Google Calendar connected.';
+const CAL_CONNECT_FAILED = 'Could not connect Google Calendar. Please try again.';
+
 async function accountView() {
   renderNav();
-  const calOutcome = new URLSearchParams(location.search).get('google_calendar');
-  let $outcomeAlert = null;
-  if (calOutcome) {
-    history.replaceState(null, '', location.pathname);
-    if (calOutcome === 'connected') {
-      const msg = 'Google Calendar connected.';
-      $outcomeAlert = alertBox('success', msg);
-      toast(msg, 'success');
-    } else {
-      const msg = 'Could not connect Google Calendar. Please try again.';
-      $outcomeAlert = alertBox('error', msg);
-      toast(msg, 'error');
-    }
-  }
+  const cfg = await getAuthConfig();
 
   const { items: sessions } = await api('GET', '/me/sessions');
   const $sessionsErr = el('div');
@@ -2104,12 +2097,47 @@ async function accountView() {
   const $calErr = el('div');
   const $calCard = el('div', { class: 'card bg-base-100 shadow' });
 
-  const onConnect = action(async () => {
-    const resp = await api('POST', '/me/google-calendar/connect');
-    if (resp?.url) {
-      window.location = resp.url;
+  // Connecting opens Google's code-client popup; the page never navigates. The
+  // one-time code goes to the server, which exchanges it with Google. Every
+  // failure (popup error or closed, no code, the server refusing the code)
+  // shows one fixed message and leaves the card as it was; no server or Google
+  // text is shown.
+  const calFailed = () => {
+    $calErr.replaceChildren(alertBox('error', CAL_CONNECT_FAILED));
+    toast(CAL_CONNECT_FAILED, 'error');
+  };
+  let connecting = false;
+  const onCalendarCode = async (resp) => {
+    const code = resp?.code;
+    if (typeof code !== 'string' || code === '') return calFailed();
+    if (connecting) return;
+    connecting = true;
+    let st;
+    try {
+      st = await api('POST', '/me/google-calendar/connect', { code, platform: 'web' });
+    } catch {
+      return calFailed();
+    } finally {
+      connecting = false;
     }
-  }, $calErr);
+    renderCalendarCard(st);
+    $calErr.replaceChildren(alertBox('success', CAL_CONNECTED));
+    toast(CAL_CONNECTED, 'success');
+  };
+  const onConnect = (e) => {
+    e?.preventDefault?.();
+    const oauth2 = window.google?.accounts?.oauth2;
+    if (!oauth2 || !cfg?.google_client_id) return calFailed();
+    $calErr.replaceChildren();
+    // requestCode runs inside the click so the browser allows the popup.
+    oauth2.initCodeClient({
+      client_id: cfg.google_client_id,
+      scope: CALENDAR_SCOPES,
+      ux_mode: 'popup',
+      callback: onCalendarCode,
+      error_callback: () => calFailed(),
+    }).requestCode();
+  };
 
   const onDisconnect = action(async () => {
     await api('DELETE', '/me/google-calendar');
@@ -2251,7 +2279,7 @@ async function accountView() {
           el('p', { class: 'text-sm font-medium', text: 'Connected' }),
           cal.access === 'read_only'
             ? el('p', { class: 'text-xs opacity-70', text: 'Read-only access (Chorus cannot modify your calendar).' })
-            : null,
+            : el('p', { class: 'text-xs opacity-70', text: 'Read and write access.' }),
           el('button', { class: 'btn btn-outline btn-error btn-sm', text: 'Disconnect', onclick: onDisconnect }),
           $familySection,
         ];
@@ -2289,7 +2317,6 @@ async function accountView() {
 
   $app.replaceChildren(el('div', { class: 'max-w-2xl mx-auto space-y-6' },
     el('button', { class: 'btn btn-ghost btn-sm', text: '← Back', onclick: () => homeView() }),
-    $outcomeAlert,
     card('Profile', el('p', { class: 'text-sm opacity-70', text: session.user.email }), form({
       fields: [{ name: 'display_name', label: 'Display name', required: true, value: session.user.display_name }],
       submit: 'Save',
