@@ -48,8 +48,10 @@ func RunQuestRollover(ctx context.Context, q *db.Queries, pool pgxBeginner) {
 }
 
 // RolloverDueHouseholds runs the rollover of every household with a schedule
-// due at now: dated on or before the household's local date at now and after
-// the last date it rolled over. Each household rolls over in a transaction
+// due at now: a one-off dated on or before the household's local date at now
+// and after the last date it rolled over, or a repeated schedule dated on or
+// before that local date while the household has not rolled over to it yet
+// (a repeated schedule is judged at every local midnight). Each household rolls over in a transaction
 // of its own (rolloverHousehold). A household that fails is logged with its
 // cause and left for the next run; the others still run. It returns how many
 // quests were assigned, and an error only when the due households cannot be
@@ -101,8 +103,12 @@ func RolloverDueHouseholds(ctx context.Context, q *db.Queries, pool pgxBeginner,
 //     every held quest whose claim has run out goes back to the pool, so a
 //     quest just put back can be assigned again at once;
 //  4. the due schedules are assigned under ClaimQuest's rules (not held, not
-//     resting, member within the age range);
-//  5. the one-off schedules just judged end, unless skipped for age;
+//     resting, member within the age range): a one-off dated after the last
+//     rollover date, and every repeated schedule already started, whatever
+//     its date, so a repeated quest that was abandoned, expired in step 3 or
+//     came off its cooldown is assigned again;
+//  5. the one-off schedules just judged end, unless skipped for age; a
+//     repeated schedule is kept, assigned or skipped, for the next pass;
 //  6. the household is marked rolled over to its local date.
 //
 // A household deleted meanwhile assigns nothing.
@@ -147,10 +153,12 @@ func rolloverHousehold(ctx context.Context, q *db.Queries, pool pgxBeginner, hou
 	return n, nil
 }
 
-// assignSchedules assigns the household's schedules dated after afterDate
-// (any, when not valid) and up to localDate, narrowed to scheduleID when it
-// is set, then ends the one-off schedules it judged (all but those skipped
-// for age). The caller holds the household's lock and the member locks.
+// assignSchedules assigns the household's one-off schedules dated after
+// afterDate (any, when not valid) and up to localDate, and its repeated
+// schedules dated up to localDate, narrowed to scheduleID when it is set,
+// then ends the one-off schedules it judged (all but those skipped for age).
+// Repeated schedules are never ended here. The caller holds the household's
+// lock and the member locks.
 func assignSchedules(ctx context.Context, qtx *db.Queries, householdID uuid.UUID, now pgtype.Timestamptz, localDate, afterDate pgtype.Date, scheduleID *uuid.UUID) (int, error) {
 	rows, err := qtx.AssignDueSchedules(ctx, db.AssignDueSchedulesParams{
 		Now: now, HouseholdID: householdID, LocalDate: localDate, AfterDate: afterDate, ScheduleID: scheduleID,

@@ -526,7 +526,7 @@ const openMayaWithPin = async () => {
   await click(buttons(env.$app, 'History')[0]);
 };
 
-test('scheduled quests CLM-7: Schedule POSTs {quest_id, member_id, date} with X-Admin-PIN and the view shows the new schedule', async () => {
+test('scheduled quests CLM-7: Schedule POSTs {quest_id, member_id, date, repeat} with X-Admin-PIN and the view shows the new schedule', async () => {
   srv.quests = QUESTS;
   srv.createSchedule = (q) => {
     const s = schedule('s-new', q.body.quest_id, 'Clean your room', q.body.member_id, q.body.date);
@@ -543,9 +543,32 @@ test('scheduled quests CLM-7: Schedule POSTs {quest_id, member_id, date} with X-
   assert.equal(buttons(form, 'Schedule')[0].className, 'btn btn-primary btn-sm');
   await submit(form);
   const post = calls.find((c) => c.method === 'POST' && c.path === `${HP}/quest-schedules`);
-  assert.deepEqual(post.body, { quest_id: 'q-room', member_id: 'm-maya', date: '2026-11-21' });
+  assert.deepEqual(post.body, { quest_id: 'q-room', member_id: 'm-maya', date: '2026-11-21', repeat: false });
   assert.equal(post.headers['X-Admin-PIN'], '9999');
   assert.match(scheduledText(), /Clean your room — from 2026-11-21/);
+});
+
+test('repeat CLM-10: ticking Repeat sends repeat true and a repeated schedule reads "from <date>, repeats"', async () => {
+  srv.quests = QUESTS;
+  srv.schedules = [{ ...schedule('s-one', 'q-room', 'Clean your room', 'm-maya', '2026-11-25'), repeat: false }];
+  srv.createSchedule = (q) => {
+    const s = { ...schedule('s-rep', q.body.quest_id, 'Feed the cat', q.body.member_id, q.body.date), repeat: q.body.repeat };
+    srv.schedules = [s, ...srv.schedules];
+    return [201, s];
+  };
+  await openMayaWithPin();
+  const form = scheduleForm();
+  walk(form).find((n) => n.tagName === 'INPUT' && n.type === 'date').value = '2026-11-21';
+  const $repeat = walk(form).find((n) => n.tagName === 'INPUT' && n.type === 'checkbox');
+  assert.ok($repeat, 'the form has a Repeat checkbox');
+  assert.match(form.textContent, /Repeat \(every time the quest's cooldown ends\)/);
+  await click($repeat);
+  assert.equal($repeat.checked, true);
+  await submit(form);
+  const post = calls.find((c) => c.method === 'POST' && c.path === `${HP}/quest-schedules`);
+  assert.deepEqual(post.body, { quest_id: 'q-cat', member_id: 'm-maya', date: '2026-11-21', repeat: true });
+  assert.match(scheduledText(), /Feed the cat — from 2026-11-21, repeats/);
+  assert.match(scheduledText(), /Clean your room — from 2026-11-25(?!, repeats)/);
 });
 
 test('scheduled quests CLM-7: a refused date shows the server message on the form and keeps the view', async () => {

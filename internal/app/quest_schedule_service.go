@@ -35,6 +35,7 @@ type ScheduleInput struct {
 	QuestID  uuid.UUID
 	MemberID uuid.UUID
 	Date     string
+	Repeat   bool
 }
 
 // QuestSchedule is one scheduled quest. StartDate is a household-local date,
@@ -47,10 +48,12 @@ type QuestSchedule struct {
 	MemberID    uuid.UUID
 	MemberName  string
 	StartDate   string
+	Repeat      bool
 	CreatedAt   time.Time
 }
 
-// Schedule stores a one-off schedule of a quest for a member. It needs the
+// Schedule stores a schedule of a quest for a member, one-off or repeated
+// (in.Repeat). It needs the
 // admin role and, once one is set, the admin PIN (ErrAdminPinRequired,
 // ErrWrongPIN); a non-member gets ErrNotFound. A missing date, one that is
 // not YYYY-MM-DD, or one before today in the household's timezone is a
@@ -94,6 +97,7 @@ func (s *QuestScheduleService) Schedule(ctx context.Context, userID, householdID
 	row, err := qtx.CreateQuestSchedule(ctx, db.CreateQuestScheduleParams{
 		ID:          uuid.Must(uuid.NewV7()),
 		StartDate:   startDate,
+		Repeat:      in.Repeat,
 		HouseholdID: householdID,
 		QuestID:     in.QuestID,
 		MemberID:    in.MemberID,
@@ -221,16 +225,13 @@ func (s *QuestScheduleService) Upcoming(ctx context.Context, userID, householdID
 			availableAt = &a
 		}
 		start := r.StartDate.Time.Format(time.DateOnly)
-		// quest_schedules has no repeat column yet: every schedule is a
-		// one-off until it gains one.
-		const repeat = false
-		next, ok := NextDate(start, repeat, availableAt, lastRollover, now, loc)
+		next, ok := NextDate(start, r.Repeat, availableAt, lastRollover, now, loc)
 		if !ok {
 			continue
 		}
 		out = append(out, UpcomingQuest{
 			ID: r.ID, QuestID: r.QuestID, QuestName: r.QuestName,
-			StartDate: start, NextDate: next, Repeat: repeat,
+			StartDate: start, NextDate: next, Repeat: r.Repeat,
 		})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
@@ -300,6 +301,7 @@ func toQuestSchedule(r db.ListQuestSchedulesRow) QuestSchedule {
 		MemberID:    r.MemberID,
 		MemberName:  r.MemberName,
 		StartDate:   r.StartDate.Time.Format(time.DateOnly),
+		Repeat:      r.Repeat,
 		CreatedAt:   r.CreatedAt.Time.UTC(),
 	}
 }

@@ -660,6 +660,74 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		t.Errorf("alice's household schedules touched by other households' rollovers: %+v, %v", got, err)
 	}
 
+	// Repeated schedule isolation (INT-0177 CLM-7): with a repeated schedule
+	// due today in alice's household, every outsider call on it is
+	// ErrNotFound, and the pass that assigns it leaves mallory's quests and
+	// schedules exactly as they were.
+	chicago, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatalf("load America/Chicago: %v", err)
+	}
+	aliceToday := time.Now().In(chicago).Format(time.DateOnly)
+	repeatQuest, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "Feed the fish", Points: num(1)}, "")
+	if err != nil {
+		t.Fatalf("Create repeat quest: %v", err)
+	}
+	repeatSchedule, err := schedules.Schedule(ctx, alice, h.ID, app.ScheduleInput{QuestID: repeatQuest.ID, MemberID: aliceMember.ID, Date: aliceToday, Repeat: true}, "")
+	if err != nil || !repeatSchedule.Repeat {
+		t.Fatalf("alice repeated Schedule = %+v, %v", repeatSchedule, err)
+	}
+	t.Cleanup(func() {
+		// Never leave a repeated schedule due in the shared database.
+		if _, err := pool.Exec(context.Background(), "DELETE FROM quest_schedules WHERE household_id = $1 AND id = $2", h.ID, repeatSchedule.ID); err != nil {
+			t.Errorf("delete repeated schedule: %v", err)
+		}
+	})
+	malloryRepeat, err := schedules.Schedule(ctx, mallory, mh.ID, app.ScheduleInput{QuestID: malloryQuest.ID, MemberID: malloryMember.ID, Date: later, Repeat: true}, "")
+	if err != nil {
+		t.Fatalf("mallory repeated Schedule in own household: %v", err)
+	}
+	_, checks["schedule repeated quest"] = schedules.Schedule(ctx, mallory, h.ID, app.ScheduleInput{QuestID: repeatQuest.ID, MemberID: aliceMember.ID, Date: aliceToday, Repeat: true}, "")
+	_, checks["list schedules with a repeated one"] = schedules.List(ctx, mallory, h.ID, "")
+	checks["cancel repeated schedule"] = schedules.Cancel(ctx, mallory, h.ID, repeatSchedule.ID, "")
+	checks["cancel repeated schedule via own household"] = schedules.Cancel(ctx, mallory, mh.ID, repeatSchedule.ID, "")
+	upRepeat, upRepeatErr := schedules.Upcoming(ctx, mallory, h.ID, aliceMember.ID)
+	checks["upcoming with a repeated schedule"] = upRepeatErr
+	if len(upRepeat) != 0 {
+		t.Errorf("outsider upcoming with a repeated schedule returned data: %+v", upRepeat)
+	}
+	householdRows := func(hid uuid.UUID) string {
+		t.Helper()
+		var qs, ss string
+		if err := pool.QueryRow(ctx, "SELECT COALESCE(json_agg(q ORDER BY q.id)::text, '') FROM household_quests q WHERE q.household_id = $1", hid).Scan(&qs); err != nil {
+			t.Fatalf("snapshot quests: %v", err)
+		}
+		if err := pool.QueryRow(ctx, "SELECT COALESCE(json_agg(s ORDER BY s.id)::text, '') FROM quest_schedules s WHERE s.household_id = $1", hid).Scan(&ss); err != nil {
+			t.Fatalf("snapshot schedules: %v", err)
+		}
+		return qs + "\n" + ss
+	}
+	malloryBefore := householdRows(mh.ID)
+	if _, err := app.RolloverDueHouseholds(ctx, q, pool, time.Now()); err != nil {
+		t.Fatalf("rollover with a repeated schedule: %v", err)
+	}
+	var repeatHolder *uuid.UUID
+	if err := pool.QueryRow(ctx, "SELECT claimed_by FROM household_quests WHERE household_id = $1 AND id = $2", h.ID, repeatQuest.ID).Scan(&repeatHolder); err != nil {
+		t.Fatalf("read repeat quest holder: %v", err)
+	}
+	if repeatHolder == nil || *repeatHolder != aliceMember.ID {
+		t.Errorf("alice's repeated schedule not assigned by the pass: holder %v, want %v", repeatHolder, aliceMember.ID)
+	}
+	if got := householdRows(mh.ID); got != malloryBefore {
+		t.Errorf("mallory's household changed by alice's rollover:\nbefore %s\nafter  %s", malloryBefore, got)
+	}
+	if err := schedules.Cancel(ctx, mallory, mh.ID, malloryRepeat.ID, ""); err != nil {
+		t.Errorf("mallory cancels own repeated schedule: %v", err)
+	}
+	if err := schedules.Cancel(ctx, alice, h.ID, repeatSchedule.ID, ""); err != nil {
+		t.Errorf("alice cancels own repeated schedule: %v", err)
+	}
+
 	for name, err := range checks {
 		if !errors.Is(err, app.ErrNotFound) {
 			t.Errorf("%s: expected ErrNotFound, got %v", name, err)
@@ -710,8 +778,8 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		got.RepeatDays != 1 || got.Notes != "Wash and dry" || got.ClaimedBy != nil || got.ClaimedAt.Valid {
 		t.Errorf("alice's quest was modified: %+v, %v", got, err)
 	}
-	if list, _, err := quests.List(ctx, alice, h.ID, app.QuestPage{Limit: 10}); err != nil || len(list) != 4 {
-		t.Errorf("alice's quests after outsider attempts: %d, %v; want exactly 4 (no smuggled create or copy)", len(list), err)
+	if list, _, err := quests.List(ctx, alice, h.ID, app.QuestPage{Limit: 10}); err != nil || len(list) != 5 {
+		t.Errorf("alice's quests after outsider attempts: %d, %v; want exactly 5 (her four and the repeated-schedule quest; no smuggled create or copy)", len(list), err)
 	}
 	// Every refused share left Alice's shareable quest unshared and still hers.
 	if got, err := quests.Get(ctx, alice, h.ID, aliceShareable.ID); err != nil || got.Shared() || len(got.Participants) > 1 ||

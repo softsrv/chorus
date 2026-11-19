@@ -40,20 +40,34 @@ type scheduleWorld struct {
 
 func newScheduleWorld(t *testing.T, prefix string) *scheduleWorld {
 	t.Helper()
+	return newScheduleWorldIn(t, prefix, "Pacific/Auckland")
+}
+
+// newScheduleWorldIn is newScheduleWorld for a household in timezone tz.
+// The household's schedules are deleted when the test ends: the test
+// database is shared, and a repeated schedule left behind would make its
+// household due at every later test's rollover.
+func newScheduleWorldIn(t *testing.T, prefix, tz string) *scheduleWorld {
+	t.Helper()
 	pool := testDB(t)
 	mailer := &captureMailer{}
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	ctx := context.Background()
 	admin := registerVerified(t, pool, authSvc, mailer, prefix).User.ID
-	h, err := app.NewHouseholdService(q, pool).Create(ctx, admin, app.HouseholdInput{Name: "Schedulers", Timezone: "Pacific/Auckland"})
+	h, err := app.NewHouseholdService(q, pool).Create(ctx, admin, app.HouseholdInput{Name: "Schedulers", Timezone: tz})
 	if err != nil {
 		t.Fatalf("create household: %v", err)
 	}
-	loc, err := time.LoadLocation("Pacific/Auckland")
+	loc, err := time.LoadLocation(tz)
 	if err != nil {
 		t.Fatalf("load location: %v", err)
 	}
+	t.Cleanup(func() {
+		if _, err := pool.Exec(context.Background(), `DELETE FROM quest_schedules WHERE household_id = $1`, h.ID); err != nil {
+			t.Errorf("delete schedules of %s: %v", h.ID, err)
+		}
+	})
 	return &scheduleWorld{
 		t: t, ctx: ctx, q: q, pool: pool, admin: admin, h: h.ID, loc: loc,
 		quests:    app.NewQuestService(q, pool),
@@ -106,6 +120,47 @@ func (w *scheduleWorld) schedule(quest, member uuid.UUID, days int) app.QuestSch
 		w.t.Fatalf("schedule: %v", err)
 	}
 	return s
+}
+
+// scheduleOn schedules the quest for the member on a household-local date,
+// repeated when repeat is set.
+func (w *scheduleWorld) scheduleOn(quest, member uuid.UUID, date string, repeat bool) app.QuestSchedule {
+	w.t.Helper()
+	s, err := w.schedules.Schedule(w.ctx, w.admin, w.h, app.ScheduleInput{QuestID: quest, MemberID: member, Date: date, Repeat: repeat}, w.pin)
+	if err != nil {
+		w.t.Fatalf("schedule on %s (repeat %v): %v", date, repeat, err)
+	}
+	if s.Repeat != repeat {
+		w.t.Fatalf("stored schedule repeat = %v, want %v", s.Repeat, repeat)
+	}
+	return s
+}
+
+// claim reads the quest's holder and claimed_at straight from the table.
+func (w *scheduleWorld) claim(quest uuid.UUID) (*uuid.UUID, pgtype.Timestamptz) {
+	w.t.Helper()
+	got, err := w.q.GetHouseholdQuest(w.ctx, db.GetHouseholdQuestParams{HouseholdID: w.h, ID: quest})
+	if err != nil {
+		w.t.Fatalf("get quest: %v", err)
+	}
+	return got.ClaimedBy, got.ClaimedAt
+}
+
+func (w *scheduleWorld) hasSchedule(id uuid.UUID) bool {
+	w.t.Helper()
+	for _, got := range w.scheduleIDs() {
+		if got == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (w *scheduleWorld) markDone(quest, member uuid.UUID) {
+	w.t.Helper()
+	if _, err := w.quests.MarkDone(w.ctx, w.admin, w.h, quest, app.MemberAction{MemberID: member}); err != nil {
+		w.t.Fatalf("mark done: %v", err)
+	}
 }
 
 func (w *scheduleWorld) rollover(now time.Time) int {
@@ -212,8 +267,6 @@ func TestIntegration_QuestSchedules(t *testing.T) {
 	// CLM-3: before the rollover on a schedule's date the schedule is in the
 	// member's Upcoming and the quest is not held; once that rollover
 	// assigns it the quest is held and the one-off is gone from Upcoming.
-	// quest_schedules has no repeat column yet, so no repeated schedule is
-	// present to check.
 	t.Run("upcoming_before_and_after_rollover", func(t *testing.T) {
 		w := newScheduleWorld(t, "schedupcoming")
 		sam, ann := w.member("Sam"), w.member("Ann")
@@ -657,4 +710,344 @@ func TestIntegration_QuestScheduleUpcoming(t *testing.T) {
 	if _, err := w.schedules.Upcoming(w.ctx, w.admin, w.h, uuid.New()); !errors.Is(err, app.ErrNotFound) {
 		t.Errorf("Upcoming for a member not in the household: err = %v, want ErrNotFound", err)
 	}
+
+	// CLM-9: repeated schedules carry repeat, and their next date is the
+	// local date the next midnight pass can assign them: the start date for
+	// a free quest, the local date of available_at for a resting one.
+	t.Run("repeat_flag_and_next_date", func(t *testing.T) {
+		w := newScheduleWorld(t, "schedupreps")
+		sam := w.member("Sam")
+		resting := w.quest(app.QuestInput{Name: "Clean your room", Points: num(5), RepeatDays: num(7)})
+		free := w.quest(app.QuestInput{Name: "Feed the cat", Points: num(5), RepeatDays: num(1)})
+		oneOff := w.quest(app.QuestInput{Name: "Water the plants", Points: num(5)})
+
+		// The 7-day quest is done today: it rests until a local midnight
+		// well after tomorrow, the day its schedule starts.
+		if _, err := w.quests.Accept(w.ctx, w.admin, w.h, resting, app.MemberAction{MemberID: sam}); err != nil {
+			t.Fatalf("accept: %v", err)
+		}
+		w.markDone(resting, sam)
+		got, err := w.q.GetHouseholdQuest(w.ctx, db.GetHouseholdQuestParams{HouseholdID: w.h, ID: resting})
+		if err != nil || !got.AvailableAt.Valid {
+			t.Fatalf("resting quest = %+v, %v; want available_at set", got, err)
+		}
+		restDate := got.AvailableAt.Time.In(w.loc).Format(time.DateOnly)
+		if restDate <= w.date(3) {
+			t.Fatalf("test setup: available_at date %s is not after %s", restDate, w.date(3))
+		}
+
+		restingS := w.scheduleOn(resting, sam, w.date(1), true)
+		freeS := w.scheduleOn(free, sam, w.date(3), true)
+		oneOffS := w.scheduleOn(oneOff, sam, w.date(5), false)
+
+		up, err := w.schedules.Upcoming(w.ctx, w.admin, w.h, sam)
+		if err != nil {
+			t.Fatalf("Upcoming: %v", err)
+		}
+		want := []struct {
+			id           uuid.UUID
+			start, next  string
+			repeat       bool
+			questMessage string
+		}{
+			{freeS.ID, w.date(3), w.date(3), true, "free repeated quest"},
+			{oneOffS.ID, w.date(5), w.date(5), false, "one-off"},
+			{restingS.ID, w.date(1), restDate, true, "resting repeated quest"},
+		}
+		if len(up) != len(want) {
+			t.Fatalf("Upcoming = %+v, want %d items", up, len(want))
+		}
+		for i, wnt := range want {
+			u := up[i]
+			if u.ID != wnt.id || u.StartDate != wnt.start || u.NextDate != wnt.next || u.Repeat != wnt.repeat {
+				t.Errorf("Upcoming[%d] = %+v, want the %s: start %s, next %s, repeat %v",
+					i, u, wnt.questMessage, wnt.start, wnt.next, wnt.repeat)
+			}
+		}
+	})
+}
+
+// TestIntegration_QuestRolloverRepeat proves the repeated schedule against
+// real Postgres, through RolloverDueHouseholds as the midnight pass runs it:
+// a repeated schedule assigns its quest at every household-local midnight
+// at which the quest is free, is never consumed, and its cadence is the
+// quest's own cooldown; a one-off fires on its day only. MarkDone stamps
+// the cooldown from the real clock (today), so each timeline starts today
+// and the passes run at later local midnights.
+func TestIntegration_QuestRolloverRepeat(t *testing.T) {
+	// CLM-2, CLM-7: a 1-day quest is assigned at each of three midnights,
+	// the member marking it done between; the row stays, and a second run
+	// of the same local day writes nothing.
+	t.Run("daily_assigned_every_midnight", func(t *testing.T) {
+		w := newScheduleWorld(t, "repdaily")
+		sam := w.member("Sam")
+		cat := w.quest(app.QuestInput{Name: "Feed the cat", Points: num(5), RepeatDays: num(1)})
+		s := w.scheduleOn(cat, sam, w.date(1), true)
+		for day := 1; day <= 3; day++ {
+			at := w.localMidnight(day).Add(time.Minute)
+			w.rollover(at)
+			holder, claimedAt := w.claim(cat)
+			if !isHeldBy(holder, sam) || !claimedAt.Time.Equal(at) {
+				t.Fatalf("day %d: claimed_by=%v claimed_at=%v, want Sam at %v", day, holder, claimedAt.Time, at)
+			}
+			if !w.hasSchedule(s.ID) {
+				t.Fatalf("day %d: repeated schedule consumed", day)
+			}
+			// Same local day again (as after a restart): nothing new.
+			w.rollover(at.Add(time.Minute))
+			if holder, again := w.claim(cat); !isHeldBy(holder, sam) || !again.Time.Equal(at) {
+				t.Fatalf("day %d second run: claimed_by=%v claimed_at=%v, want unchanged %v", day, holder, again.Time, at)
+			}
+			// Done today: the cooldown ends at tomorrow's real local
+			// midnight, before the next pass.
+			w.markDone(cat, sam)
+		}
+	})
+
+	// CLM-1: a 7-day quest done today rests until the local midnight 7
+	// days on; the six passes before it assign nothing, that one does.
+	t.Run("weekly_waits_for_cooldown", func(t *testing.T) {
+		w := newScheduleWorld(t, "repweekly")
+		sam := w.member("Sam")
+		room := w.quest(app.QuestInput{Name: "Clean your room", Points: num(5), RepeatDays: num(7)})
+		if _, err := w.quests.Accept(w.ctx, w.admin, w.h, room, app.MemberAction{MemberID: sam}); err != nil {
+			t.Fatalf("accept: %v", err)
+		}
+		w.markDone(room, sam)
+		s := w.scheduleOn(room, sam, w.date(1), true)
+		for day := 1; day <= 6; day++ {
+			w.rollover(w.localMidnight(day).Add(time.Minute))
+			if holder, _ := w.claim(room); holder != nil {
+				t.Fatalf("day %d: resting quest assigned to %v", day, holder)
+			}
+			if !w.hasSchedule(s.ID) {
+				t.Fatalf("day %d: repeated schedule consumed while the quest rested", day)
+			}
+		}
+		w.rollover(w.localMidnight(7).Add(time.Minute))
+		if holder, _ := w.claim(room); !isHeldBy(holder, sam) {
+			t.Fatalf("day 7: claimed_by = %v, want Sam once the cooldown ended", holder)
+		}
+	})
+
+	// CLM-1, CLM-7: two households in different timezones each assign a
+	// repeated schedule at their own local midnight of the same date D.
+	t.Run("each_timezone_at_its_own_midnight", func(t *testing.T) {
+		akl := newScheduleWorld(t, "repakl")
+		lax := newScheduleWorldIn(t, "replax", "America/Los_Angeles")
+		aklKid, laxKid := akl.member("Kia"), lax.member("Lou")
+		aklQuest := akl.quest(app.QuestInput{Name: "Auckland chore", Points: num(1)})
+		laxQuest := lax.quest(app.QuestInput{Name: "LA chore", Points: num(1)})
+		dayD := akl.date(2)
+		akl.scheduleOn(aklQuest, aklKid, dayD, true)
+		lax.scheduleOn(laxQuest, laxKid, dayD, true)
+		aklAt := akl.localMidnight(2).Add(time.Hour)
+		if got := aklAt.In(lax.loc).Format(time.DateOnly); got >= dayD {
+			t.Fatalf("test setup: Los Angeles date at %v is %s, want before %s", aklAt, got, dayD)
+		}
+		akl.rollover(aklAt)
+		if holder, _ := akl.claim(aklQuest); !isHeldBy(holder, aklKid) {
+			t.Fatalf("Auckland after its midnight: %v, want %v", holder, aklKid)
+		}
+		if holder, _ := lax.claim(laxQuest); holder != nil {
+			t.Fatalf("Los Angeles assigned before its own midnight: %v", holder)
+		}
+		d, err := time.Parse(time.DateOnly, dayD)
+		if err != nil {
+			t.Fatalf("parse D: %v", err)
+		}
+		laxAt := time.Date(d.Year(), d.Month(), d.Day(), 1, 0, 0, 0, lax.loc)
+		lax.rollover(laxAt)
+		if holder, _ := lax.claim(laxQuest); !isHeldBy(holder, laxKid) {
+			t.Fatalf("Los Angeles after its midnight: %v, want %v", holder, laxKid)
+		}
+		// laxAt is already D+1 in Auckland, so that run is also Auckland's
+		// next midnight pass: its quest is still Kia's, re-assigned there
+		// after the end-of-day expiry, and never Lou's.
+		if holder, _ := akl.claim(aklQuest); !isHeldBy(holder, aklKid) {
+			t.Fatalf("Auckland after Los Angeles's pass: %v, want %v", holder, aklKid)
+		}
+	})
+
+	// CLM-3 (a): abandoned, the quest is assigned again at the next pass.
+	t.Run("abandoned_reassigned_next_midnight", func(t *testing.T) {
+		w := newScheduleWorld(t, "repabandon")
+		sam := w.member("Sam")
+		q := w.quest(app.QuestInput{Name: "Dishes", Points: num(5)})
+		w.scheduleOn(q, sam, w.date(1), true)
+		day1 := w.localMidnight(1).Add(time.Minute)
+		w.rollover(day1)
+		if holder, _ := w.claim(q); !isHeldBy(holder, sam) {
+			t.Fatalf("day 1: %v, want Sam", holder)
+		}
+		if _, err := w.quests.Abandon(w.ctx, w.admin, w.h, q, app.MemberAction{MemberID: sam}); err != nil {
+			t.Fatalf("abandon: %v", err)
+		}
+		w.rollover(day1.Add(time.Minute))
+		if holder, _ := w.claim(q); holder != nil {
+			t.Fatalf("second run of day 1 re-assigned the abandoned quest to %v", holder)
+		}
+		day2 := w.localMidnight(2).Add(time.Minute)
+		w.rollover(day2)
+		if holder, claimedAt := w.claim(q); !isHeldBy(holder, sam) || !claimedAt.Time.Equal(day2) {
+			t.Fatalf("day 2: %v at %v, want Sam at %v", holder, claimedAt.Time, day2)
+		}
+	})
+
+	// CLM-3 (b): left unfinished, the quest is returned by the end-of-day
+	// expiry and assigned again in the same pass, with a fresh claimed_at.
+	t.Run("expired_reassigned_same_pass", func(t *testing.T) {
+		w := newScheduleWorld(t, "repexpire")
+		sam := w.member("Sam")
+		q := w.quest(app.QuestInput{Name: "Recycling", Points: num(5)})
+		w.scheduleOn(q, sam, w.date(1), true)
+		w.rollover(w.localMidnight(1).Add(time.Minute))
+		day2 := w.localMidnight(2).Add(time.Minute)
+		w.rollover(day2)
+		got, err := w.q.GetHouseholdQuest(w.ctx, db.GetHouseholdQuestParams{HouseholdID: w.h, ID: q})
+		if err != nil {
+			t.Fatalf("get quest: %v", err)
+		}
+		if !isHeldBy(got.ClaimedBy, sam) || !got.ClaimedAt.Time.Equal(day2) {
+			t.Fatalf("day 2: %v at %v, want Sam at %v (expired first, then assigned)", got.ClaimedBy, got.ClaimedAt.Time, day2)
+		}
+		if want := w.localMidnight(3); !got.ClaimExpiresAt.Time.Equal(want) {
+			t.Errorf("claim_expires_at = %v, want %v", got.ClaimExpiresAt.Time, want)
+		}
+	})
+
+	// CLM-4: once cancelled, a repeated schedule never assigns again and
+	// leaves the list and Upcoming; the quest already assigned is kept.
+	t.Run("cancel_stops_future_assignments", func(t *testing.T) {
+		w := newScheduleWorld(t, "repcancel")
+		sam := w.member("Sam")
+		w.setAdminPin("4321")
+		q := w.quest(app.QuestInput{Name: "Walk the dog", Points: num(5)})
+		s := w.scheduleOn(q, sam, w.date(1), true)
+		w.rollover(w.localMidnight(1).Add(time.Minute))
+		if holder, _ := w.claim(q); !isHeldBy(holder, sam) {
+			t.Fatalf("day 1: %v, want Sam", holder)
+		}
+		w.markDone(q, sam)
+		if err := w.schedules.Cancel(w.ctx, w.admin, w.h, s.ID, w.pin); err != nil {
+			t.Fatalf("cancel: %v", err)
+		}
+		for day := 2; day <= 4; day++ {
+			w.rollover(w.localMidnight(day).Add(time.Minute))
+			if holder, _ := w.claim(q); holder != nil {
+				t.Fatalf("day %d: cancelled schedule assigned to %v", day, holder)
+			}
+		}
+		if ids := w.scheduleIDs(); len(ids) != 0 {
+			t.Errorf("schedules after cancel: %v, want none", ids)
+		}
+		up, err := w.schedules.Upcoming(w.ctx, w.admin, w.h, sam)
+		if err != nil || len(up) != 0 {
+			t.Errorf("Upcoming after cancel = %+v, %v; want empty", up, err)
+		}
+		pending, err := w.quests.ListPending(w.ctx, w.admin, w.h, w.pin)
+		if err != nil || len(pending) != 1 || pending[0].QuestID != q {
+			t.Errorf("completion of the assigned quest after cancel = %+v, %v; want Sam's one kept", pending, err)
+		}
+	})
+
+	// CLM-5: a one-off fires on its day only and ends there, assigned or
+	// skipped for a held quest; one skipped for age is kept.
+	t.Run("one_off_ends_with_its_day", func(t *testing.T) {
+		w := newScheduleWorld(t, "reponeoff")
+		sam, ann, kid := w.member("Sam"), w.member("Ann"), w.member("Kid")
+		n := time.Now().In(w.loc)
+		bday := time.Date(n.Year()-5, n.Month(), n.Day(), 0, 0, 0, 0, time.UTC).Format(time.DateOnly)
+		if _, err := w.family.SetBirthday(w.ctx, w.admin, w.h, kid, &bday, ""); err != nil {
+			t.Fatalf("set birthday: %v", err)
+		}
+		free := w.quest(app.QuestInput{Name: "Free", Points: num(5)})
+		held := w.quest(app.QuestInput{Name: "Held", Points: num(5)})
+		adult := w.quest(app.QuestInput{Name: "Adult", Points: num(5), MinAge: num(16)})
+		if _, err := w.quests.Accept(w.ctx, w.admin, w.h, held, app.MemberAction{MemberID: ann}); err != nil {
+			t.Fatalf("Ann accept: %v", err)
+		}
+		// Today's pass has not run for this household yet.
+		freeS := w.scheduleOn(free, sam, w.date(0), false)
+		heldS := w.scheduleOn(held, sam, w.date(0), false)
+		ageS := w.scheduleOn(adult, kid, w.date(0), false)
+		w.rollover(time.Now())
+		if holder, _ := w.claim(free); !isHeldBy(holder, sam) {
+			t.Fatalf("free one-off: %v, want Sam", holder)
+		}
+		if holder, _ := w.claim(held); !isHeldBy(holder, ann) {
+			t.Fatalf("held quest moved to %v, want Ann kept", holder)
+		}
+		if holder, _ := w.claim(adult); holder != nil {
+			t.Fatalf("out-of-age one-off assigned to %v", holder)
+		}
+		if w.hasSchedule(freeS.ID) || w.hasSchedule(heldS.ID) {
+			t.Fatalf("one-offs after their day: %v, want the assigned and the held-skip ones gone", w.scheduleIDs())
+		}
+		if !w.hasSchedule(ageS.ID) {
+			t.Fatalf("age-skipped one-off removed, want it kept")
+		}
+		// Next midnight: no one-off retries. The household has no schedule
+		// left due, so the pass leaves the holds to the expiry sweep: each
+		// quest keeps exactly the claim it had, none is assigned afresh.
+		before := map[string]pgtype.Timestamptz{}
+		holders := map[string]*uuid.UUID{}
+		for name, q := range map[string]uuid.UUID{"free": free, "held": held, "adult": adult} {
+			holders[name], before[name] = w.claim(q)
+		}
+		w.rollover(w.localMidnight(1).Add(time.Minute))
+		for name, q := range map[string]uuid.UUID{"free": free, "held": held, "adult": adult} {
+			holder, at := w.claim(q)
+			if (holder == nil) != (holders[name] == nil) || (holder != nil && *holder != *holders[name]) || !at.Time.Equal(before[name].Time) {
+				t.Errorf("%s quest changed the day after its one-off: %v at %v, was %v at %v", name, holder, at.Time, holders[name], before[name].Time)
+			}
+		}
+		if ids := w.scheduleIDs(); len(ids) != 1 || ids[0] != ageS.ID {
+			t.Errorf("schedules the day after: %v, want only the age-skipped %v", ids, ageS.ID)
+		}
+	})
+
+	// CLM-8: a repeated schedule that finds its quest held by another
+	// member, or its member outside the age range, assigns nothing, keeps
+	// the schedule, raises no error and tries again at the next pass.
+	t.Run("held_or_age_blocked_kept_and_retried", func(t *testing.T) {
+		w := newScheduleWorld(t, "repheld")
+		sam, ann, kid := w.member("Sam"), w.member("Ann"), w.member("Kid")
+		n := time.Now().In(w.loc)
+		bday := time.Date(n.Year()-5, n.Month(), n.Day(), 0, 0, 0, 0, time.UTC).Format(time.DateOnly)
+		if _, err := w.family.SetBirthday(w.ctx, w.admin, w.h, kid, &bday, ""); err != nil {
+			t.Fatalf("set birthday: %v", err)
+		}
+		held := w.quest(app.QuestInput{Name: "Held", Points: num(5)})
+		adult := w.quest(app.QuestInput{Name: "Adult", Points: num(5), MinAge: num(16)})
+		if _, err := w.quests.Accept(w.ctx, w.admin, w.h, held, app.MemberAction{MemberID: ann}); err != nil {
+			t.Fatalf("Ann accept: %v", err)
+		}
+		_, annAt := w.claim(held)
+		heldS := w.scheduleOn(held, sam, w.date(0), true)
+		ageS := w.scheduleOn(adult, kid, w.date(0), true)
+		w.rollover(time.Now())
+		if holder, at := w.claim(held); !isHeldBy(holder, ann) || !at.Time.Equal(annAt.Time) {
+			t.Fatalf("held quest after the pass: %v at %v, want Ann's claim unchanged", holder, at.Time)
+		}
+		if !w.hasSchedule(heldS.ID) || !w.hasSchedule(ageS.ID) {
+			t.Fatalf("skipped repeated schedules removed: %v", w.scheduleIDs())
+		}
+		// Ann's hold ends at midnight; the next pass gives it to Sam.
+		w.rollover(w.localMidnight(1).Add(time.Minute))
+		if holder, _ := w.claim(held); !isHeldBy(holder, sam) {
+			t.Fatalf("day 1: held quest %v, want Sam once free", holder)
+		}
+		for day := 1; day <= 2; day++ {
+			if day == 2 {
+				w.rollover(w.localMidnight(2).Add(time.Minute))
+			}
+			if holder, _ := w.claim(adult); holder != nil {
+				t.Fatalf("day %d: out-of-age member assigned: %v", day, holder)
+			}
+			if !w.hasSchedule(ageS.ID) || !w.hasSchedule(heldS.ID) {
+				t.Fatalf("day %d: repeated schedules: %v, want both kept", day, w.scheduleIDs())
+			}
+		}
+	})
 }
