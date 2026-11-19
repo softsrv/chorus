@@ -114,7 +114,7 @@ Copy `.env.example` → `.env`. Required: `DATABASE_URL`, `JWT_SECRET` (≥32 by
 
 ## Web test client
 
-`web/static/index.html` + `js/api.js` (token handling, auto-refresh) + `js/app.js` (views). No framework, no build step beyond Tailwind/DaisyUI. Strict CSP (`script-src 'self'` plus `https://accounts.google.com/gsi/client`; `frame`/`connect`/`style-src` add `https://accounts.google.com/gsi/` only; still no inline script or style), so no inline `<script>`/`style=`. Insert API data with `textContent` only. It's a test harness, so keep it simple; it is not the product UI.
+`web/static/index.html` + `js/api.js` (token handling, auto-refresh) + `js/app.js` (the one script entry: boot, routing, household home) and the flat ES modules it imports: `state.js` (all mutable client state, reset by `boot()`), `dom.js`, `household.js`, and one module per section (`auth`, `quests`, `rewards`, `family`, `events`, `account`). Section modules never import `app.js`; `web/client_guards_test.go` checks the import graph and keeps each file under 1000 lines. No framework, no build step beyond Tailwind/DaisyUI. Strict CSP (`script-src 'self'` plus `https://accounts.google.com/gsi/client`; `frame`/`connect`/`style-src` add `https://accounts.google.com/gsi/` only; still no inline script or style), so no inline `<script>`/`style=`. Insert API data with `textContent` only. It's a test harness, so keep it simple; it is not the product UI.
 
 ## Tech constraints
 

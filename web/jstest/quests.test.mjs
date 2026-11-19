@@ -1691,7 +1691,7 @@ test('CLM-20 / CLM-29: every quest is listed whatever its range, each row shows 
 });
 
 test('CLM-20: questRangeText is the one place a range is worded', () => {
-  const src = readFileSync(new URL('../static/js/app.js', import.meta.url), 'utf8');
+  const src = readFileSync(new URL('../static/js/quests.js', import.meta.url), 'utf8');
   const start = src.indexOf('function questRangeText(');
   assert.ok(start >= 0, 'questRangeText is defined');
   const end = src.indexOf('\n}\n', start);
@@ -1847,7 +1847,7 @@ test('CLM-24: the member quest view and the share picker never request a birthda
   assert.doesNotMatch(text(), /2015-04-02|2020-01-01|\(age \d+\)|Birthday/);
 
   // Only familyTab names the birthday routes.
-  const src = readFileSync(new URL('../static/js/app.js', import.meta.url), 'utf8');
+  const src = readFileSync(new URL('../static/js/family.js', import.meta.url), 'utf8');
   const start = src.indexOf('async function familyTab(');
   const end = src.indexOf('function adminPinCard(', start);
   assert.ok(start > 0 && end > start);

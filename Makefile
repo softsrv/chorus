@@ -46,7 +46,7 @@ build:
 test:
 	go test -race ./...
 
-# Web client unit tests: app.js against a minimal DOM and a stubbed fetch.
+# Web client unit tests: the client JS modules against a minimal DOM and a stubbed fetch.
 test-js:
 	node --test web/jstest/*.test.mjs
 

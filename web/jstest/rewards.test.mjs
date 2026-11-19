@@ -441,11 +441,12 @@ test('CLM-21: empty list in member view shows empty state text and zero Redeem b
   assert.equal(buttons(env.$app, 'Redeem').length, 0);
 });
 
-// The rewardsTab source, from its definition to the next section divider.
-const APP_SRC = readFileSync(new URL('../static/js/app.js', import.meta.url), 'utf8');
+// The rewardsTab source, from its definition to the end of rewards.js.
+const APP_SRC = readFileSync(new URL('../static/js/rewards.js', import.meta.url), 'utf8');
+const QUESTS_SRC = readFileSync(new URL('../static/js/quests.js', import.meta.url), 'utf8');
 function rewardsSource(src) {
   const start = src.indexOf('async function rewardsTab(');
-  const end = src.indexOf('// ── Family', start);
+  const end = src.length;
   assert.ok(start >= 0 && end > start, 'rewardsTab section not found');
   return src.slice(start, end);
 }
@@ -515,7 +516,7 @@ function rewardHistorySource(src) {
 }
 
 test('CLM-11: reward history inserts text only — no innerHTML, inline style or script', () => {
-  const section = rewardHistorySource(APP_SRC);
+  const section = rewardHistorySource(QUESTS_SRC);
   assert.match(section, /No rewards redeemed yet/, 'read the real rewardHistoryTable body');
   assert.throws(() => rewardHistorySource('function other() {}'), /rewardHistoryTable not found/, 'a missing function fails the check');
   assert.equal(HTML_SINKS.exec(section), null);
