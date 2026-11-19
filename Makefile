@@ -13,11 +13,11 @@ export
 
 ## ── Development ─────────────────────────────────────────────────────────────
 
-# Full hot-reload: Postgres + smtp4dev, migrate, then the app container (air
-# watching the bind-mounted source) detached, + Tailwind watch on the host.
+# Full hot-reload: Postgres + smtp4dev, migrate, build the CSS once, then the
+# app container (air watching the bind-mounted source) detached. Run
+# `make tailwind-watch` in another terminal while editing web client styles.
 dev: services-up migrate-up tailwind
 	docker compose up -d --build app
-	$(MAKE) tailwind-watch
 
 # Postgres + smtp4dev only (the app container is started by dev/run).
 services-up:
