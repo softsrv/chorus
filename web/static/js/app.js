@@ -1791,12 +1791,16 @@ async function familyTab(h, $root) {
     const scheduledHeading = () => el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Scheduled' });
     const $scheduled = el('div', { class: 'space-y-1' },
       scheduledHeading(), el('p', { class: 'text-xs opacity-60', text: 'Loading scheduled quests…' }));
+    const upcomingHeading = () => el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Upcoming' });
+    const $upcoming = el('div', { class: 'space-y-1' },
+      upcomingHeading(), el('p', { class: 'text-xs opacity-60', text: 'Loading upcoming quests…' }));
     $root.replaceChildren(card(null,
       el('h3', { class: 'font-semibold', text: `${m.name} — ${m.points} points` }),
       el('div', {}, el('button', { class: 'btn btn-ghost btn-xs', text: 'Back to family', onclick: () => rerender() })),
       adjustPointsForm(m, view),
       $schedule,
       $scheduled,
+      $upcoming,
       $history,
       $rewards));
     // Each read settles to its content, or null when the view is gone or the
@@ -1816,17 +1820,19 @@ async function familyTab(h, $root) {
       }
     };
     const schedules = `/households/${h.id}/quest-schedules`;
-    const [content, rewardContent, scheduleContent, scheduledContent] = await Promise.all([
+    const [content, rewardContent, scheduleContent, scheduledContent, upcomingContent] = await Promise.all([
       load(`${base}/${m.id}/points-history`, 'points history', (items) => pointsHistoryTable(items, 'No points history yet.', { adminLabel: '(admin adjustment)' })),
       load(`${base}/${m.id}/reward-history`, 'reward history', (items) => rewardHistoryTable(items)),
       load(`/households/${h.id}/quests?limit=100`, 'quests', (items) => scheduleQuestForm(m, view, items || [])),
       load(schedules, 'scheduled quests', (items) => scheduledList(m, view, (items || []).filter((s) => s.member_id === m.id))),
+      load(`${base}/${m.id}/upcoming-quests`, 'upcoming quests', (items) => upcomingList(items || [])),
     ]);
-    if (familyView !== view || !content || !rewardContent || !scheduleContent || !scheduledContent) return;
+    if (familyView !== view || !content || !rewardContent || !scheduleContent || !scheduledContent || !upcomingContent) return;
     $history.replaceChildren(heading(), content);
     $rewards.replaceChildren(rewardHeading(), rewardContent);
     $schedule.replaceChildren(scheduleHeading(), scheduleContent);
     $scheduled.replaceChildren(scheduledHeading(), scheduledContent);
+    $upcoming.replaceChildren(upcomingHeading(), upcomingContent);
   };
 
   // A refused admin PIN on a schedule write locks the tab, as load() does.
