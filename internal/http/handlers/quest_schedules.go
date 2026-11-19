@@ -14,6 +14,7 @@ type questScheduleServicer interface {
 	Schedule(ctx context.Context, userID, householdID uuid.UUID, in app.ScheduleInput, adminPin string) (app.QuestSchedule, error)
 	List(ctx context.Context, userID, householdID uuid.UUID, adminPin string) ([]app.QuestSchedule, error)
 	Cancel(ctx context.Context, userID, householdID, scheduleID uuid.UUID, adminPin string) error
+	Upcoming(ctx context.Context, userID, householdID, memberID uuid.UUID) ([]app.UpcomingQuest, error)
 }
 
 // QuestScheduleHandler serves /api/v1/households/{householdID}/quest-schedules.
@@ -70,6 +71,26 @@ func (h *QuestScheduleHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.JSON(w, http.StatusOK, listResponse[questScheduleJSON]{Items: mapSlice(schedules, toQuestSchedule)})
+}
+
+// Upcoming returns one member's upcoming scheduled quests, soonest next_date
+// first. Any household member may read it (no PIN); a non-member, or a member
+// not in the household, is 404. None answers {"items": []}, never null.
+func (h *QuestScheduleHandler) Upcoming(w http.ResponseWriter, r *http.Request) {
+	hid, ok := pathUUID(w, r, "householdID")
+	if !ok {
+		return
+	}
+	mid, ok := pathUUID(w, r, "memberID")
+	if !ok {
+		return
+	}
+	upcoming, err := h.svc.Upcoming(r.Context(), currentUser(r), hid, mid)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, listResponse[upcomingQuestJSON]{Items: mapSlice(upcoming, toUpcomingQuest)})
 }
 
 // Delete removes one schedule. 204; 404 for a schedule not in the household.

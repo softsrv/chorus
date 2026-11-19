@@ -531,6 +531,40 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	if got, err := schedules.List(ctx, mallory, mh.ID, malloryPin); err != nil || len(got) != 1 || got[0].ID != mallorySchedule.ID {
 		t.Errorf("mallory's own schedules = %+v, %v; want only %v", got, err, mallorySchedule.ID)
 	}
+	// Upcoming isolation (CLM-2): an outsider, or a member id smuggled from
+	// another household, gets ErrNotFound and no rows.
+	upcomingRefused := map[string]func() ([]app.UpcomingQuest, error){
+		"upcoming outsider user": func() ([]app.UpcomingQuest, error) {
+			return schedules.Upcoming(ctx, mallory, h.ID, aliceMember.ID)
+		},
+		"upcoming outsider user as own member": func() ([]app.UpcomingQuest, error) {
+			return schedules.Upcoming(ctx, mallory, h.ID, malloryMember.ID)
+		},
+		"upcoming alice's member via own household": func() ([]app.UpcomingQuest, error) {
+			return schedules.Upcoming(ctx, mallory, mh.ID, aliceMember.ID)
+		},
+		"upcoming own household foreign member": func() ([]app.UpcomingQuest, error) {
+			return schedules.Upcoming(ctx, alice, h.ID, malloryMember.ID)
+		},
+		"upcoming nonexistent member": func() ([]app.UpcomingQuest, error) {
+			return schedules.Upcoming(ctx, alice, h.ID, uuid.New())
+		},
+	}
+	for name, call := range upcomingRefused {
+		got, err := call()
+		checks[name] = err
+		if len(got) != 0 {
+			t.Errorf("%s returned data: %+v; want none", name, got)
+		}
+	}
+	// Positive controls: each admin's own member sees only their own
+	// household's schedule.
+	if got, err := schedules.Upcoming(ctx, alice, h.ID, aliceMember.ID); err != nil || len(got) != 1 || got[0].ID != aliceSchedule.ID {
+		t.Errorf("alice's member upcoming = %+v, %v; want only %v", got, err, aliceSchedule.ID)
+	}
+	if got, err := schedules.Upcoming(ctx, mallory, mh.ID, malloryMember.ID); err != nil || len(got) != 1 || got[0].ID != mallorySchedule.ID {
+		t.Errorf("mallory's member upcoming = %+v, %v; want only %v", got, err, mallorySchedule.ID)
+	}
 	if err := familySvc.ClearAdminPin(ctx, mallory, mh.ID, malloryPin); err != nil {
 		t.Fatalf("mallory ClearAdminPin: %v", err)
 	}

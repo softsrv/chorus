@@ -28,8 +28,8 @@ func TestIntegration_QuestSchedulesMigration(t *testing.T) {
 	pool := testDB(t)
 	q := db.New(pool)
 	ctx := context.Background()
-	upSQL := readMigration(t, "000022_quest_schedules.up.sql")
-	downSQL := readMigration(t, "000022_quest_schedules.down.sql")
+	upSQL := readMigration(t, "000023_quest_schedules.up.sql")
+	downSQL := readMigration(t, "000023_quest_schedules.down.sql")
 
 	mustExec := func(sql string, args ...any) {
 		t.Helper()

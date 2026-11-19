@@ -286,6 +286,62 @@ func (q *Queries) ListHouseholdsDueForRollover(ctx context.Context, arg ListHous
 	return items, nil
 }
 
+const listMemberUpcomingSchedules = `-- name: ListMemberUpcomingSchedules :many
+SELECT s.id, s.household_id, s.quest_id, s.member_id, s.start_date, s.created_at,
+       q.name AS quest_name, q.available_at
+FROM quest_schedules s
+JOIN household_quests q ON q.household_id = s.household_id AND q.id = s.quest_id
+JOIN family_members m ON m.household_id = s.household_id AND m.id = s.member_id
+WHERE s.household_id = $1 AND s.member_id = $2
+ORDER BY s.start_date, q.name, s.id
+`
+
+type ListMemberUpcomingSchedulesParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	MemberID    uuid.UUID `json:"member_id"`
+}
+
+type ListMemberUpcomingSchedulesRow struct {
+	ID          uuid.UUID          `json:"id"`
+	HouseholdID uuid.UUID          `json:"household_id"`
+	QuestID     uuid.UUID          `json:"quest_id"`
+	MemberID    uuid.UUID          `json:"member_id"`
+	StartDate   pgtype.Date        `json:"start_date"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	QuestName   string             `json:"quest_name"`
+	AvailableAt pgtype.Timestamptz `json:"available_at"`
+}
+
+// The member's schedules with quest details, filtered by household_id and member_id.
+func (q *Queries) ListMemberUpcomingSchedules(ctx context.Context, arg ListMemberUpcomingSchedulesParams) ([]ListMemberUpcomingSchedulesRow, error) {
+	rows, err := q.db.Query(ctx, listMemberUpcomingSchedules, arg.HouseholdID, arg.MemberID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListMemberUpcomingSchedulesRow{}
+	for rows.Next() {
+		var i ListMemberUpcomingSchedulesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.HouseholdID,
+			&i.QuestID,
+			&i.MemberID,
+			&i.StartDate,
+			&i.CreatedAt,
+			&i.QuestName,
+			&i.AvailableAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listQuestSchedules = `-- name: ListQuestSchedules :many
 SELECT s.id, s.household_id, s.quest_id, s.member_id, s.start_date, s.created_at,
        q.name AS quest_name, m.name AS member_name

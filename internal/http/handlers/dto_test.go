@@ -359,3 +359,37 @@ func TestQuestScheduleJSON(t *testing.T) {
 		t.Errorf("schedule JSON = %v, want %v", raw, want)
 	}
 }
+
+// TestUpcomingQuestJSON pins the upcoming quest wire shape: the ids, quest_name,
+// start_date and next_date as YYYY-MM-DD, repeat as boolean, and no internal fields.
+func TestUpcomingQuestJSON(t *testing.T) {
+	t.Parallel()
+
+	u := app.UpcomingQuest{
+		ID:        uuid.MustParse("018f25b3-8b77-7000-8000-0000000000b1"),
+		QuestID:   uuid.MustParse("018f25b3-8b77-7000-8000-0000000000b2"),
+		QuestName: "Clean room",
+		StartDate: "2026-11-21",
+		NextDate:  "2026-11-22",
+		Repeat:    true,
+	}
+	data, err := json.Marshal(toUpcomingQuest(u))
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+	want := map[string]any{
+		"id":         u.ID.String(),
+		"quest_id":   u.QuestID.String(),
+		"quest_name": "Clean room",
+		"start_date": "2026-11-21",
+		"next_date":  "2026-11-22",
+		"repeat":     true,
+	}
+	if !reflect.DeepEqual(raw, want) {
+		t.Errorf("upcoming quest JSON = %v, want %v", raw, want)
+	}
+}

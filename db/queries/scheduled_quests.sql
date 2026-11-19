@@ -145,3 +145,14 @@ INSERT INTO household_quest_rollovers (household_id, last_rollover_date)
 VALUES (sqlc.arg(household_id), sqlc.arg(rollover_date)::date)
 ON CONFLICT (household_id) DO UPDATE
 SET last_rollover_date = GREATEST(household_quest_rollovers.last_rollover_date, EXCLUDED.last_rollover_date);
+
+-- name: ListMemberUpcomingSchedules :many
+-- The member's schedules with quest details, filtered by household_id and member_id.
+SELECT s.id, s.household_id, s.quest_id, s.member_id, s.start_date, s.created_at,
+       q.name AS quest_name, q.available_at
+FROM quest_schedules s
+JOIN household_quests q ON q.household_id = s.household_id AND q.id = s.quest_id
+JOIN family_members m ON m.household_id = s.household_id AND m.id = s.member_id
+WHERE s.household_id = sqlc.arg(household_id) AND s.member_id = sqlc.arg(member_id)
+ORDER BY s.start_date, q.name, s.id;
+

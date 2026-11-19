@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -159,6 +160,135 @@ func (s *QuestScheduleService) Cancel(ctx context.Context, userID, householdID, 
 		return ErrNotFound
 	}
 	return nil
+}
+
+// UpcomingQuest is one of a member's schedules as the member sees it ahead
+// of time. StartDate and NextDate are household-local dates, YYYY-MM-DD;
+// NextDate is the date the next rollover that can assign it falls on.
+type UpcomingQuest struct {
+	ID        uuid.UUID
+	QuestID   uuid.UUID
+	QuestName string
+	StartDate string
+	NextDate  string
+	Repeat    bool
+}
+
+// Upcoming returns the member's schedules, ordered by next date and then
+// quest name; an empty, non-nil slice when there are none. Any household
+// member may read it; a non-member of the household, or a member id not in
+// it, gets ErrNotFound. A one-off whose date has passed (kept after an age
+// skip) is left out.
+func (s *QuestScheduleService) Upcoming(ctx context.Context, userID, householdID, memberID uuid.UUID) ([]UpcomingQuest, error) {
+	h, err := getHousehold(ctx, s.q, userID, householdID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.q.GetFamilyMember(ctx, db.GetFamilyMemberParams{HouseholdID: householdID, ID: memberID}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get family member: %w", err)
+	}
+	loc, err := time.LoadLocation(h.Timezone)
+	if err != nil {
+		return nil, fmt.Errorf("load household timezone %q: %w", h.Timezone, err)
+	}
+	now := time.Now()
+	state, err := s.q.GetHouseholdRolloverState(ctx, db.GetHouseholdRolloverStateParams{
+		Now: pgtype.Timestamptz{Time: now, Valid: true}, HouseholdID: householdID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get rollover state: %w", err)
+	}
+	var lastRollover *time.Time
+	if state.LastRolloverDate.Valid {
+		d := state.LastRolloverDate.Time
+		lastRollover = &d
+	}
+	rows, err := s.q.ListMemberUpcomingSchedules(ctx, db.ListMemberUpcomingSchedulesParams{HouseholdID: householdID, MemberID: memberID})
+	if err != nil {
+		return nil, fmt.Errorf("list member upcoming schedules: %w", err)
+	}
+	out := make([]UpcomingQuest, 0, len(rows))
+	for _, r := range rows {
+		var availableAt *time.Time
+		if r.AvailableAt.Valid {
+			a := r.AvailableAt.Time
+			availableAt = &a
+		}
+		start := r.StartDate.Time.Format(time.DateOnly)
+		// quest_schedules has no repeat column yet: every schedule is a
+		// one-off until it gains one.
+		const repeat = false
+		next, ok := NextDate(start, repeat, availableAt, lastRollover, now, loc)
+		if !ok {
+			continue
+		}
+		out = append(out, UpcomingQuest{
+			ID: r.ID, QuestID: r.QuestID, QuestName: r.QuestName,
+			StartDate: start, NextDate: next, Repeat: repeat,
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].NextDate != out[j].NextDate {
+			return out[i].NextDate < out[j].NextDate
+		}
+		return out[i].QuestName < out[j].QuestName
+	})
+	return out, nil
+}
+
+// NextDate is the household-local date (YYYY-MM-DD) a schedule next comes
+// due, from the schedule's start date and repeat flag, its quest's
+// available_at (nil when the quest is not resting), the household's last
+// rollover date (nil when it never rolled over; a date at UTC midnight), now
+// and the household's timezone.
+//
+// A one-off shows its start date; ok is false when that date is before the
+// local today, so a passed one-off is not listed. A repeated schedule shows
+// the latest of its start date, the next local day not yet rolled over
+// (today when the household never rolled over or last rolled over before
+// yesterday) and the local date of available_at. ok is false only when
+// startDate is not a YYYY-MM-DD date.
+func NextDate(startDate string, repeat bool, availableAt, lastRolloverDate *time.Time, now time.Time, loc *time.Location) (string, bool) {
+	start, err := time.Parse(time.DateOnly, startDate)
+	if err != nil {
+		return "", false
+	}
+	today := localDate(now, loc)
+	if !repeat {
+		if start.Before(today) {
+			return "", false
+		}
+		return start.Format(time.DateOnly), true
+	}
+	next := start
+	notRolled := today
+	if lastRolloverDate != nil {
+		last := time.Date(lastRolloverDate.Year(), lastRolloverDate.Month(), lastRolloverDate.Day(), 0, 0, 0, 0, time.UTC)
+		if after := last.AddDate(0, 0, 1); after.After(notRolled) {
+			notRolled = after
+		}
+	}
+	if notRolled.After(next) {
+		next = notRolled
+	}
+	if availableAt != nil {
+		if rest := localDate(*availableAt, loc); rest.After(next) {
+			next = rest
+		}
+	}
+	return next.Format(time.DateOnly), true
+}
+
+// localDate is t's calendar date in loc, at UTC midnight.
+func localDate(t time.Time, loc *time.Location) time.Time {
+	l := t.In(loc)
+	return time.Date(l.Year(), l.Month(), l.Day(), 0, 0, 0, 0, time.UTC)
 }
 
 func toQuestSchedule(r db.ListQuestSchedulesRow) QuestSchedule {
