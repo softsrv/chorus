@@ -73,6 +73,26 @@ func (h *QuestScheduleHandler) List(w http.ResponseWriter, r *http.Request) {
 	respond.JSON(w, http.StatusOK, listResponse[questScheduleJSON]{Items: mapSlice(schedules, toQuestSchedule)})
 }
 
+// Upcoming returns one member's upcoming scheduled quests, soonest next_date
+// first. Any household member may read it (no PIN); a non-member, or a member
+// not in the household, is 404. None answers {"items": []}, never null.
+func (h *QuestScheduleHandler) Upcoming(w http.ResponseWriter, r *http.Request) {
+	hid, ok := pathUUID(w, r, "householdID")
+	if !ok {
+		return
+	}
+	mid, ok := pathUUID(w, r, "memberID")
+	if !ok {
+		return
+	}
+	upcoming, err := h.svc.Upcoming(r.Context(), currentUser(r), hid, mid)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, listResponse[upcomingQuestJSON]{Items: mapSlice(upcoming, toUpcomingQuest)})
+}
+
 // Delete removes one schedule. 204; 404 for a schedule not in the household.
 func (h *QuestScheduleHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	hid, ok := pathUUID(w, r, "householdID")

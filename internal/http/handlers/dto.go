@@ -225,6 +225,28 @@ func toQuestSchedule(s app.QuestSchedule) questScheduleJSON {
 	}
 }
 
+// upcomingQuestJSON is one of a member's upcoming scheduled quests;
+// start_date and next_date are household-local dates, YYYY-MM-DD.
+type upcomingQuestJSON struct {
+	ID        uuid.UUID `json:"id"`
+	QuestID   uuid.UUID `json:"quest_id"`
+	QuestName string    `json:"quest_name"`
+	StartDate string    `json:"start_date"`
+	NextDate  string    `json:"next_date"`
+	Repeat    bool      `json:"repeat"`
+}
+
+func toUpcomingQuest(u app.UpcomingQuest) upcomingQuestJSON {
+	return upcomingQuestJSON{
+		ID:        u.ID,
+		QuestID:   u.QuestID,
+		QuestName: u.QuestName,
+		StartDate: u.StartDate,
+		NextDate:  u.NextDate,
+		Repeat:    u.Repeat,
+	}
+}
+
 // int4Ptr is nil for a NULL column, so it marshals as null.
 func int4Ptr(n pgtype.Int4) *int32 {
 	if !n.Valid {

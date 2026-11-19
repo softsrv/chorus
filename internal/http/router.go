@@ -216,6 +216,9 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("POST /api/v1/households/{householdID}/quest-schedules", authMW(middleware.RequireEmailVerified(limit(pinRL, questScheduleH.Create))))
 	api.Handle("GET /api/v1/households/{householdID}/quest-schedules", authMW(middleware.RequireEmailVerified(limit(pinRL, questScheduleH.List))))
 	api.Handle("DELETE /api/v1/households/{householdID}/quest-schedules/{scheduleID}", authMW(middleware.RequireEmailVerified(limit(pinRL, questScheduleH.Delete))))
+	// A member's upcoming quests: a plain household read like the quest list,
+	// no PIN, so it is off the PIN limiter and never spends the action budget.
+	api.Handle("GET /api/v1/households/{householdID}/family-members/{memberID}/upcoming-quests", verified(questScheduleH.Upcoming))
 
 	// ── Rewards ───────────────────────────────────────────────────────────────
 	// Same rules as quest writes: admin-only, X-Admin-PIN once one is set, on
