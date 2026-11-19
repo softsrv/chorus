@@ -1030,7 +1030,7 @@ WITH done AS (
     WHERE h.id = q.household_id
       AND q.household_id = $1 AND q.id = $2
       AND q.claimed_by IS NOT NULL
-      AND (q.claim_expires_at IS NULL OR q.claim_expires_at > NOW())
+      AND q.claim_expires_at > NOW()
       AND (q.claimed_by = $3::uuid OR EXISTS (
           SELECT 1 FROM household_quest_participants p
           WHERE p.household_id = q.household_id AND p.quest_id = q.id
@@ -1192,7 +1192,7 @@ func (q *Queries) MarkQuestDone(ctx context.Context, arg MarkQuestDoneParams) (M
 }
 
 const questClaimLapsed = `-- name: QuestClaimLapsed :one
-SELECT (q.claim_expires_at IS NOT NULL AND q.claim_expires_at <= NOW())::boolean AS lapsed
+SELECT (q.claim_expires_at IS NULL OR q.claim_expires_at <= NOW())::boolean AS lapsed
 FROM household_quests q
 WHERE q.household_id = $1 AND q.id = $2
 `
@@ -1489,7 +1489,7 @@ WITH quest AS (
     FROM household_quests q
     WHERE q.household_id = $2 AND q.id = $3
       AND q.shareable AND q.claimed_by = $1::uuid
-      AND (q.claim_expires_at IS NULL OR q.claim_expires_at > NOW())
+      AND q.claim_expires_at > NOW()
     -- Locked and re-checked, so a share racing the holder's mark-done,
     -- abandon or the expiry sweep either sees the quest still held or writes
     -- nothing.

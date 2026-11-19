@@ -153,6 +153,37 @@ func TestIntegration_QuestClaimExpiryMigration(t *testing.T) {
 	if got := deadline(unheld); got != nil {
 		t.Errorf("unheld quest: claim_expires_at = %s, want NULL", got)
 	}
+
+	// Writers that don't know the column (the old binary, still serving
+	// between the manual migrate-up and the restart): its accept sets
+	// claimed_by and claimed_at alone, and the trigger stamps the deadline
+	// of that claimed day; its release clears claimed_by alone, and the
+	// deadline goes with it. A held quest without a deadline is refused.
+	oldClaim := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC) // 06:00 in Chicago
+	oldInsert := newQuest(chicagoHH, nil)
+	mustExec(`UPDATE household_quests SET claimed_by = $2, claimed_at = $3, updated_at = NOW() WHERE id = $1`,
+		oldInsert, chicagoMember, oldClaim)
+	if got, want := deadline(oldInsert), time.Date(2026, 1, 2, 6, 0, 0, 0, time.UTC); got == nil || !got.Equal(want) {
+		t.Errorf("old-shape accept: claim_expires_at = %v, want %s (midnight ending its claimed day)", got, want)
+	}
+	oldRow := uuid.New()
+	mustExec(`INSERT INTO household_quests (id, household_id, name, claimed_by, claimed_at)
+		VALUES ($1, $2, 'Old insert', $3, $4)`, oldRow, aucklandHH, aucklandMember, oldClaim)
+	if got, want := deadline(oldRow), time.Date(2026, 1, 2, 11, 0, 0, 0, time.UTC); got == nil || !got.Equal(want) {
+		t.Errorf("old-shape insert: claim_expires_at = %v, want %s", got, want)
+	}
+	mustExec(`UPDATE household_quests SET claimed_by = NULL, claimed_at = NULL WHERE id = $1`, oldInsert)
+	if got := deadline(oldInsert); got != nil {
+		t.Errorf("old-shape release: claim_expires_at = %s, want NULL", got)
+	}
+	var missing bool
+	if err := tx.QueryRow(ctx, `SELECT NOT EXISTS (SELECT 1 FROM pg_constraint
+		WHERE conname = 'household_quests_claim_expiry_with_holder')`).Scan(&missing); err != nil {
+		t.Fatalf("read constraint: %v", err)
+	}
+	if missing {
+		t.Error("no CHECK ties claim_expires_at to claimed_by")
+	}
 	for id, want := range preserved {
 		got := read(id)
 		if got.name != want.name || got.repeatDays != want.repeatDays || got.householdID != want.householdID ||
