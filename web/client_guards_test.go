@@ -69,6 +69,21 @@ var inlineMarkup = regexp.MustCompile(`\.(innerHTML|outerHTML)\s*=|insertAdjacen
 // inlineScript matches a <script> element without a src attribute.
 var inlineScript = regexp.MustCompile(`<script(?:\s+(?:type|nonce)="[^"]*")*\s*>`)
 
+// scriptSrc matches <script> tags with a src attribute.
+var scriptSrc = regexp.MustCompile(`<script\b[^>]*\s+src="([^"]+)"`)
+
+const gisScriptURL = "https://accounts.google.com/gsi/client"
+
+func isAllowedScriptSrc(src string) bool {
+	if src == gisScriptURL {
+		return true
+	}
+	if strings.HasPrefix(src, "//") || strings.Contains(src, "://") {
+		return false
+	}
+	return true
+}
+
 func TestClient_NoInlineMarkupStylesOrScripts(t *testing.T) {
 	t.Run("detector fires", func(t *testing.T) {
 		for _, bad := range []string{"$x.innerHTML = res.name;", `el('div', { style: 'x' }); '<div style="color:red">'`, "n.setAttribute('style', 'x')"} {
@@ -78,6 +93,18 @@ func TestClient_NoInlineMarkupStylesOrScripts(t *testing.T) {
 		}
 		if !inlineScript.MatchString("<script>alert(1)</script>") {
 			t.Error("expected detector to match an inline <script>")
+		}
+		if isAllowedScriptSrc("https://malicious.example.com/evil.js") {
+			t.Error("expected detector to reject third-party script")
+		}
+		if isAllowedScriptSrc("https://accounts.google.com/gsi/client/extra") {
+			t.Error("expected detector to reject non-exact GIS URL")
+		}
+		if !isAllowedScriptSrc("/static/js/app.js") {
+			t.Error("expected detector to allow same-origin script")
+		}
+		if !isAllowedScriptSrc(gisScriptURL) {
+			t.Error("expected detector to allow exact GIS URL")
 		}
 	})
 	for name, src := range clientJS(t) {
@@ -91,6 +118,32 @@ func TestClient_NoInlineMarkupStylesOrScripts(t *testing.T) {
 	}
 	if m := inlineScript.FindString(html); m != "" {
 		t.Errorf("index.html contains an inline script %q", m)
+	}
+
+	matches := scriptSrc.FindAllStringSubmatch(html, -1)
+	if len(matches) == 0 {
+		t.Error("index.html contains no script tags with src")
+	}
+	var foundGIS bool
+	for _, m := range matches {
+		src := m[1]
+		if !isAllowedScriptSrc(src) {
+			t.Errorf("index.html contains disallowed script src %q (want same-origin or %s)", src, gisScriptURL)
+		}
+		if src == gisScriptURL {
+			foundGIS = true
+		}
+	}
+	if !foundGIS {
+		t.Errorf("index.html missing script src %q", gisScriptURL)
+	}
+
+	gisScript := regexp.MustCompile(`<script\b[^>]*src="https://accounts\.google\.com/gsi/client"[^>]*>`)
+	gisMatch := gisScript.FindString(html)
+	if gisMatch == "" {
+		t.Error("index.html missing script tag for GIS library")
+	} else if !strings.Contains(gisMatch, "async") {
+		t.Errorf("GIS script tag %q missing async attribute", gisMatch)
 	}
 }
 
