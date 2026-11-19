@@ -163,7 +163,7 @@ func (g *GoogleCalendar) Connect(ctx context.Context, userID uuid.UUID, code, pl
 	httpCtx := context.WithValue(ctx, oauth2.HTTPClient, g.client)
 	tok, err := cfg.Exchange(httpCtx, code)
 	if err != nil {
-		slog.WarnContext(ctx, "google calendar: exchange code failed", "error", err)
+		slog.WarnContext(ctx, "google calendar: exchange code failed", "error", withoutURL(err))
 		return CalendarStatus{}, ErrGoogleCalendarFailed
 	}
 
@@ -246,7 +246,7 @@ func (g *GoogleCalendar) sameGoogleAccount(ctx context.Context, newAccess string
 	httpCtx := context.WithValue(ctx, oauth2.HTTPClient, g.client)
 	oldTok, err := g.oauth.TokenSource(httpCtx, &oauth2.Token{RefreshToken: storedRefresh}).Token()
 	if err != nil {
-		slog.WarnContext(ctx, "google calendar: stored refresh token refused", "error", err)
+		slog.WarnContext(ctx, "google calendar: stored refresh token refused", "error", withoutURL(err))
 		return false
 	}
 	newSub, err := g.tokenSubject(ctx, newAccess)
@@ -263,16 +263,18 @@ func (g *GoogleCalendar) sameGoogleAccount(ctx context.Context, newAccess string
 }
 
 // tokenSubject asks Google's tokeninfo endpoint which account (sub) an
-// access token was issued to.
+// access token was issued to. The token travels in a POST form body, never
+// the URL, and no returned error carries the request: the caller logs it.
 func (g *GoogleCalendar) tokenSubject(ctx context.Context, accessToken string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		g.tokenInfoURL+"?"+url.Values{"access_token": {accessToken}}.Encode(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.tokenInfoURL,
+		strings.NewReader(url.Values{"access_token": {accessToken}}.Encode()))
 	if err != nil {
-		return "", err
+		return "", errors.New("build tokeninfo request")
 	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := g.client.Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("tokeninfo request failed: %w", withoutURL(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -288,6 +290,27 @@ func (g *GoogleCalendar) tokenSubject(ctx context.Context, accessToken string) (
 		return "", errors.New("tokeninfo has no sub")
 	}
 	return out.Sub, nil
+}
+
+// urlFreeError is a *url.Error with its URL dropped: net/http puts the full
+// request URL in its transport errors, and a URL can carry a credential.
+type urlFreeError struct {
+	op  string
+	err error
+}
+
+func (e *urlFreeError) Error() string { return e.op + ": " + e.err.Error() }
+func (e *urlFreeError) Unwrap() error { return e.err }
+
+// withoutURL returns err with its URL gone: when err holds a *url.Error, the
+// result is that error's method and (URL-free) cause only, and any wrapper
+// text around it, which may quote the URL, is dropped too.
+func withoutURL(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return &urlFreeError{op: ue.Op, err: withoutURL(ue.Err)}
+	}
+	return err
 }
 
 // grantedAccess decides the access level from the scope field of the token

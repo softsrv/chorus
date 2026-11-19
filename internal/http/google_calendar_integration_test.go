@@ -153,11 +153,16 @@ func newFakeCalendarGoogle(t *testing.T) *fakeCalendarGoogle {
 			fmt.Fprint(w, sentinel)
 		}
 	})
-	mux.HandleFunc("GET /tokeninfo", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /tokeninfo", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		sub := f.accessSubs[r.URL.Query().Get("access_token")]
+		// The token must arrive in the form body, never the URL query.
+		sub := ""
+		if r.URL.RawQuery == "" {
+			sub = f.accessSubs[r.PostForm.Get("access_token")]
+		}
 		if sub == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			fmt.Fprintf(w, `{"error":"invalid_token","error_description":"%s"}`, sentinel)
