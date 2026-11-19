@@ -286,6 +286,66 @@ func (q *Queries) ListHouseholdsDueForRollover(ctx context.Context, arg ListHous
 	return items, nil
 }
 
+const listMemberUpcomingSchedules = `-- name: ListMemberUpcomingSchedules :many
+SELECT s.id, s.quest_id, s.start_date, s.repeat,
+       q.name AS quest_name, q.available_at
+FROM quest_schedules s
+JOIN household_quests q ON q.household_id = s.household_id AND q.id = s.quest_id
+JOIN family_members m ON m.household_id = s.household_id AND m.id = s.member_id
+LEFT JOIN household_quest_rollovers r ON r.household_id = s.household_id
+WHERE s.household_id = $1::uuid
+  AND s.member_id = $2::uuid
+  AND (s.repeat OR r.last_rollover_date IS NULL OR s.start_date > r.last_rollover_date)
+ORDER BY s.start_date, q.name, s.id
+`
+
+type ListMemberUpcomingSchedulesParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	MemberID    uuid.UUID `json:"member_id"`
+}
+
+type ListMemberUpcomingSchedulesRow struct {
+	ID          uuid.UUID          `json:"id"`
+	QuestID     uuid.UUID          `json:"quest_id"`
+	StartDate   pgtype.Date        `json:"start_date"`
+	Repeat      bool               `json:"repeat"`
+	QuestName   string             `json:"quest_name"`
+	AvailableAt pgtype.Timestamptz `json:"available_at"`
+}
+
+// One member's schedules that have not fired yet, with the quest's name and
+// available_at, soonest start first. Schedule, quest and member are joined on
+// household_id, so nothing of another household is read. A one-off schedule
+// dated on or before the household's last rollover has been judged (assigned,
+// skipped, or kept after an age skip) and never fires again, so it is left
+// out; a repeated one stays.
+func (q *Queries) ListMemberUpcomingSchedules(ctx context.Context, arg ListMemberUpcomingSchedulesParams) ([]ListMemberUpcomingSchedulesRow, error) {
+	rows, err := q.db.Query(ctx, listMemberUpcomingSchedules, arg.HouseholdID, arg.MemberID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListMemberUpcomingSchedulesRow{}
+	for rows.Next() {
+		var i ListMemberUpcomingSchedulesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.QuestID,
+			&i.StartDate,
+			&i.Repeat,
+			&i.QuestName,
+			&i.AvailableAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listQuestSchedules = `-- name: ListQuestSchedules :many
 SELECT s.id, s.household_id, s.quest_id, s.member_id, s.start_date, s.created_at,
        q.name AS quest_name, m.name AS member_name

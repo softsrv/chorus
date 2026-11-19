@@ -289,6 +289,13 @@ type Querier interface {
 	// the description and cost snapshotted on the request, so editing or
 	// deleting the reward later never changes the history.
 	ListMemberRewardHistory(ctx context.Context, arg ListMemberRewardHistoryParams) ([]RewardRedemption, error)
+	// One member's schedules that have not fired yet, with the quest's name and
+	// available_at, soonest start first. Schedule, quest and member are joined on
+	// household_id, so nothing of another household is read. A one-off schedule
+	// dated on or before the household's last rollover has been judged (assigned,
+	// skipped, or kept after an age skip) and never fires again, so it is left
+	// out; a repeated one stays.
+	ListMemberUpcomingSchedules(ctx context.Context, arg ListMemberUpcomingSchedulesParams) ([]ListMemberUpcomingSchedulesRow, error)
 	// Completions waiting for approval, one row each, oldest mark-done first,
 	// with the chore's name, current points and teamwork bonus, the member who
 	// marked it done, and every member it covers (member_ids and member_names,

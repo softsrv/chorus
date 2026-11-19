@@ -289,6 +289,7 @@ type QuestSchedule struct {
 	MemberID    uuid.UUID          `json:"member_id"`
 	StartDate   pgtype.Date        `json:"start_date"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	Repeat      bool               `json:"repeat"`
 }
 
 type RefreshToken struct {

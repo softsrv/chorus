@@ -34,6 +34,24 @@ JOIN family_members m ON m.household_id = s.household_id AND m.id = s.member_id
 WHERE s.household_id = sqlc.arg(household_id)
 ORDER BY s.start_date, s.created_at, s.id;
 
+-- name: ListMemberUpcomingSchedules :many
+-- One member's schedules that have not fired yet, with the quest's name and
+-- available_at, soonest start first. Schedule, quest and member are joined on
+-- household_id, so nothing of another household is read. A one-off schedule
+-- dated on or before the household's last rollover has been judged (assigned,
+-- skipped, or kept after an age skip) and never fires again, so it is left
+-- out; a repeated one stays.
+SELECT s.id, s.quest_id, s.start_date, s.repeat,
+       q.name AS quest_name, q.available_at
+FROM quest_schedules s
+JOIN household_quests q ON q.household_id = s.household_id AND q.id = s.quest_id
+JOIN family_members m ON m.household_id = s.household_id AND m.id = s.member_id
+LEFT JOIN household_quest_rollovers r ON r.household_id = s.household_id
+WHERE s.household_id = sqlc.arg(household_id)::uuid
+  AND s.member_id = sqlc.arg(member_id)::uuid
+  AND (s.repeat OR r.last_rollover_date IS NULL OR s.start_date > r.last_rollover_date)
+ORDER BY s.start_date, q.name, s.id;
+
 -- name: DeleteQuestSchedule :execrows
 DELETE FROM quest_schedules
 WHERE household_id = sqlc.arg(household_id) AND id = sqlc.arg(id);

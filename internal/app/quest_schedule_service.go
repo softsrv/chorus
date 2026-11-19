@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -193,4 +194,98 @@ func (v *validator) scheduleDate(s string, today time.Time) time.Time {
 		v.fail("date", "can't be in the past")
 	}
 	return d
+}
+
+// UpcomingQuest is one of a member's schedules that has not fired yet. NextDate
+// is the household-local date (YYYY-MM-DD) it will next be assigned on, see
+// nextScheduleDate.
+type UpcomingQuest struct {
+	ID        uuid.UUID
+	QuestID   uuid.UUID
+	QuestName string
+	StartDate string
+	NextDate  string
+	Repeat    bool
+}
+
+// Upcoming returns a member's schedules with the date each will next be
+// assigned, soonest first and by quest name on a tie; an empty, non-nil slice
+// when there are none. Any member of the household may read it (no admin PIN);
+// a non-member, or a member id outside the household, is ErrNotFound.
+func (s *QuestScheduleService) Upcoming(ctx context.Context, userID, householdID, memberID uuid.UUID) ([]UpcomingQuest, error) {
+	h, err := getHousehold(ctx, s.q, userID, householdID)
+	if err != nil {
+		return nil, err
+	}
+	loc, err := time.LoadLocation(h.Timezone)
+	if err != nil {
+		return nil, fmt.Errorf("load household timezone %q: %w", h.Timezone, err)
+	}
+	if _, err := notFoundIfNoRows(s.q.GetFamilyMember(ctx, db.GetFamilyMemberParams{HouseholdID: householdID, ID: memberID})); err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	state, err := s.q.GetHouseholdRolloverState(ctx, db.GetHouseholdRolloverStateParams{
+		Now: pgtype.Timestamptz{Time: now, Valid: true}, HouseholdID: householdID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get rollover state: %w", err)
+	}
+	rows, err := s.q.ListMemberUpcomingSchedules(ctx, db.ListMemberUpcomingSchedulesParams{HouseholdID: householdID, MemberID: memberID})
+	if err != nil {
+		return nil, fmt.Errorf("list member upcoming schedules: %w", err)
+	}
+	rolledToday := state.LastRolloverDate.Valid && !state.LastRolloverDate.Time.Before(state.LocalDate.Time)
+	out := make([]UpcomingQuest, 0, len(rows))
+	for _, r := range rows {
+		var availableAt *time.Time
+		if r.AvailableAt.Valid {
+			availableAt = &r.AvailableAt.Time
+		}
+		next := nextScheduleDate(r.StartDate.Time, r.Repeat, availableAt, rolledToday, now, loc)
+		out = append(out, UpcomingQuest{
+			ID:        r.ID,
+			QuestID:   r.QuestID,
+			QuestName: r.QuestName,
+			StartDate: r.StartDate.Time.Format(time.DateOnly),
+			NextDate:  next.Format(time.DateOnly),
+			Repeat:    r.Repeat,
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].NextDate != out[j].NextDate {
+			return out[i].NextDate < out[j].NextDate
+		}
+		return out[i].QuestName < out[j].QuestName
+	})
+	return out, nil
+}
+
+// nextScheduleDate is the household-local date, as a UTC-midnight date, a
+// schedule will next be assigned on. A one-off is its start date. A repeated
+// schedule is the latest of its start date, the next local day not yet rolled
+// over (today until today's rollover has run, then tomorrow) and the local
+// date its quest rests until (availableAt, nil when it is not resting): a
+// midnight pass cannot assign a quest still in its cooldown. Days are counted
+// on the calendar in loc, so a 23- or 25-hour day moves nothing.
+func nextScheduleDate(start time.Time, repeat bool, availableAt *time.Time, rolledToday bool, now time.Time, loc *time.Location) time.Time {
+	start = time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.UTC)
+	if !repeat {
+		return start
+	}
+	local := now.In(loc)
+	next := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, time.UTC)
+	if rolledToday {
+		next = next.AddDate(0, 0, 1)
+	}
+	if start.After(next) {
+		next = start
+	}
+	if availableAt != nil {
+		a := availableAt.In(loc)
+		if rest := time.Date(a.Year(), a.Month(), a.Day(), 0, 0, 0, 0, time.UTC); rest.After(next) {
+			next = rest
+		}
+	}
+	return next
 }
