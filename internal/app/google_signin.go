@@ -60,6 +60,7 @@ var (
 // Google's endpoints when empty.
 type GoogleSignInConfig struct {
 	ClientID     string
+	ClientIDs    []string
 	ClientSecret string
 	RedirectURL  string // APP_BASE_URL + /api/v1/auth/google/callback
 	AuthURL      string
@@ -81,6 +82,10 @@ type GoogleSignIn struct {
 
 // NewGoogleSignIn builds the sign-in service. authSvc issues the token pair.
 func NewGoogleSignIn(q *db.Queries, authSvc *AuthService, cfg GoogleSignInConfig) *GoogleSignIn {
+	clientID := cfg.ClientID
+	if clientID == "" && len(cfg.ClientIDs) > 0 {
+		clientID = cfg.ClientIDs[0]
+	}
 	authURL := cfg.AuthURL
 	if authURL == "" {
 		authURL = googleAuthURL
@@ -101,7 +106,7 @@ func NewGoogleSignIn(q *db.Queries, authSvc *AuthService, cfg GoogleSignInConfig
 		q:       q,
 		authSvc: authSvc,
 		oauth: oauth2.Config{
-			ClientID:     cfg.ClientID,
+			ClientID:     clientID,
 			ClientSecret: cfg.ClientSecret,
 			RedirectURL:  cfg.RedirectURL,
 			Scopes:       googleSignInScopes,
