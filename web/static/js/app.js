@@ -1887,6 +1887,16 @@ async function familyTab(h, $root) {
     $submit);
   };
 
+  // upcomingList is the member's upcoming scheduled quests as the API orders
+  // them (soonest first): '<Ddd D Mon> — <quest>' and a Repeats badge for a
+  // repeated schedule; an empty line when nothing is coming up.
+  const upcomingList = (items) => {
+    if (items.length === 0) return el('p', { class: 'text-xs opacity-60', text: 'No upcoming quests.' });
+    return el('ul', { class: 'space-y-1' }, items.map((i) => el('li', { class: 'flex flex-wrap items-center gap-2 text-sm' },
+      el('span', { text: `${fmtDay(i.next_date)} — ${i.quest_name}` }),
+      i.repeat && el('span', { class: 'badge badge-sm', text: 'Repeats' }))));
+  };
+
   // scheduledList is the member's schedules: '<quest> — from <date>' and a
   // Remove (confirm with 'Sure?') that DELETEs it and reopens the view; an
   // empty line when nothing is scheduled.
