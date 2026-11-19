@@ -1,7 +1,7 @@
 // Chorus web test client. Plain DOM, no framework. All user-supplied text is
 // inserted with textContent (never innerHTML), so API data can't inject markup.
 
-import { api, publicApi, refresh, setTokens, clearTokens, setLogger, session, ApiError, DEVICE_NAME, authConfig, googleRedeem } from './api.js';
+import { api, publicApi, refresh, setTokens, clearTokens, setLogger, session, ApiError, DEVICE_NAME, authConfig, googleSignIn } from './api.js';
 
 let authConfigPromise = null;
 
@@ -238,31 +238,6 @@ async function boot() {
   if (location.pathname === '/reset-password' && params.get('token')) return resetPasswordView(params.get('token'));
   if (location.pathname === '/forgot-password') return authView('forgot');
 
-  if (location.pathname === '/google-sign-in') {
-    const errorParam = params.get('error');
-    const codeParam = params.get('code');
-    if (errorParam) {
-      history.replaceState(null, '', '/');
-      const msg = errorParam === 'cancelled' ? 'Google sign-in was cancelled' : 'Google sign-in failed';
-      toast(msg, 'error');
-      return authView('login', msg);
-    }
-    if (codeParam) {
-      $app.replaceChildren(el('div', { class: 'max-w-md mx-auto' }, card('Signing in with Google…')));
-      try {
-        await googleRedeem(codeParam);
-        history.replaceState(null, '', '/');
-        return homeView();
-      } catch (err) {
-        history.replaceState(null, '', '/');
-        toast('Google sign-in failed', 'error');
-        return authView('login', 'Google sign-in failed');
-      }
-    }
-    history.replaceState(null, '', '/');
-    return authView('login');
-  }
-
   if (!session.user) await refresh();
   if (session.user) {
     if (location.pathname === '/account') return accountView();
@@ -297,6 +272,61 @@ function renderNav() {
 
 // ── Auth views ────────────────────────────────────────────────────────────────
 
+const GIS_WAIT_TRIES = 50; // the GIS script loads async; wait up to ~5s for it
+const GIS_WAIT_MS = 100;
+const PERSON_CANCELLED = new Set(['user_cancel', 'tap_outside']);
+
+// googleButton returns the divider and a container that Google Identity
+// Services renders its own button into. The credential (a Google ID token)
+// goes to POST /auth/google; a dismissed prompt or an empty credential sends
+// nothing. Messages are fixed strings shown via textContent, never server or
+// Google error text.
+function googleButton(cfg) {
+  const $status = el('div');
+  const $btn = el('div', { class: 'flex justify-center', 'data-google-button': '' });
+  let inFlight = false;
+
+  const show = (msg) => {
+    $status.replaceChildren(alertBox('error', msg));
+    toast(msg, 'error');
+  };
+  const cancelled = () => show('Google sign-in was cancelled');
+
+  const onCredential = async (resp) => {
+    const idToken = resp?.credential;
+    if (typeof idToken !== 'string' || idToken === '') return cancelled();
+    if (inFlight) return;
+    inFlight = true;
+    $status.replaceChildren();
+    try {
+      await googleSignIn(idToken);
+    } catch {
+      inFlight = false;
+      return show('Google sign-in failed');
+    }
+    goHome();
+  };
+
+  const render = (tries) => {
+    const gis = window.google?.accounts?.id;
+    if (!gis) {
+      if (tries > 0) setTimeout(() => render(tries - 1), GIS_WAIT_MS);
+      else $status.replaceChildren(alertBox('warning', 'Google sign-in is unavailable right now.'));
+      return;
+    }
+    gis.initialize({ client_id: cfg.google_client_id, callback: onCredential });
+    gis.renderButton($btn, { type: 'standard', theme: 'outline', size: 'large', text: 'signin_with' });
+    gis.prompt((n) => {
+      // One Tap closed by the person without a credential. Auto-cancels and
+      // "not displayed" (no Google session) are not the person cancelling.
+      if (n?.isSkippedMoment?.() && PERSON_CANCELLED.has(n.getSkippedReason?.())) cancelled();
+    });
+  };
+  render(GIS_WAIT_TRIES);
+
+  return [el('div', { class: 'divider', text: 'or' }), $btn, $status];
+}
+
 async function authView(tab, alertMsg = null) {
   renderNav();
   const cfg = await getAuthConfig();
@@ -323,12 +353,7 @@ async function authView(tab, alertMsg = null) {
         goHome();
       },
     }));
-    if (cfg?.google_sign_in === true) {
-      $body.append(
-        el('div', { class: 'divider', text: 'or' }),
-        el('a', { class: 'btn btn-outline w-full', href: '/api/v1/auth/google/start', text: 'Sign in with Google' })
-      );
-    }
+    if (cfg?.google_sign_in === true) $body.append(...googleButton(cfg));
   } else if (tab === 'register') {
     $body.append(form({
       fields: [
@@ -342,12 +367,7 @@ async function authView(tab, alertMsg = null) {
         $form.replaceWith(alertBox('success', `${res.message} (Local dev: open smtp4dev at http://localhost:5080.)`));
       },
     }));
-    if (cfg?.google_sign_in === true) {
-      $body.append(
-        el('div', { class: 'divider', text: 'or' }),
-        el('a', { class: 'btn btn-outline w-full', href: '/api/v1/auth/google/start', text: 'Sign in with Google' })
-      );
-    }
+    if (cfg?.google_sign_in === true) $body.append(...googleButton(cfg));
   } else {
     $body.append(form({
       fields: [{ name: 'email', label: 'Email', type: 'email', required: true, autocomplete: 'email' }],
