@@ -75,6 +75,14 @@ For Google sign-in (`POST /auth/google`), the web uses Google Identity Services,
 | `POST /me/resend-verification` | none | `202` (max 3/hour) |
 | `GET /me/sessions` | none | `{items: [session]}`, `current: true` marks this device |
 | `DELETE /me/sessions/{id}` | none | `204` |
+| `GET /me/google-calendar` | none | `{status, access?}` |
+| `POST /me/google-calendar/connect` | `code, platform?` | `{status, access?}` (verified bearer; generic 4xx on a bad code; `platform`: `web`, `ios`, or `android`; web exchanged with `postmessage`, iOS and Android with empty `redirect_uri`) |
+| `DELETE /me/google-calendar` | none | `{status: "not_connected"}` |
+
+To connect Google Calendar, apps obtain a one-time server authorization code and post it to `POST /me/google-calendar/connect`:
+- **Web**: Google Identity Services code client in popup mode (exchanged with `postmessage`).
+- **iOS**: `GoogleSignIn` with `serverClientID` set to the web client ID (`serverAuthCode`).
+- **Android**: Identity Services Authorization API with `requestOfflineAccess(webClientId)`.
 
 ### Households 🔒
 
