@@ -1,5 +1,1 @@
-{
-  "on": [
-    "trust-the-edge"
-  ]
-}
+{ "on": ["safe-by-default", "trust-the-edge"] }

@@ -67,6 +67,9 @@ function routes() {
       if (typeof prop === 'string' && prop.startsWith(`GET ${HP}/family-members/`) && prop.endsWith('/reward-history')) {
         return (req) => (srv.rewardHistory ? srv.rewardHistory(req) : [200, { items: [] }]);
       }
+      if (typeof prop === 'string' && prop.startsWith(`GET ${HP}/family-members/`) && prop.endsWith('/upcoming-quests')) {
+        return (req) => (srv.upcoming ? srv.upcoming(req) : [200, { items: [] }]);
+      }
       return undefined;
     },
   });
@@ -2159,4 +2162,79 @@ test('1.1/8: a 404 on reward approve or reject (already decided or cancelled) re
     assert.equal(sessionStorage.getItem(REFRESH_KEY), 'rt');
     delete srv.extra[`POST ${HP}/reward-redemptions/red-1/${verb}`];
   }
+});
+
+// ── Upcoming (upcoming CLM-1..4) ──────────────────────────────────────────────
+
+const upcomingCalls = (id) => calls.filter((c) => c.method === 'GET' && c.path === `${HP}/family-members/${id}/upcoming-quests`);
+
+test('upcoming CLM-1: with no upcoming quests the Upcoming section still renders exactly You have no upcoming quests.', async () => {
+  await loadApp();
+  await becomeAnn();
+  const node = sectionNode(env.$app, 'Upcoming');
+  assert.ok(node, 'Upcoming section exists');
+  assert.deepEqual(walk(node).filter((n) => n.tagName === 'P').map((n) => n.textContent), ['You have no upcoming quests.']);
+  assert.equal(walk(node).filter((n) => n.tagName === 'LI').length, 0);
+});
+
+test('upcoming CLM-3: takeCard reads the member\'s upcoming-quests and lists them in API order between Available and Claimed, marking repeats', async () => {
+  srv.upcoming = () => [200, {
+    items: [
+      { schedule_id: 's1', quest_id: 'q1', quest_name: 'Feed the cat', next_date: '2026-11-22', repeat: true },
+      { schedule_id: 's2', quest_id: 'q2', quest_name: 'Walk dog', next_date: '2026-11-24', repeat: false },
+    ],
+  }];
+  await loadApp();
+  await becomeAnn();
+  assert.equal(upcomingCalls('m-a').length, 1, 'read once for the render');
+  const node = sectionNode(env.$app, 'Upcoming');
+  const rows = walk(node).filter((n) => n.tagName === 'LI');
+  assert.deepEqual(rows.map((li) => li.children[0].textContent), ['Sun 22 Nov — Feed the cat', 'Tue 24 Nov — Walk dog']);
+  assert.equal((node.textContent.match(/repeats/g) || []).length, 1, 'one repeats mark');
+  assert.match(rows[0].textContent, /repeats$/);
+  const h4s = walk(env.$app).filter((n) => n.tagName === 'H4').map((n) => n.textContent);
+  assert.ok(h4s.indexOf('Available') < h4s.indexOf('Upcoming'), 'after Available');
+  assert.ok(h4s.indexOf('Upcoming') < h4s.indexOf('Claimed'), 'before Claimed');
+});
+
+test('upcoming CLM-3: a date is shown as the calendar day sent, with no timezone shift', async () => {
+  const realTZ = process.env.TZ;
+  process.env.TZ = 'America/Los_Angeles';
+  try {
+    srv.upcoming = () => [200, { items: [{ schedule_id: 's1', quest_id: 'q1', quest_name: 'Feed the cat', next_date: '2026-01-01', repeat: false }] }];
+    await loadApp();
+    await becomeAnn();
+    assert.equal(walk(sectionNode(env.$app, 'Upcoming')).find((n) => n.tagName === 'LI').children[0].textContent, 'Thu 1 Jan — Feed the cat');
+  } finally {
+    if (realTZ === undefined) delete process.env.TZ; else process.env.TZ = realTZ;
+  }
+});
+
+test('upcoming CLM-2: a quest name with markup shows as literal text in Upcoming and creates no element', async () => {
+  const evil = '<img src=x onerror=alert(1)>';
+  srv.upcoming = () => [200, { items: [{ schedule_id: 's1', quest_id: 'q1', quest_name: evil, next_date: '2026-11-22', repeat: false }] }];
+  await loadApp();
+  await becomeAnn();
+  const node = sectionNode(env.$app, 'Upcoming');
+  assert.equal(walk(node).find((n) => n.tagName === 'LI').textContent, `Sun 22 Nov — ${evil}`);
+  assert.equal(walk(env.$app).filter((n) => n.tagName === 'IMG').length, 0);
+  for (const n of walk(node)) assert.equal(n.getAttribute?.('style') ?? null, null, 'no inline style');
+});
+
+test('upcoming CLM-4: a failed upcoming read shows an inline error in Upcoming only; Available, Mine and Claimed render; no sign-out or member change', async () => {
+  srv.quests = [
+    quest({ id: 'q1', name: 'Free one' }),
+    quest({ id: 'q2', name: 'Anns one', available: false, claimed_by: 'm-a' }),
+    quest({ id: 'q3', name: 'Bens one', available: false, claimed_by: 'm-b' }),
+  ];
+  srv.upcoming = () => err(500, 'internal', 'boom');
+  await loadApp();
+  await becomeAnn();
+  assert.match(section(env.$app, 'Upcoming'), /Could not load upcoming quests\. Reload to try again\./);
+  assert.match(section(env.$app, 'Available'), /Free one/);
+  assert.match(section(env.$app, 'Mine'), /Anns one/);
+  assert.match(section(env.$app, 'Claimed'), /Bens one/);
+  for (const s of ['Available', 'Mine', 'Claimed']) assert.doesNotMatch(section(env.$app, s), /Could not load/);
+  assert.match(text(), /Quests for Ann/);
+  assert.equal(signedOut, 0);
 });
