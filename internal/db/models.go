@@ -242,6 +242,7 @@ type QuestCompletion struct {
 	ApprovedAt  pgtype.Timestamptz `json:"approved_at"`
 	Status      string             `json:"status"`
 	StreakCount pgtype.Int4        `json:"streak_count"`
+	StatusBy    *uuid.UUID         `json:"status_by"`
 }
 
 type QuestCompletionMember struct {

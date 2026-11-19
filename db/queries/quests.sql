@@ -483,7 +483,7 @@ WITH mine AS (
     RETURNING hc.id
 ), cancelled AS (
     UPDATE quest_completions cc
-    SET status = 'cancelled'
+    SET status = 'cancelled', status_by = sqlc.arg(status_by)::uuid
     FROM mine m
     WHERE cc.id = m.id AND m.marker AND m.next_member IS NULL
     RETURNING cc.household_id, cc.quest_id, cc.done_at
@@ -672,7 +672,7 @@ WITH pending AS (
     FOR UPDATE OF pc
 ), approved AS (
     UPDATE quest_completions c
-    SET status = 'approved', approved_at = NOW()
+    SET status = 'approved', approved_at = NOW(), status_by = sqlc.arg(status_by)::uuid
     FROM pending p
     WHERE c.id = p.id AND c.status = 'pending'
     RETURNING c.id, c.household_id, c.quest_id, c.member_id, c.done_at, c.approved_at, p.points, p.teamwork_bonus,
@@ -703,7 +703,7 @@ WHERE household_id = sqlc.arg(household_id) AND completion_id = sqlc.arg(complet
 -- again right away. Other completions and the quest's holder are untouched.
 WITH rejected AS (
     UPDATE quest_completions rc
-    SET status = 'rejected'
+    SET status = 'rejected', status_by = sqlc.arg(status_by)::uuid
     WHERE rc.household_id = sqlc.arg(household_id) AND rc.id = sqlc.arg(id)
       AND rc.status = 'pending'
     RETURNING rc.id, rc.household_id, rc.quest_id, rc.member_id, rc.done_at, rc.status

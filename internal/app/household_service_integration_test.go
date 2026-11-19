@@ -271,8 +271,9 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	var compStatus string
 	var compApprovedAt pgtype.Timestamptz
 	var compDoneAt time.Time
-	if err := pool.QueryRow(ctx, `SELECT status, approved_at, done_at FROM quest_completions WHERE id = $1 AND household_id = $2`, aliceCompletionID, h.ID).Scan(&compStatus, &compApprovedAt, &compDoneAt); err != nil || compStatus != "pending" || compApprovedAt.Valid {
-		t.Errorf("alice completion in db = status %q approved_at %v, %v; want pending, no approved_at", compStatus, compApprovedAt, err)
+	var compStatusBy pgtype.UUID
+	if err := pool.QueryRow(ctx, `SELECT status, approved_at, done_at, status_by FROM quest_completions WHERE id = $1 AND household_id = $2`, aliceCompletionID, h.ID).Scan(&compStatus, &compApprovedAt, &compDoneAt, &compStatusBy); err != nil || compStatus != "pending" || compApprovedAt.Valid || compStatusBy.Valid {
+		t.Errorf("alice completion in db = status %q approved_at %v status_by %v, %v; want pending, no approved_at, null status_by", compStatus, compApprovedAt, compStatusBy, err)
 	}
 	if !compDoneAt.Equal(pendingBefore.CompletedAt.Time) {
 		t.Errorf("alice completion done_at %v no longer anchors the quest's completed_at %v", compDoneAt, pendingBefore.CompletedAt.Time)
@@ -326,6 +327,27 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	// Cross-household ID smuggling with family members:
 	_, checks["get family member via own household"] = familySvc.Get(ctx, mallory, mh.ID, aliceMember.ID)
 	checks["remove family member via own household"] = familySvc.Remove(ctx, mallory, mh.ID, aliceMember.ID, "")
+
+	// CLM-7: After outsider approve/reject and remove attempts, Alice's completion
+	// remains pending with status_by NULL, and no completion in any other household has status_by NOT NULL.
+	var victimStatus string
+	var victimStatusBy pgtype.UUID
+	if err := pool.QueryRow(ctx, `SELECT status, status_by FROM quest_completions WHERE id = $1 AND household_id = $2`, aliceCompletionID, h.ID).Scan(&victimStatus, &victimStatusBy); err != nil {
+		t.Fatalf("get alice completion after outsider remove attempts: %v", err)
+	}
+	if victimStatus != "pending" {
+		t.Errorf("alice completion status = %q, want pending", victimStatus)
+	}
+	if victimStatusBy.Valid {
+		t.Errorf("alice completion status_by = %v, want NULL", victimStatusBy)
+	}
+	var foreignStatusByCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM quest_completions WHERE household_id <> $1 AND status_by IS NOT NULL`, h.ID).Scan(&foreignStatusByCount); err != nil {
+		t.Fatalf("count foreign quest completions with status_by: %v", err)
+	}
+	if foreignStatusByCount != 0 {
+		t.Errorf("foreign quest completions with status_by NOT NULL = %d, want 0", foreignStatusByCount)
+	}
 	// Points history isolation checks:
 	_, checks["points history outsider user"] = familySvc.PointsHistory(ctx, mallory, h.ID, aliceMember.ID, "1234", "", 10, 0)
 	_, checks["points history own household foreign member"] = familySvc.PointsHistory(ctx, alice, h.ID, malloryMember.ID, "", "", 10, 0)
