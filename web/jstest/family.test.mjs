@@ -513,8 +513,8 @@ test('admin points 2.1/7: after an adjustment to the active member, their quest 
 // ── Scheduled quests (CLM-7) ─────────────────────────────────────────────────
 
 const QUESTS = [{ id: 'q-cat', name: 'Feed the cat' }, { id: 'q-room', name: 'Clean your room' }];
-const schedule = (id, questId, questName, memberId, date) => ({
-  id, household_id: H, quest_id: questId, quest_name: questName, member_id: memberId, member_name: 'x', start_date: date,
+const schedule = (id, questId, questName, memberId, date, repeat = false) => ({
+  id, household_id: H, quest_id: questId, quest_name: questName, member_id: memberId, member_name: 'x', start_date: date, repeat,
 });
 const scheduleForm = () => sectionNode(env.$app, 'Schedule a quest').children.find((n) => n.tagName === 'FORM');
 const scheduledText = () => sectionNode(env.$app, 'Scheduled').textContent;
@@ -543,9 +543,54 @@ test('scheduled quests CLM-7: Schedule POSTs {quest_id, member_id, date} with X-
   assert.equal(buttons(form, 'Schedule')[0].className, 'btn btn-primary btn-sm');
   await submit(form);
   const post = calls.find((c) => c.method === 'POST' && c.path === `${HP}/quest-schedules`);
-  assert.deepEqual(post.body, { quest_id: 'q-room', member_id: 'm-maya', date: '2026-11-21' });
+  assert.deepEqual(post.body, { quest_id: 'q-room', member_id: 'm-maya', date: '2026-11-21', repeat: false });
   assert.equal(post.headers['X-Admin-PIN'], '9999');
   assert.match(scheduledText(), /Clean your room — from 2026-11-21/);
+  assert.doesNotMatch(scheduledText(), /repeats/, 'a one-off row has no repeats');
+});
+
+test('scheduled quests CLM-10: ticking Repeat sends repeat: true with X-Admin-PIN and the row reads "repeats"', async () => {
+  srv.quests = QUESTS;
+  srv.createSchedule = (q) => {
+    const s = schedule('s-new', q.body.quest_id, 'Clean your room', q.body.member_id, q.body.date, q.body.repeat);
+    srv.schedules = [...srv.schedules, s];
+    return [201, s];
+  };
+  await openMayaWithPin();
+  const form = scheduleForm();
+  const $repeat = walk(form).find((n) => n.tagName === 'INPUT' && n.type === 'checkbox');
+  assert.ok($repeat, 'the schedule form has a Repeat checkbox');
+  assert.equal($repeat.checked, false, 'Repeat starts unticked');
+  assert.equal($repeat.parentNode.textContent, "Repeat (every time the quest's cooldown ends)");
+  $repeat.checked = true;
+  walk(form).find((n) => n.tagName === 'SELECT').value = 'q-room';
+  walk(form).find((n) => n.tagName === 'INPUT' && n.type === 'date').value = '2026-11-21';
+  await submit(form);
+  const post = calls.find((c) => c.method === 'POST' && c.path === `${HP}/quest-schedules`);
+  assert.deepEqual(post.body, { quest_id: 'q-room', member_id: 'm-maya', date: '2026-11-21', repeat: true });
+  assert.equal(post.headers['X-Admin-PIN'], '9999');
+  assert.match(scheduledText(), /Clean your room — from 2026-11-21, repeats/);
+  assert.equal(walk(env.$app).some((n) => n.getAttribute('style') !== null), false, 'no inline styles');
+});
+
+test('scheduled quests CLM-10: a repeated row reads "repeats", a one-off\'s does not; Remove deletes only that row', async () => {
+  srv.schedules = [
+    schedule('s1', 'q-cat', 'Feed the cat', 'm-maya', '2026-11-22', true),
+    schedule('s3', 'q-room', 'Clean your room', 'm-maya', '2026-11-24'),
+  ];
+  await openMayaWithPin();
+  assert.match(scheduledText(), /Feed the cat — from 2026-11-22, repeats/);
+  assert.match(scheduledText(), /Clean your room — from 2026-11-24(?!, repeats)/);
+  const rows = walk(sectionNode(env.$app, 'Scheduled')).filter((n) => n.tagName === 'LI');
+  const catRow = rows.find((r) => r.textContent.includes('Feed the cat'));
+  const remove = buttons(catRow, 'Remove')[0];
+  await click(remove);
+  await click(remove);
+  const del = calls.filter((c) => c.method === 'DELETE');
+  assert.deepEqual(del.map((c) => c.path), [`${HP}/quest-schedules/s1`]);
+  assert.equal(del[0].headers['X-Admin-PIN'], '9999');
+  assert.doesNotMatch(scheduledText(), /Feed the cat/);
+  assert.match(scheduledText(), /Clean your room — from 2026-11-24/);
 });
 
 test('scheduled quests CLM-7: a refused date shows the server message on the form and keeps the view', async () => {
