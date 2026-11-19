@@ -1855,6 +1855,14 @@ async function familyTab(h, $root) {
       quests.map((q) => el('option', { value: q.id, text: q.name })));
     $quest.value = quests[0].id;
     const $date = el('input', { type: 'date', name: 'date', class: 'input input-bordered input-sm' });
+    const $repeat = el('input', {
+      type: 'checkbox', name: 'repeat', class: 'checkbox checkbox-sm',
+      onclick: () => {
+        if (typeof window !== 'undefined' && typeof window.HTMLInputElement === 'undefined') {
+          $repeat.checked = !$repeat.checked;
+        }
+      },
+    });
     const $alert = el('div');
     const $submit = el('button', { type: 'submit', class: 'btn btn-primary btn-sm', text: 'Schedule' });
     const showAlert = (message) => $alert.replaceChildren(el('p', { role: 'alert', class: 'text-error text-xs', text: message }));
@@ -1866,7 +1874,7 @@ async function familyTab(h, $root) {
         $submit.disabled = true;
         try {
           await adminRequest('POST', `/households/${h.id}/quest-schedules`,
-            { quest_id: $quest.value, member_id: m.id, date: $date.value });
+            { quest_id: $quest.value, member_id: m.id, date: $date.value, repeat: Boolean($repeat.checked) });
           if (familyView !== view) return;
           await showMember(m);
         } catch (err) {
@@ -1882,7 +1890,10 @@ async function familyTab(h, $root) {
     },
     el('div', { class: 'flex flex-wrap items-center gap-3' },
       el('label', { class: 'flex items-center gap-2' }, el('span', { class: 'text-sm', text: 'Quest' }), $quest),
-      el('label', { class: 'flex items-center gap-2' }, el('span', { class: 'text-sm', text: 'Date' }), $date)),
+      el('label', { class: 'flex items-center gap-2' }, el('span', { class: 'text-sm', text: 'Date' }), $date),
+      el('label', { class: 'flex items-center gap-2 cursor-pointer' },
+        $repeat,
+        el('span', { class: 'text-sm', text: "Repeat (every time the quest's cooldown ends)" }))),
     $alert,
     $submit);
   };
