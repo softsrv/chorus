@@ -104,7 +104,7 @@ A household has exactly one login account, its administrator. Family members bel
 
 ## Database
 
-Migrations run manually (`make migrate-up`), never on startup. After editing `db/queries/*.sql`, run `make sqlc-generate` (CI fails if `internal/db` is stale). Daily 03:00 job (`app.RunTokenCleanup`) purges stale tokens. `app.RunQuestExpiry` sweeps at startup and every minute, returning quests held past their household-local midnight to the pool.
+Migrations run manually (`make migrate-up`), never on startup. After editing `db/queries/*.sql`, run `make sqlc-generate` (CI fails if `internal/db` is stale). Daily 03:00 job (`app.RunTokenCleanup`) purges stale tokens. `app.RunQuestExpiry` sweeps at startup and every minute, returning quests held past their household-local midnight to the pool. `app.RunQuestRollover` sweeps at startup and on a bounded tick, assigning due quest schedules at each household's local midnight.
 
 ## Environment
 
