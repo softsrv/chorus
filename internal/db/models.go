@@ -287,6 +287,7 @@ type RewardRedemption struct {
 	Status      string             `json:"status"`
 	RequestedAt pgtype.Timestamptz `json:"requested_at"`
 	DecidedAt   pgtype.Timestamptz `json:"decided_at"`
+	StatusBy    *uuid.UUID         `json:"status_by"`
 }
 
 type User struct {
