@@ -25,7 +25,7 @@ func TestIntegration_ComboBonus(t *testing.T) {
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
 	quests := app.NewQuestService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	combos := app.NewComboService(q, pool)
 	ctx := context.Background()
 
@@ -416,7 +416,7 @@ func TestIntegration_ComboBonusPayment(t *testing.T) {
 	q := db.New(pool)
 	base := &comboWorld{
 		ctx: context.Background(), pool: pool, q: q,
-		quests: app.NewQuestService(q, pool), family: app.NewFamilyService(q, pool, 10), combos: app.NewComboService(q, pool),
+		quests: app.NewQuestService(q, pool), family: app.NewFamilyService(q, pool, 4), combos: app.NewComboService(q, pool),
 		admin: registerVerified(t, pool, authSvc, mailer, "combopay").User.ID,
 	}
 

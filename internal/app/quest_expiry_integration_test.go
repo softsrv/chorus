@@ -51,7 +51,7 @@ func TestIntegration_QuestExpiry_ReleasesOverdueClaim(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	quests := app.NewQuestService(q, pool)
 	ctx := context.Background()
 
@@ -184,7 +184,7 @@ func TestIntegration_QuestExpiry_MarkDone(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	quests := app.NewQuestService(q, pool)
 	ctx := context.Background()
 
@@ -291,7 +291,7 @@ func TestIntegration_QuestExpiry_SweepScope(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	quests := app.NewQuestService(q, pool)
 	ctx := context.Background()
 
@@ -410,7 +410,7 @@ func newExpiryWorld(t *testing.T, user, name string) *expiryWorld {
 
 func (w *expiryWorld) member(name string) app.MemberAction {
 	w.t.Helper()
-	m, err := app.NewFamilyService(w.q, w.pool, 10).Create(w.ctx, w.admin, w.h, app.FamilyMemberInput{Name: name}, "")
+	m, err := app.NewFamilyService(w.q, w.pool, 4).Create(w.ctx, w.admin, w.h, app.FamilyMemberInput{Name: name}, "")
 	if err != nil {
 		w.t.Fatalf("create %s: %v", name, err)
 	}

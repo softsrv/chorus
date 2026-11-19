@@ -86,7 +86,7 @@ func newTestServer(t *testing.T) *testServer {
 	mail := &mailbox{text: map[string]string{}}
 	authSvc := app.NewAuthService(q, pool, mail, app.AuthServiceConfig{
 		JWTSecret: secret, AccessExpiry: 15 * time.Minute, RefreshExpiry: 24 * time.Hour,
-		BCryptCost: 10, PasswordMinLen: 8, AppBaseURL: "http://chorus.test", AppName: "Chorus",
+		BCryptCost: 4, PasswordMinLen: 8, AppBaseURL: "http://chorus.test", AppName: "Chorus",
 	})
 	t.Cleanup(authSvc.Shutdown)
 
@@ -96,7 +96,7 @@ func newTestServer(t *testing.T) *testServer {
 		Queries: q, Pool: pool, AuthSvc: authSvc,
 		UserSvc:      app.NewUserService(q),
 		HouseholdSvc: app.NewHouseholdService(q, pool),
-		FamilySvc:    app.NewFamilyService(q, pool, 10),
+		FamilySvc:    app.NewFamilyService(q, pool, 4),
 		JWTSecret:    secret,
 	})
 	srv := httptest.NewServer(handler)
@@ -1882,7 +1882,7 @@ func TestAPI_PINRateLimit(t *testing.T) {
 	mail := &mailbox{text: map[string]string{}}
 	authSvc := app.NewAuthService(q, pool, mail, app.AuthServiceConfig{
 		JWTSecret: secret, AccessExpiry: 15 * time.Minute, RefreshExpiry: 24 * time.Hour,
-		BCryptCost: 10, PasswordMinLen: 8, AppBaseURL: "http://chorus.test", AppName: "Chorus",
+		BCryptCost: 4, PasswordMinLen: 8, AppBaseURL: "http://chorus.test", AppName: "Chorus",
 	})
 	t.Cleanup(authSvc.Shutdown)
 
@@ -1895,7 +1895,7 @@ func TestAPI_PINRateLimit(t *testing.T) {
 		Queries: q, Pool: pool, AuthSvc: authSvc,
 		UserSvc:      app.NewUserService(q),
 		HouseholdSvc: app.NewHouseholdService(q, pool),
-		FamilySvc:    app.NewFamilyService(q, pool, 10),
+		FamilySvc:    app.NewFamilyService(q, pool, 4),
 		JWTSecret:    secret,
 		PINRateLimit: setupCalls + wrongGuesses,
 	})
@@ -1942,7 +1942,7 @@ func TestAPI_QuestPINRateLimit(t *testing.T) {
 	mail := &mailbox{text: map[string]string{}}
 	authSvc := app.NewAuthService(q, pool, mail, app.AuthServiceConfig{
 		JWTSecret: secret, AccessExpiry: 15 * time.Minute, RefreshExpiry: 24 * time.Hour,
-		BCryptCost: 10, PasswordMinLen: 8, AppBaseURL: "http://chorus.test", AppName: "Chorus",
+		BCryptCost: 4, PasswordMinLen: 8, AppBaseURL: "http://chorus.test", AppName: "Chorus",
 	})
 	t.Cleanup(authSvc.Shutdown)
 
@@ -1955,7 +1955,7 @@ func TestAPI_QuestPINRateLimit(t *testing.T) {
 		Queries: q, Pool: pool, AuthSvc: authSvc,
 		UserSvc:      app.NewUserService(q),
 		HouseholdSvc: app.NewHouseholdService(q, pool),
-		FamilySvc:    app.NewFamilyService(q, pool, 10),
+		FamilySvc:    app.NewFamilyService(q, pool, 4),
 		QuestSvc:     app.NewQuestService(q, pool),
 		JWTSecret:    secret,
 		PINRateLimit: setupCalls + wrongGuesses,
@@ -2018,7 +2018,7 @@ func TestAPI_PointsHistoryHasItsOwnPINBudget(t *testing.T) {
 	mail := &mailbox{text: map[string]string{}}
 	authSvc := app.NewAuthService(q, pool, mail, app.AuthServiceConfig{
 		JWTSecret: secret, AccessExpiry: 15 * time.Minute, RefreshExpiry: 24 * time.Hour,
-		BCryptCost: 10, PasswordMinLen: 8, AppBaseURL: "http://chorus.test", AppName: "Chorus",
+		BCryptCost: 4, PasswordMinLen: 8, AppBaseURL: "http://chorus.test", AppName: "Chorus",
 	})
 	t.Cleanup(authSvc.Shutdown)
 
@@ -2032,7 +2032,7 @@ func TestAPI_PointsHistoryHasItsOwnPINBudget(t *testing.T) {
 		Queries: q, Pool: pool, AuthSvc: authSvc,
 		UserSvc:      app.NewUserService(q),
 		HouseholdSvc: app.NewHouseholdService(q, pool),
-		FamilySvc:    app.NewFamilyService(q, pool, 10),
+		FamilySvc:    app.NewFamilyService(q, pool, 4),
 		QuestSvc:     app.NewQuestService(q, pool),
 		JWTSecret:    secret,
 		PINRateLimit: pinLimit,

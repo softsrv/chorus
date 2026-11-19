@@ -573,7 +573,7 @@ func TestIntegration_QuestWritesNeedAdminPin(t *testing.T) {
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
 	quests := app.NewQuestService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 
 	alice := registerVerified(t, pool, authSvc, mailer, "questpin").User.ID
@@ -617,7 +617,7 @@ func TestIntegration_QuestAccept(t *testing.T) {
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
 	quests := app.NewQuestService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 
 	alice := registerVerified(t, pool, authSvc, mailer, "questaccept").User.ID
@@ -697,7 +697,7 @@ func TestIntegration_QuestAcceptConcurrent(t *testing.T) {
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
 	quests := app.NewQuestService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 
 	alice := registerVerified(t, pool, authSvc, mailer, "questacceptconc").User.ID
@@ -775,7 +775,7 @@ func TestIntegration_QuestApproval(t *testing.T) {
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
 	quests := app.NewQuestService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	combos := app.NewComboService(q, pool)
 	ctx := context.Background()
 
@@ -1737,7 +1737,7 @@ func TestIntegration_QuestMarkDoneCooldown_CLM2(t *testing.T) {
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
 	quests := app.NewQuestService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 
 	alice := registerVerified(t, pool, authSvc, mailer, "questclm2").User.ID
@@ -1830,7 +1830,7 @@ func TestIntegration_QuestApproval_RollbackOnPointsAwardFailure(t *testing.T) {
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
 	quests := app.NewQuestService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 
 	alice := registerVerified(t, pool, authSvc, mailer, "approvefault").User.ID
@@ -1959,7 +1959,7 @@ func TestIntegration_QuestResetsAtLocalMidnight(t *testing.T) {
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
 	quests := app.NewQuestService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 	alice := registerVerified(t, pool, authSvc, mailer, "questmidnight").User.ID
 
@@ -2265,7 +2265,7 @@ func newAgeRangeFixture(t *testing.T, prefix string) *ageRangeFixture {
 	q := db.New(pool)
 	f := &ageRangeFixture{
 		t: t, ctx: context.Background(), pool: pool, q: q,
-		quests: app.NewQuestService(q, pool), family: app.NewFamilyService(q, pool, 10),
+		quests: app.NewQuestService(q, pool), family: app.NewFamilyService(q, pool, 4),
 		tz: "America/Chicago", nameByID: map[uuid.UUID]string{},
 	}
 	f.admin = registerVerified(t, pool, authSvc, mailer, prefix).User.ID

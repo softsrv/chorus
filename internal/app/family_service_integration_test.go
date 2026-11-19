@@ -24,7 +24,7 @@ func TestIntegration_FamilyMemberLifecycle(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 
 	admin := registerVerified(t, pool, authSvc, mailer, "familyadmin").User.ID
@@ -151,7 +151,7 @@ func TestIntegration_FamilyMemberValidation(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 
 	admin := registerVerified(t, pool, authSvc, mailer, "valadmin").User.ID
@@ -209,7 +209,7 @@ func TestIntegration_FamilyMemberBirthday(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 
 	admin := registerVerified(t, pool, authSvc, mailer, "bdayadmin").User.ID
@@ -356,7 +356,7 @@ func TestIntegration_FamilyMemberIsolation(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 
 	admin := registerVerified(t, pool, authSvc, mailer, "aliceadmin").User.ID
@@ -403,7 +403,7 @@ func TestIntegration_VerifyMemberPin(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 
 	admin := registerVerified(t, pool, authSvc, mailer, "pinadmin").User.ID
@@ -490,7 +490,7 @@ func TestIntegration_AdminPin(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 
 	admin := registerVerified(t, pool, authSvc, mailer, "adminpinuser").User.ID
@@ -654,7 +654,7 @@ func TestIntegration_RemoveMemberHoldingQuests(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	quests := app.NewQuestService(q, pool)
 	ctx := context.Background()
 
@@ -866,7 +866,7 @@ func TestIntegration_RemoveMemberOnSharedQuests(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	quests := app.NewQuestService(q, pool)
 	ctx := context.Background()
 
@@ -1054,7 +1054,7 @@ func TestIntegration_ApproveRacesRemoveMember(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	quests := app.NewQuestService(q, pool)
 	ctx := context.Background()
 
@@ -1126,7 +1126,7 @@ func TestIntegration_RemoveMemberRollsBack(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	quests := app.NewQuestService(q, pool)
 	ctx := context.Background()
 
@@ -1217,7 +1217,7 @@ func TestIntegration_RemoveMemberRacesQuestActions(t *testing.T) {
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	quests := app.NewQuestService(q, pool)
 	ctx := context.Background()
 
