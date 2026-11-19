@@ -145,6 +145,9 @@ func main() {
 	// ── Token cleanup background worker ───────────────────────────────────────
 	go app.RunTokenCleanup(cleanupCtx, queries)
 
+	// ── Quest expiry background worker ────────────────────────────────────────
+	go app.RunQuestExpiry(cleanupCtx, questSvc)
+
 	// ── Graceful shutdown ─────────────────────────────────────────────────────
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

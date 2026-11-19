@@ -1056,7 +1056,10 @@ async function takeCard(h, quests, members, rerender, member = activeMember) {
     // under Available, so the member knows why it is missing.
     parts.leftOut.map((q) => el('p', { class: 'text-xs opacity-70', text: `${q.name} (${lowerFirst(questRangeText(q))}) is not listed for ${member.name}.` })),
     $detail,
+    // The deadline is the server's claim_expires_at, shown as sent (textContent
+    // only); the client does no date arithmetic.
     section('Mine', parts.mine, (q) => row(q,
+      q.claim_expires_at && el('span', { class: 'text-xs opacity-70', text: `Due by ${fmtDate(q.claim_expires_at)}` }),
       sharedWith(q),
       waitingBadge(q),
       shareButton(q),

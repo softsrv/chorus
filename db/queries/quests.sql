@@ -82,8 +82,15 @@ DELETE FROM household_quests WHERE household_id = $1 AND id = $2;
 -- the quest's age range (quest_age_eligible, in the household's timezone: no
 -- birthday or no limits always pass), read only from this household's
 -- members; a member out of range, or not in this household, gets no row.
+-- Accepting stamps claim_expires_at: the household-local midnight that ends
+-- today (quest_claim_expires_at), after which the expiry sweep returns the
+-- quest to the pool.
 UPDATE household_quests
-SET claimed_by = sqlc.arg(member_id), claimed_at = NOW(), updated_at = NOW()
+SET claimed_by = sqlc.arg(member_id), claimed_at = NOW(), updated_at = NOW(),
+    claim_expires_at = (
+        SELECT quest_claim_expires_at(NOW(), h.timezone)
+        FROM households h WHERE h.id = household_quests.household_id
+    )
 WHERE household_quests.household_id = sqlc.arg(household_id) AND household_quests.id = sqlc.arg(id)
   AND household_quests.claimed_by IS NULL
   AND (household_quests.available_at IS NULL OR household_quests.available_at <= NOW())
@@ -126,9 +133,10 @@ FOR UPDATE;
 -- The acting member leaves a quest they hold or are on. Only their part goes:
 -- their participant row. If they held it, the holder of record moves to the
 -- earliest remaining participant (joined_at, then member_id), who keeps
--- their joined_at as claimed_at; a quest with nobody left is back in the
--- pool, done_at cleared with the holder so the done_at-needs-a-holder CHECK
--- holds. A quest left with one member is no longer shared, so that member's
+-- their joined_at as claimed_at and keeps the claim deadline
+-- (claim_expires_at); a quest with nobody left is back in the pool, done_at
+-- and claim_expires_at cleared with the holder so the done_at-needs-a-holder
+-- CHECK holds. A quest left with one member is no longer shared, so that member's
 -- participant row goes too. A member not on the quest, or a quest not in
 -- this household, matches no row and changes nothing. The caller holds the
 -- member locks and then the quest's row lock (LockHouseholdQuest, a statement
@@ -170,13 +178,14 @@ SET claimed_by = CASE WHEN m.holder THEN m.next_member ELSE q.claimed_by END,
                       WHEN m.next_member IS NULL THEN NULL
                       ELSE m.next_joined_at END,
     done_at = CASE WHEN m.holder AND m.next_member IS NULL THEN NULL ELSE q.done_at END,
+    claim_expires_at = CASE WHEN m.holder AND m.next_member IS NULL THEN NULL ELSE q.claim_expires_at END,
     updated_at = NOW()
 FROM mine m
 WHERE q.household_id = m.household_id AND q.id = m.id
 RETURNING q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes,
           q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at,
           q.created_at, q.updated_at, q.shareable, q.teamwork_bonus, q.streak_bonus,
-          q.min_age, q.max_age;
+          q.min_age, q.max_age, q.claim_expires_at;
 
 -- name: ShareQuest :many
 -- The holder of a shareable quest adds another member of the household to
@@ -184,7 +193,9 @@ RETURNING q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q
 -- by the acting member, and the target must be a household member other than
 -- the actor who is not on the quest yet and is within the quest's age range
 -- (quest_age_eligible, in the household's timezone: no birthday or no limits
--- always pass); otherwise nothing is written. The
+-- always pass); otherwise nothing is written. A hold whose claim has run out
+-- (claim_expires_at at or before now, the end of the day it was accepted) is
+-- not held, even before the expiry sweep has released it. The
 -- first share also records the holder, joined at the time they accepted, so
 -- the holder stays the earliest member. Returns the member ids it added.
 WITH quest AS (
@@ -192,8 +203,10 @@ WITH quest AS (
     FROM household_quests q
     WHERE q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id)
       AND q.shareable AND q.claimed_by = sqlc.arg(member_id)::uuid
-    -- Locked and re-checked, so a share racing the holder's mark-done or
-    -- abandon either sees the quest still held or writes nothing.
+      AND q.claim_expires_at > NOW()
+    -- Locked and re-checked, so a share racing the holder's mark-done,
+    -- abandon or the expiry sweep either sees the quest still held or writes
+    -- nothing.
     FOR UPDATE OF q
 ), target AS (
     SELECT m.id
@@ -219,6 +232,15 @@ CROSS JOIN LATERAL (VALUES
 ) AS v(member_id, joined_at)
 ON CONFLICT (quest_id, member_id) DO NOTHING
 RETURNING member_id;
+
+-- name: QuestClaimLapsed :one
+-- Whether a quest of the household is held past its claim deadline
+-- (claim_expires_at at or before now). NOW() is the transaction's start, so
+-- inside one transaction this agrees with ShareQuest's and MarkQuestDone's
+-- own expiry checks. A quest not in this household gets no row.
+SELECT (q.claim_expires_at IS NULL OR q.claim_expires_at <= NOW())::boolean AS lapsed
+FROM household_quests q
+WHERE q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id);
 
 -- name: QuestMemberAgeEligible :one
 -- Check whether a member of a household is age-eligible for a quest in that
@@ -265,8 +287,9 @@ FOR UPDATE OF q;
 -- members counted here are the ones committed on each quest.
 -- Their participant rows go. On a quest they hold, the holder of record
 -- moves to the earliest remaining participant (joined_at, then member_id),
--- who keeps their joined_at as claimed_at; a quest with no participant left
--- is returned to the pool, done_at cleared with the holder so the
+-- who keeps their joined_at as claimed_at and keeps the claim deadline
+-- (claim_expires_at); a quest with no participant left is returned to the
+-- pool, done_at and claim_expires_at cleared with the holder so the
 -- done_at-needs-a-holder CHECK holds. A quest left with one member is no
 -- longer shared, so that member's participant row goes too. The quests are
 -- locked after the caller's lock on the member row (member first). No
@@ -304,9 +327,49 @@ UPDATE household_quests q
 SET claimed_by = m.next_member,
     claimed_at = CASE WHEN m.next_member IS NULL THEN NULL ELSE m.next_joined_at END,
     done_at = CASE WHEN m.next_member IS NULL THEN NULL ELSE q.done_at END,
+    claim_expires_at = CASE WHEN m.next_member IS NULL THEN NULL ELSE q.claim_expires_at END,
     updated_at = NOW()
 FROM mine m
 WHERE q.household_id = m.household_id AND q.id = m.id AND m.holder;
+
+-- name: ListExpiredQuestClaims :many
+-- Held quests whose claim has run out (claim_expires_at, the household-local
+-- midnight ending the day the quest was accepted, is now or past), across
+-- every household, earliest deadline first, at most max_rows per run. The
+-- expiry sweep releases each one in a transaction of its own
+-- (ExpireQuestClaim); what it misses is listed again on the next run.
+SELECT q.household_id, q.id, q.claimed_by
+FROM household_quests q
+WHERE q.claimed_by IS NOT NULL AND q.claim_expires_at <= NOW()
+ORDER BY q.claim_expires_at, q.id
+LIMIT sqlc.arg(max_rows);
+
+-- name: ExpireQuestClaim :one
+-- Returns a quest whose claim has run out to the pool: every member on it
+-- drops it (all its participant rows go) and the holder, claimed_at, done_at
+-- and claim_expires_at are cleared, in one statement. No completion is
+-- recorded, no points move and available_at is left as it is. The expiry is
+-- re-checked here: the caller holds the row locks of every member on the
+-- quest and then the quest's row lock (LockHouseholdQuest), so a quest marked
+-- done, abandoned or released meanwhile is no longer held and matches no row.
+-- A quest not in this household matches no row either.
+WITH expired AS (
+    SELECT q.household_id, q.id
+    FROM household_quests q
+    WHERE q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id)
+      AND q.claimed_by IS NOT NULL AND q.claim_expires_at <= NOW()
+), dropped AS (
+    DELETE FROM household_quest_participants p
+    USING expired e
+    WHERE p.household_id = e.household_id AND p.quest_id = e.id
+    RETURNING p.member_id
+)
+UPDATE household_quests q
+SET claimed_by = NULL, claimed_at = NULL, done_at = NULL, claim_expires_at = NULL,
+    updated_at = NOW()
+FROM expired e
+WHERE q.household_id = e.household_id AND q.id = e.id
+RETURNING q.id;
 
 -- name: LockMemberPendingCompletions :many
 -- Locks, in id order, every pending completion of the household that the
@@ -405,7 +468,10 @@ WHERE c.household_id = sqlc.arg(household_id) AND c.id = sqlc.arg(id)
 -- participants are cleared. Members keep their order: participants by
 -- joined_at, the lone marker at now. NOW() is one instant per transaction, so
 -- completed_at equals the completion's done_at. A quest the member is not on
--- matches no row and writes nothing. No points move here. The caller holds
+-- matches no row and writes nothing, and neither does a quest whose claim has
+-- run out (claim_expires_at at or before now, the end of the day it was
+-- accepted), even before the sweep has released it: no completion, no streak
+-- step. No points move here. The caller holds
 -- the row locks of every member on the quest and then the quest's row lock
 -- (LockHouseholdQuest, a statement of its own), so the participants recorded
 -- and cleared here are the committed ones.
@@ -420,7 +486,7 @@ WHERE c.household_id = sqlc.arg(household_id) AND c.id = sqlc.arg(id)
 -- touches only member_quest_streaks: never available_at or the cooldown.
 WITH done AS (
     UPDATE household_quests q
-    SET claimed_by = NULL, claimed_at = NULL,
+    SET claimed_by = NULL, claimed_at = NULL, claim_expires_at = NULL,
         completed_at = NOW(),
         available_at = quest_next_available_at(NOW(), h.timezone, q.repeat_days),
         updated_at = NOW()
@@ -428,6 +494,7 @@ WITH done AS (
     WHERE h.id = q.household_id
       AND q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id)
       AND q.claimed_by IS NOT NULL
+      AND q.claim_expires_at > NOW()
       AND (q.claimed_by = sqlc.arg(member_id)::uuid OR EXISTS (
           SELECT 1 FROM household_quest_participants p
           WHERE p.household_id = q.household_id AND p.quest_id = q.id
@@ -495,7 +562,7 @@ WITH done AS (
 SELECT d.id, d.household_id, d.library_id, d.name, d.points, d.repeat_days, d.notes,
        d.claimed_by, d.claimed_at, d.done_at, d.completed_at, d.available_at,
        d.created_at, d.updated_at, d.shareable, d.teamwork_bonus, d.streak_bonus,
-       d.min_age, d.max_age
+       d.min_age, d.max_age, d.claim_expires_at
 FROM done d;
 
 -- name: GetMemberQuestStreak :one
