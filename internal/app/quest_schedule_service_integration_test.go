@@ -208,6 +208,57 @@ func TestIntegration_QuestSchedules(t *testing.T) {
 		}
 	})
 
+	// CLM-3: before the rollover on a schedule's date the schedule is in the
+	// member's Upcoming and the quest is not held; once that rollover
+	// assigns it the quest is held and the one-off is gone from Upcoming.
+	// quest_schedules has no repeat column yet, so no repeated schedule is
+	// present to check.
+	t.Run("upcoming_before_and_after_rollover", func(t *testing.T) {
+		w := newScheduleWorld(t, "schedupcoming")
+		sam, ann := w.member("Sam"), w.member("Ann")
+		w.setAdminPin("4321")
+		cat := w.quest(app.QuestInput{Name: "Feed the cat", Points: num(5)})
+		room := w.quest(app.QuestInput{Name: "Clean your room", Points: num(5)})
+		dishes := w.quest(app.QuestInput{Name: "Dishes", Points: num(5)})
+
+		if got, err := w.schedules.Upcoming(w.ctx, w.admin, w.h, sam); err != nil || got == nil || len(got) != 0 {
+			t.Fatalf("Upcoming with nothing scheduled = %#v, %v; want an empty non-nil slice", got, err)
+		}
+
+		catS := w.schedule(cat, sam, 1)
+		roomS := w.schedule(room, sam, 2)
+		w.schedule(dishes, ann, 1) // another member's: never in Sam's list
+
+		up, err := w.schedules.Upcoming(w.ctx, w.admin, w.h, sam)
+		if err != nil {
+			t.Fatalf("Upcoming before rollover: %v", err)
+		}
+		if len(up) != 2 || up[0].ID != catS.ID || up[1].ID != roomS.ID {
+			t.Fatalf("Upcoming before rollover = %+v, want Feed the cat then Clean your room", up)
+		}
+		if up[0].QuestID != cat || up[0].QuestName != "Feed the cat" || up[0].StartDate != w.date(1) || up[0].NextDate != w.date(1) || up[0].Repeat {
+			t.Errorf("Feed the cat upcoming = %+v, want one-off next_date %s", up[0], w.date(1))
+		}
+		if up[1].NextDate != w.date(2) {
+			t.Errorf("Clean your room next_date = %s, want %s", up[1].NextDate, w.date(2))
+		}
+		if got := w.holder(cat); got != nil {
+			t.Fatalf("before its day the quest is held by %v, want nobody", got)
+		}
+
+		w.rollover(w.localMidnight(1).Add(time.Minute))
+		if got := w.holder(cat); !isHeldBy(got, sam) {
+			t.Fatalf("after the rollover claimed_by = %v, want Sam %v", got, sam)
+		}
+		up, err = w.schedules.Upcoming(w.ctx, w.admin, w.h, sam)
+		if err != nil {
+			t.Fatalf("Upcoming after rollover: %v", err)
+		}
+		if len(up) != 1 || up[0].ID != roomS.ID {
+			t.Errorf("Upcoming after rollover = %+v, want only Clean your room (the assigned one-off gone)", up)
+		}
+	})
+
 	t.Run("expiry_runs_before_assignment", func(t *testing.T) {
 		w := newScheduleWorld(t, "schedexpiry")
 		ann, ben := w.member("Ann"), w.member("Ben")
