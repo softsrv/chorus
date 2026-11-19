@@ -220,7 +220,7 @@ WITH mine AS (
     RETURNING hc.id
 ), cancelled AS (
     UPDATE quest_completions cc
-    SET status = 'cancelled'
+    SET status = 'cancelled', status_by = $3::uuid
     FROM mine m
     WHERE cc.id = m.id AND m.marker AND m.next_member IS NULL
     RETURNING cc.household_id, cc.quest_id, cc.done_at
@@ -235,6 +235,7 @@ WHERE q.household_id = c.household_id AND q.id = c.quest_id
 type CancelMemberPendingCompletionsParams struct {
 	MemberID    uuid.UUID `json:"member_id"`
 	HouseholdID uuid.UUID `json:"household_id"`
+	StatusBy    uuid.UUID `json:"status_by"`
 }
 
 // Takes a member who is leaving the household off every completion still
@@ -251,7 +252,7 @@ type CancelMemberPendingCompletionsParams struct {
 // completions are locked after the caller's lock on the member row (member
 // first, the order Approve uses).
 func (q *Queries) CancelMemberPendingCompletions(ctx context.Context, arg CancelMemberPendingCompletionsParams) error {
-	_, err := q.db.Exec(ctx, cancelMemberPendingCompletions, arg.MemberID, arg.HouseholdID)
+	_, err := q.db.Exec(ctx, cancelMemberPendingCompletions, arg.MemberID, arg.HouseholdID, arg.StatusBy)
 	return err
 }
 
@@ -1354,8 +1355,8 @@ func (q *Queries) RecomputeMemberQuestStreak(ctx context.Context, arg RecomputeM
 const rejectCompletion = `-- name: RejectCompletion :one
 WITH rejected AS (
     UPDATE quest_completions rc
-    SET status = 'rejected'
-    WHERE rc.household_id = $1 AND rc.id = $2
+    SET status = 'rejected', status_by = $1::uuid
+    WHERE rc.household_id = $2 AND rc.id = $3
       AND rc.status = 'pending'
     RETURNING rc.id, rc.household_id, rc.quest_id, rc.member_id, rc.done_at, rc.status
 ), reopened AS (
@@ -1371,6 +1372,7 @@ FROM rejected r
 `
 
 type RejectCompletionParams struct {
+	StatusBy    uuid.UUID `json:"status_by"`
 	HouseholdID uuid.UUID `json:"household_id"`
 	ID          uuid.UUID `json:"id"`
 }
@@ -1388,7 +1390,7 @@ type RejectCompletionRow struct {
 // cooldown has not ended, the cooldown is cancelled so the chore is available
 // again right away. Other completions and the quest's holder are untouched.
 func (q *Queries) RejectCompletion(ctx context.Context, arg RejectCompletionParams) (RejectCompletionRow, error) {
-	row := q.db.QueryRow(ctx, rejectCompletion, arg.HouseholdID, arg.ID)
+	row := q.db.QueryRow(ctx, rejectCompletion, arg.StatusBy, arg.HouseholdID, arg.ID)
 	var i RejectCompletionRow
 	err := row.Scan(
 		&i.ID,

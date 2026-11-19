@@ -154,7 +154,8 @@ func splitPoints(points int32, n int) int32 {
 // listed and is paid at approval as the remaining n. A quest or completion
 // that was theirs alone is released or cancelled as before, and a quest
 // resting on a cooldown that a cancelled completion started is available
-// again right away, as on reject; every other cooldown stays.
+// again right away, as on reject; every other cooldown stays. A cancelled
+// completion records actorID, the user removing the member, as its status_by.
 //
 // Each ReleaseMemberQuests and CancelMemberPendingCompletions statement counts
 // the members left on a quest or completion from its own snapshot, so the
@@ -165,7 +166,7 @@ func splitPoints(points int32, n int) int32 {
 // and is then in the snapshot, or it waits until this removal commits. A
 // statement that read its members before such a commit would drop the
 // holder's participant row and leave a new member's behind.
-func releaseMemberQuests(ctx context.Context, qtx *db.Queries, householdID, memberID uuid.UUID) error {
+func releaseMemberQuests(ctx context.Context, qtx *db.Queries, actorID, householdID, memberID uuid.UUID) error {
 	if _, err := qtx.LockMemberQuests(ctx, db.LockMemberQuestsParams{HouseholdID: householdID, MemberID: memberID}); err != nil {
 		return fmt.Errorf("lock member quests: %w", err)
 	}
@@ -175,7 +176,7 @@ func releaseMemberQuests(ctx context.Context, qtx *db.Queries, householdID, memb
 	if _, err := qtx.LockMemberPendingCompletions(ctx, db.LockMemberPendingCompletionsParams{HouseholdID: householdID, MemberID: memberID}); err != nil {
 		return fmt.Errorf("lock member completions: %w", err)
 	}
-	if err := qtx.CancelMemberPendingCompletions(ctx, db.CancelMemberPendingCompletionsParams{HouseholdID: householdID, MemberID: memberID}); err != nil {
+	if err := qtx.CancelMemberPendingCompletions(ctx, db.CancelMemberPendingCompletionsParams{HouseholdID: householdID, MemberID: memberID, StatusBy: actorID}); err != nil {
 		return fmt.Errorf("cancel member completions: %w", err)
 	}
 	return nil
@@ -1154,7 +1155,7 @@ func (s *QuestService) Reject(ctx context.Context, userID, householdID, completi
 	}
 	// Re-read under the lock: a concurrent approval, reject or removal that
 	// committed first leaves no pending row, so this one is ErrNotFound.
-	row, err := notFoundIfNoRows(qtx.RejectCompletion(ctx, db.RejectCompletionParams{HouseholdID: householdID, ID: completionID}))
+	row, err := notFoundIfNoRows(qtx.RejectCompletion(ctx, db.RejectCompletionParams{HouseholdID: householdID, ID: completionID, StatusBy: userID}))
 	if err != nil {
 		return Completion{}, err
 	}
