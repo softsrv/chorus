@@ -531,6 +531,42 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	if got, err := schedules.List(ctx, mallory, mh.ID, malloryPin); err != nil || len(got) != 1 || got[0].ID != mallorySchedule.ID {
 		t.Errorf("mallory's own schedules = %+v, %v; want only %v", got, err, mallorySchedule.ID)
 	}
+	// Upcoming isolation (task 2 CLM-5): a non-member reading a member's
+	// upcoming quests, or a member id from another household read through
+	// the caller's own household, is ErrNotFound and returns no data; each
+	// member's list holds only their own household's schedule.
+	upcomingChecks := map[string]func() ([]app.UpcomingQuest, error){
+		"upcoming quests by outsider": func() ([]app.UpcomingQuest, error) {
+			return schedules.Upcoming(ctx, mallory, h.ID, aliceMember.ID)
+		},
+		"upcoming quests by outsider as own member": func() ([]app.UpcomingQuest, error) {
+			return schedules.Upcoming(ctx, mallory, h.ID, malloryMember.ID)
+		},
+		"upcoming quests via own household with alice's member": func() ([]app.UpcomingQuest, error) {
+			return schedules.Upcoming(ctx, mallory, mh.ID, aliceMember.ID)
+		},
+		"alice upcoming quests for other household's member": func() ([]app.UpcomingQuest, error) {
+			return schedules.Upcoming(ctx, alice, h.ID, malloryMember.ID)
+		},
+		"alice upcoming quests via other household": func() ([]app.UpcomingQuest, error) {
+			return schedules.Upcoming(ctx, alice, mh.ID, malloryMember.ID)
+		},
+	}
+	for name, read := range upcomingChecks {
+		got, err := read()
+		if got != nil {
+			t.Errorf("%s returned data: %+v", name, got)
+		}
+		checks[name] = err
+	}
+	if got, err := schedules.Upcoming(ctx, alice, h.ID, aliceMember.ID); err != nil || len(got) != 1 ||
+		got[0].ID != aliceSchedule.ID || got[0].QuestID != aliceQuest.ID {
+		t.Errorf("alice member's upcoming quests = %+v, %v; want only schedule %v", got, err, aliceSchedule.ID)
+	}
+	if got, err := schedules.Upcoming(ctx, mallory, mh.ID, malloryMember.ID); err != nil || len(got) != 1 ||
+		got[0].ID != mallorySchedule.ID || got[0].QuestID != malloryQuest.ID {
+		t.Errorf("mallory member's upcoming quests = %+v, %v; want only schedule %v", got, err, mallorySchedule.ID)
+	}
 	if err := familySvc.ClearAdminPin(ctx, mallory, mh.ID, malloryPin); err != nil {
 		t.Fatalf("mallory ClearAdminPin: %v", err)
 	}
