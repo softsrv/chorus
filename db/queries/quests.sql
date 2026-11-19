@@ -451,7 +451,10 @@ WHERE c.household_id = sqlc.arg(household_id) AND c.id = sqlc.arg(id)
 -- participants are cleared. Members keep their order: participants by
 -- joined_at, the lone marker at now. NOW() is one instant per transaction, so
 -- completed_at equals the completion's done_at. A quest the member is not on
--- matches no row and writes nothing. No points move here. The caller holds
+-- matches no row and writes nothing, and neither does a quest whose claim has
+-- run out (claim_expires_at at or before now, the end of the day it was
+-- accepted), even before the sweep has released it: no completion, no streak
+-- step. No points move here. The caller holds
 -- the row locks of every member on the quest and then the quest's row lock
 -- (LockHouseholdQuest, a statement of its own), so the participants recorded
 -- and cleared here are the committed ones.
@@ -466,7 +469,7 @@ WHERE c.household_id = sqlc.arg(household_id) AND c.id = sqlc.arg(id)
 -- touches only member_quest_streaks: never available_at or the cooldown.
 WITH done AS (
     UPDATE household_quests q
-    SET claimed_by = NULL, claimed_at = NULL,
+    SET claimed_by = NULL, claimed_at = NULL, claim_expires_at = NULL,
         completed_at = NOW(),
         available_at = quest_next_available_at(NOW(), h.timezone, q.repeat_days),
         updated_at = NOW()
@@ -474,6 +477,7 @@ WITH done AS (
     WHERE h.id = q.household_id
       AND q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id)
       AND q.claimed_by IS NOT NULL
+      AND (q.claim_expires_at IS NULL OR q.claim_expires_at > NOW())
       AND (q.claimed_by = sqlc.arg(member_id)::uuid OR EXISTS (
           SELECT 1 FROM household_quest_participants p
           WHERE p.household_id = q.household_id AND p.quest_id = q.id

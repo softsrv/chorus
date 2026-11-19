@@ -672,7 +672,9 @@ func memberLockOrder(a, b uuid.UUID) []uuid.UUID {
 // cooldown from now: the quest comes back at local midnight in the
 // household's timezone, repeat_days days after today, whether or not the
 // administrator has approved by then. No points move until approval. A quest
-// the member is not on, or a member removed meanwhile, is ErrNotFound.
+// the member is not on, a quest whose claim day has ended (claim_expires_at
+// at or before now, even before the expiry sweep has released it), or a
+// member removed meanwhile, is ErrNotFound: no completion, no streak step.
 //
 // The member locks come first, in id order, because FamilyService.Remove
 // takes a member's lock before it releases that member's quests and
