@@ -43,21 +43,14 @@ type Querier interface {
 	// marked done before streaks existed); neither is recomputed from NOW().
 	ApproveCompletion(ctx context.Context, arg ApproveCompletionParams) (ApproveCompletionRow, error)
 	ApproveRewardRedemption(ctx context.Context, arg ApproveRewardRedemptionParams) (RewardRedemption, error)
-	// Assigns the household's due schedules at now, under ClaimQuest's rules: the
-	// quest is not held (claimed_by IS NULL), not resting (available_at at or
-	// before now) and the member is within its age range (quest_age_eligible).
-	// A one-off (repeat false) is due when dated on or before local_date and
-	// after after_date (any date when NULL): it fires on its date only. A
-	// repeated schedule is due whenever it is dated on or before local_date,
-	// whatever after_date is, and is never consumed: it assigns its quest each
-	// time the quest is free at a pass, so the quest's own cooldown (available_at,
-	// set from repeat_days when it is marked done) is its cadence and the
-	// schedule stores no interval. schedule_id, when set, narrows it to that one
-	// schedule. Of several
-	// schedules of one quest the earliest eligible one wins. The quest is left as
-	// Accept leaves it: claimed_by and claimed_at set, claim_expires_at the local
-	// midnight ending the day of now. Returns the quests assigned.
-	AssignDueSchedules(ctx context.Context, arg AssignDueSchedulesParams) ([]AssignDueSchedulesRow, error)
+	// Assigns a quest to the member a schedule names, at now (the rollover's
+	// instant, or the moment a schedule for today is stored), under ClaimQuest's
+	// rules: the quest is not held, not resting (available_at at or before now)
+	// and the member, read only from this household, is within its age range. The
+	// quest is left as Accept leaves it: claimed_by and claimed_at set,
+	// claim_expires_at the household-local midnight ending the day of now. No row
+	// when the quest is not free. The caller holds the household's member locks.
+	AssignScheduledQuest(ctx context.Context, arg AssignScheduledQuestParams) (uuid.UUID, error)
 	// Takes a member who is leaving the household off every completion still
 	// waiting for approval. Their quest_completion_members row goes. Where they
 	// marked it done, the marker moves first to the earliest remaining recorded
@@ -130,7 +123,7 @@ type Querier interface {
 	DeleteEvent(ctx context.Context, arg DeleteEventParams) (int64, error)
 	DeleteExpiredRefreshTokens(ctx context.Context) (int64, error)
 	DeleteFamilyMember(ctx context.Context, arg DeleteFamilyMemberParams) (int64, error)
-	// Ends the one-off schedules AssignDueSchedules just judged (same window and
+	// Ends the one-off schedules ListDueSchedules just judged (same window and
 	// schedule_id): those assigned and those skipped because the quest was held
 	// or resting. A schedule skipped because the member is outside the quest's
 	// age range is kept for the admin to see; it is never due again, since its
@@ -244,6 +237,23 @@ type Querier interface {
 	// the combo locks (LockCombosForQuest), so the award check cannot race
 	// another payer.
 	ListCombosCompletedByMemberOnDay(ctx context.Context, arg ListCombosCompletedByMemberOnDayParams) ([]ListCombosCompletedByMemberOnDayRow, error)
+	// The household's schedules due at now, at most one per quest, for
+	// assignSchedules to assign through AssignScheduledQuest (quests.sql owns the
+	// write to household_quests). A schedule is a candidate when its quest is
+	// free under ClaimQuest's rules: not held (claimed_by IS NULL), not resting
+	// (available_at at or before now) and the member within its age range
+	// (quest_age_eligible). A one-off (repeat false) is due when dated on or
+	// before local_date and after after_date (any date when NULL): it fires on
+	// its date only. A repeated schedule is due whenever it is dated on or before
+	// local_date, whatever after_date is, and is never consumed: it assigns its
+	// quest each time the quest is free at a pass, so the quest's own cooldown
+	// (available_at, set from repeat_days when it is marked done) is its cadence
+	// and the schedule stores no interval. schedule_id, when set, narrows it to
+	// that one schedule. Of several schedules of one quest the one with the
+	// latest date wins (then the earliest created): after missed midnights the
+	// claim is for local_date, so the schedule nearest it is the one assigned and
+	// a one-off dated on an earlier missed day ends with its day.
+	ListDueSchedules(ctx context.Context, arg ListDueSchedulesParams) ([]ListDueSchedulesRow, error)
 	// Events overlapping [range_start, range_end).
 	ListEventsInRange(ctx context.Context, arg ListEventsInRangeParams) ([]Event, error)
 	// Held quests whose claim has run out (claim_expires_at, the household-local

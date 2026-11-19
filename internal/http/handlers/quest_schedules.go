@@ -17,9 +17,13 @@ type questScheduleServicer interface {
 	Upcoming(ctx context.Context, userID, householdID, memberID uuid.UUID) ([]app.UpcomingQuest, error)
 }
 
-// QuestScheduleHandler serves /api/v1/households/{householdID}/quest-schedules.
-// Every route is admin-only and carries the admin PIN in X-Admin-PIN once
-// one is set.
+// QuestScheduleHandler serves /api/v1/households/{householdID}/quest-schedules
+// and .../family-members/{memberID}/upcoming-quests. Who may call each route:
+//   - Create, List and Delete (cancel) are admin-only and carry the admin PIN
+//     in X-Admin-PIN once one is set.
+//   - Upcoming is readable by any member of the household, with no PIN.
+//
+// A caller outside the household gets 404 on every route.
 type QuestScheduleHandler struct {
 	svc questScheduleServicer
 }
@@ -36,8 +40,9 @@ type questScheduleRequest struct {
 	Repeat   bool      `json:"repeat"`
 }
 
-// Create schedules a quest for a member: {"quest_id", "member_id", "date"}
-// with date a household-local YYYY-MM-DD. 201 with the schedule.
+// Create schedules a quest for a member: {"quest_id", "member_id", "date",
+// "repeat"?} with date a household-local YYYY-MM-DD and repeat (default
+// false) a repeated schedule. 201 with the schedule.
 func (h *QuestScheduleHandler) Create(w http.ResponseWriter, r *http.Request) {
 	hid, ok := pathUUID(w, r, "householdID")
 	if !ok {

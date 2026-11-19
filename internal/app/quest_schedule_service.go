@@ -253,7 +253,9 @@ func (s *QuestScheduleService) Upcoming(ctx context.Context, userID, householdID
 // local today, so a passed one-off is not listed. A repeated schedule shows
 // the latest of its start date, the next local day not yet rolled over
 // (today when the household never rolled over or last rolled over before
-// yesterday) and the local date of available_at. ok is false only when
+// yesterday) and the date of the first local midnight at or after
+// available_at, since the rollover assigns a resting quest only at a pass
+// that available_at has reached. ok is false only when
 // startDate is not a YYYY-MM-DD date.
 func NextDate(startDate string, repeat bool, availableAt, lastRolloverDate *time.Time, now time.Time, loc *time.Location) (string, bool) {
 	start, err := time.Parse(time.DateOnly, startDate)
@@ -279,11 +281,25 @@ func NextDate(startDate string, repeat bool, availableAt, lastRolloverDate *time
 		next = notRolled
 	}
 	if availableAt != nil {
-		if rest := localDate(*availableAt, loc); rest.After(next) {
+		if rest := firstMidnightFrom(*availableAt, loc); rest.After(next) {
 			next = rest
 		}
 	}
 	return next.Format(time.DateOnly), true
+}
+
+// firstMidnightFrom is the local date (at UTC midnight) of the first local
+// midnight at or after t in loc: t's own date when t is exactly that
+// midnight, else the day after. The rollover assigns a resting quest only
+// at a pass with available_at at or before it, so a rest ending mid-day is
+// assigned at the next midnight.
+func firstMidnightFrom(t time.Time, loc *time.Location) time.Time {
+	d := localDate(t, loc)
+	l := t.In(loc)
+	if l.Equal(time.Date(l.Year(), l.Month(), l.Day(), 0, 0, 0, 0, loc)) {
+		return d
+	}
+	return d.AddDate(0, 0, 1)
 }
 
 // localDate is t's calendar date in loc, at UTC midnight.

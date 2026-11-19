@@ -371,6 +371,31 @@ FROM expired e
 WHERE q.household_id = e.household_id AND q.id = e.id
 RETURNING q.id;
 
+-- name: AssignScheduledQuest :one
+-- Assigns a quest to the member a schedule names, at now (the rollover's
+-- instant, or the moment a schedule for today is stored), under ClaimQuest's
+-- rules: the quest is not held, not resting (available_at at or before now)
+-- and the member, read only from this household, is within its age range. The
+-- quest is left as Accept leaves it: claimed_by and claimed_at set,
+-- claim_expires_at the household-local midnight ending the day of now. No row
+-- when the quest is not free. The caller holds the household's member locks.
+UPDATE household_quests
+SET claimed_by = sqlc.arg(member_id), claimed_at = sqlc.arg(now)::timestamptz, updated_at = NOW(),
+    claim_expires_at = (
+        SELECT quest_claim_expires_at(sqlc.arg(now)::timestamptz, h.timezone)
+        FROM households h WHERE h.id = household_quests.household_id
+    )
+WHERE household_quests.household_id = sqlc.arg(household_id) AND household_quests.id = sqlc.arg(id)
+  AND household_quests.claimed_by IS NULL
+  AND (household_quests.available_at IS NULL OR household_quests.available_at <= sqlc.arg(now)::timestamptz)
+  AND EXISTS (
+      SELECT 1 FROM family_members m
+      JOIN households h ON h.id = m.household_id
+      WHERE m.household_id = sqlc.arg(household_id) AND m.id = sqlc.arg(member_id)
+        AND quest_age_eligible(m.birthday, h.timezone, household_quests.min_age, household_quests.max_age)
+  )
+RETURNING household_quests.id;
+
 -- name: ExpireHouseholdQuestClaims :execrows
 -- The household's part of the end-of-day rule (INT-0176), at now: every held
 -- quest of the household whose claim has run out (claim_expires_at at or

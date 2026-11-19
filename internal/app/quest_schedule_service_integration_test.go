@@ -526,6 +526,28 @@ func TestIntegration_QuestSchedules(t *testing.T) {
 		}
 	})
 
+	t.Run("missed_midnights_same_quest_assigns_the_latest_day", func(t *testing.T) {
+		w := newScheduleWorld(t, "schedmissedsame")
+		ann := w.member("Ann")
+		bob := w.member("Bob")
+		q := w.quest(app.QuestInput{Name: "Shared chore", Points: num(5)})
+		w.schedule(q, ann, 1) // Monday's one-off
+		w.schedule(q, bob, 2) // Tuesday's one-off, the same quest
+		// The server was down over both midnights: the claim is for
+		// Tuesday, so Tuesday's member holds it and Monday's one-off ends
+		// with its day.
+		now := w.localMidnight(2).Add(time.Hour)
+		if n := w.rollover(now); n != 1 {
+			t.Fatalf("first run after two missed midnights assigned %d, want 1", n)
+		}
+		if got := w.holder(q); !isHeldBy(got, bob) {
+			t.Fatalf("after missed midnights the quest is held by %v, want Bob %v (today's schedule)", got, bob)
+		}
+		if ids := w.scheduleIDs(); len(ids) != 0 {
+			t.Errorf("one-off schedules after their pass: %v", ids)
+		}
+	})
+
 	t.Run("concurrent_runs_assign_once", func(t *testing.T) {
 		w := newScheduleWorld(t, "schedconc")
 		ann := w.member("Ann")
@@ -967,10 +989,15 @@ func TestIntegration_QuestRolloverRepeat(t *testing.T) {
 		if _, err := w.quests.Accept(w.ctx, w.admin, w.h, held, app.MemberAction{MemberID: ann}); err != nil {
 			t.Fatalf("Ann accept: %v", err)
 		}
+		// A repeated schedule of an unrelated quest keeps the household
+		// due at the next midnight, so that pass runs for it: its
+		// end-of-day expiry first, then the assign sweep.
+		other := w.quest(app.QuestInput{Name: "Other", Points: num(5)})
 		// Today's pass has not run for this household yet.
 		freeS := w.scheduleOn(free, sam, w.date(0), false)
 		heldS := w.scheduleOn(held, sam, w.date(0), false)
 		ageS := w.scheduleOn(adult, kid, w.date(0), false)
+		otherS := w.scheduleOn(other, ann, w.date(0), true)
 		w.rollover(time.Now())
 		if holder, _ := w.claim(free); !isHeldBy(holder, sam) {
 			t.Fatalf("free one-off: %v, want Sam", holder)
@@ -987,23 +1014,17 @@ func TestIntegration_QuestRolloverRepeat(t *testing.T) {
 		if !w.hasSchedule(ageS.ID) {
 			t.Fatalf("age-skipped one-off removed, want it kept")
 		}
-		// Next midnight: no one-off retries. The household has no schedule
-		// left due, so the pass leaves the holds to the expiry sweep: each
-		// quest keeps exactly the claim it had, none is assigned afresh.
-		before := map[string]pgtype.Timestamptz{}
-		holders := map[string]*uuid.UUID{}
-		for name, q := range map[string]uuid.UUID{"free": free, "held": held, "adult": adult} {
-			holders[name], before[name] = w.claim(q)
-		}
+		// Next midnight: the end-of-day rule runs first, so Sam's unfinished
+		// scheduled hold and Ann's own hold both go back to the pool; then
+		// no one-off retries, so none of the three is assigned afresh.
 		w.rollover(w.localMidnight(1).Add(time.Minute))
 		for name, q := range map[string]uuid.UUID{"free": free, "held": held, "adult": adult} {
-			holder, at := w.claim(q)
-			if (holder == nil) != (holders[name] == nil) || (holder != nil && *holder != *holders[name]) || !at.Time.Equal(before[name].Time) {
-				t.Errorf("%s quest changed the day after its one-off: %v at %v, was %v at %v", name, holder, at.Time, holders[name], before[name].Time)
+			if holder, at := w.claim(q); holder != nil || at.Valid {
+				t.Errorf("%s quest the day after its one-off: held by %v at %v, want back in the pool", name, holder, at.Time)
 			}
 		}
-		if ids := w.scheduleIDs(); len(ids) != 1 || ids[0] != ageS.ID {
-			t.Errorf("schedules the day after: %v, want only the age-skipped %v", ids, ageS.ID)
+		if ids := w.scheduleIDs(); len(ids) != 2 || !w.hasSchedule(ageS.ID) || !w.hasSchedule(otherS.ID) {
+			t.Errorf("schedules the day after: %v, want only the age-skipped %v and the repeated %v", ids, ageS.ID, otherS.ID)
 		}
 	})
 
