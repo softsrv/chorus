@@ -32,11 +32,16 @@ func stylesheetBuilt() bool {
 }
 
 // TestSystem_CoreFlow drives the started app the way a new user does,
-// against a migrated database with nothing seeded: health and readiness, the
-// web client, a refused unauthenticated request, then sign-up through real
-// SMTP, verification, login, and a household created and read back.
+// against a freshly migrated database of its own with no users: health and
+// readiness, the web client, a refused unauthenticated request, then sign-up
+// through real SMTP, verification, login, and a household created and read
+// back.
 func TestSystem_CoreFlow(t *testing.T) {
-	app := startApp(t, appOpts{}) // startApp already waited for /health 200 {status:ok}
+	db := freshDatabase(t)
+	if n := countUsers(t, db); n != 0 {
+		t.Fatalf("fresh database has %d users, want 0", n)
+	}
+	app := startApp(t, appOpts{Env: map[string]string{"DATABASE_URL": db}}) // startApp already waited for /health 200 {status:ok}
 
 	t.Run("health and readiness", func(t *testing.T) {
 		var health struct {

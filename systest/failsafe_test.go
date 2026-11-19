@@ -15,7 +15,7 @@ import (
 // TestSystem_FailsSafely tests that the running app handles failure modes safely:
 //  1. Unreachable database: reports /health 200 {status:ok} and /ready 503 {status:unavailable}.
 //  2. Bad configuration: exits non-zero within bounded deadline, logs "configuration error",
-//     and never accepts connections on its port.
+//     and never accepts connections on its port while it is alive.
 //  3. Graceful shutdown: in-flight request finishes, exits 0, and logs "shutdown complete".
 func TestSystem_FailsSafely(t *testing.T) {
 	t.Run("unreachable database", func(t *testing.T) {
@@ -90,7 +90,32 @@ func TestSystem_FailsSafely(t *testing.T) {
 					NoWait: true,
 				})
 
-				code, err := app.Wait(5 * time.Second)
+				// While the process is alive, keep dialling its port: a dial
+				// that connects means the app served before refusing its
+				// configuration. Dialling after exit would prove nothing.
+				addr := strings.TrimPrefix(app.BaseURL, "http://")
+				deadline := time.After(5 * time.Second)
+				dials := 0
+			poll:
+				for {
+					select {
+					case <-app.done:
+						break poll
+					case <-deadline:
+						t.Fatalf("app did not exit within 5s; output:\n%s", app.Output())
+					default:
+					}
+					conn, dialErr := net.DialTimeout("tcp", addr, 50*time.Millisecond)
+					dials++
+					if dialErr == nil {
+						conn.Close()
+						t.Fatalf("app accepted a connection on %s before exiting on bad configuration; output:\n%s", addr, app.Output())
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+				t.Logf("dialled %s %d times while the process was alive; none connected", addr, dials)
+
+				code, err := app.Wait(time.Second)
 				if err != nil {
 					t.Fatalf("app did not exit within timeout: %v", err)
 				}
@@ -101,12 +126,6 @@ func TestSystem_FailsSafely(t *testing.T) {
 				out := app.Output()
 				if !strings.Contains(out, "configuration error") {
 					t.Fatalf("expected output to contain %q, got:\n%s", "configuration error", out)
-				}
-
-				// Verify port never accepted connections
-				_, dialErr := net.DialTimeout("tcp", strings.TrimPrefix(app.BaseURL, "http://"), 200*time.Millisecond)
-				if dialErr == nil {
-					t.Fatalf("expected connection to %s to be refused, but connected successfully", app.BaseURL)
 				}
 			})
 		}

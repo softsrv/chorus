@@ -58,6 +58,8 @@ jobs:
         run: go test -tags systest -p 1 ./systest/...
       - name: Push Docker image
         if: inputs.push
+        # sha-<commit> first, latest last: a failed second push never leaves
+        # latest pointing at an image whose sha tag was not pushed.
         run: |
-          docker push trriplejay/chorus:latest
           docker push trriplejay/chorus:sha-${{ github.sha }}
+          docker push trriplejay/chorus:latest
