@@ -721,7 +721,9 @@ func TestGoogleCalendar_NoRefreshToken(t *testing.T) {
 		fake.set(func(f *fakeCalendarGoogle) {
 			f.codeSub = "google-sub-A"
 			f.refreshSubs["stored-refresh-R"] = "google-sub-A"
+			f.customAccess = "new-access-from-code"
 		})
+		t.Cleanup(func() { fake.set(func(f *fakeCalendarGoogle) { f.customAccess = "" }) })
 		status, st := s.connectCode(u.AccessToken, "code-keeprefresh")
 		if status != http.StatusOK {
 			t.Fatalf("status %d, want 200", status)
@@ -730,8 +732,11 @@ func TestGoogleCalendar_NoRefreshToken(t *testing.T) {
 		if got := s.decrypt(c.RefreshTokenEnc); got != "stored-refresh-R" {
 			t.Errorf("refresh token = %q, want the stored R", got)
 		}
-		if got := s.decrypt(c.AccessTokenEnc); got == "old-access" || got != fake.lastIssued() {
-			t.Errorf("access token = %q, want the new %q", got, fake.lastIssued())
+		// The same-account check mints a token from the stored refresh token
+		// after the exchange, so the stored access token is the exchange's,
+		// not the last token the fake issued.
+		if got := s.decrypt(c.AccessTokenEnc); got != "new-access-from-code" {
+			t.Errorf("access token = %q, want the code exchange's %q", got, "new-access-from-code")
 		}
 		if st.Status != "connected" {
 			t.Errorf("status = %+v, want connected", st)
