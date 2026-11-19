@@ -43,6 +43,14 @@ type Querier interface {
 	// marked done before streaks existed); neither is recomputed from NOW().
 	ApproveCompletion(ctx context.Context, arg ApproveCompletionParams) (ApproveCompletionRow, error)
 	ApproveRewardRedemption(ctx context.Context, arg ApproveRewardRedemptionParams) (RewardRedemption, error)
+	// Assigns a quest to the member a schedule names, at now (the rollover's
+	// instant, or the moment a schedule for today is stored), under ClaimQuest's
+	// rules: the quest is not held, not resting (available_at at or before now)
+	// and the member, read only from this household, is within its age range. The
+	// quest is left as Accept leaves it: claimed_by and claimed_at set,
+	// claim_expires_at the household-local midnight ending the day of now. No row
+	// when the quest is not free. The caller holds the household's member locks.
+	AssignScheduledQuest(ctx context.Context, arg AssignScheduledQuestParams) (uuid.UUID, error)
 	// Takes a member who is leaving the household off every completion still
 	// waiting for approval. Their quest_completion_members row goes. Where they
 	// marked it done, the marker moves first to the earliest remaining recorded
@@ -95,6 +103,15 @@ type Querier interface {
 	// on that side.
 	CreateHouseholdQuest(ctx context.Context, arg CreateHouseholdQuestParams) (HouseholdQuest, error)
 	CreateHouseholdReward(ctx context.Context, arg CreateHouseholdRewardParams) (HouseholdReward, error)
+	// Scheduled quests: the admin's one-off and repeated schedules and the per-household
+	// rollover that assigns them at the household's local midnight. Every
+	// statement that reads or writes a household's rows is keyed by its
+	// household_id.
+	// Stores a schedule of one of the household's quests for one of its
+	// members. The quest and the member are read only from this household: a
+	// quest or member of another household (or none) matches no row and nothing
+	// is written. Returns the schedule with the quest's and member's names.
+	CreateQuestSchedule(ctx context.Context, arg CreateQuestScheduleParams) (CreateQuestScheduleRow, error)
 	// A member's request to redeem a reward, waiting for the administrator, with
 	// the reward's description and cost snapshotted. A request for a reward the
 	// member already has pending writes nothing and returns no row (the partial
@@ -106,6 +123,13 @@ type Querier interface {
 	DeleteEvent(ctx context.Context, arg DeleteEventParams) (int64, error)
 	DeleteExpiredRefreshTokens(ctx context.Context) (int64, error)
 	DeleteFamilyMember(ctx context.Context, arg DeleteFamilyMemberParams) (int64, error)
+	// Ends the one-off schedules ListDueSchedules just judged (same window and
+	// schedule_id): those assigned and those skipped because the quest was held
+	// or resting. A schedule skipped because the member is outside the quest's
+	// age range is kept for the admin to see; it is never due again, since its
+	// date is now at or before the household's last rollover date. A repeated
+	// schedule is never deleted here: it stays until the admin removes it.
+	DeleteFinishedSchedules(ctx context.Context, arg DeleteFinishedSchedulesParams) (int64, error)
 	// Returns the deleted row so its token can be revoked at Google afterwards.
 	DeleteGoogleCalendarConnectionByUser(ctx context.Context, userID uuid.UUID) (GoogleCalendarConnection, error)
 	DeleteHousehold(ctx context.Context, id uuid.UUID) error
@@ -114,11 +138,20 @@ type Querier interface {
 	DeleteHouseholdCombo(ctx context.Context, arg DeleteHouseholdComboParams) (int64, error)
 	DeleteHouseholdQuest(ctx context.Context, arg DeleteHouseholdQuestParams) (int64, error)
 	DeleteHouseholdReward(ctx context.Context, arg DeleteHouseholdRewardParams) (int64, error)
+	DeleteQuestSchedule(ctx context.Context, arg DeleteQuestScheduleParams) (int64, error)
 	// Deletes every household where the user is the only member.
 	DeleteSoleMemberHouseholds(ctx context.Context, userID uuid.UUID) error
 	DeleteStalePasswordResetTokens(ctx context.Context) (int64, error)
 	DeleteStaleVerificationCodes(ctx context.Context) (int64, error)
 	DeleteUserByID(ctx context.Context, id uuid.UUID) error
+	// The household's part of the end-of-day rule (INT-0176), at now: every held
+	// quest of the household whose claim has run out (claim_expires_at at or
+	// before now) goes back to the pool exactly as ExpireQuestClaim leaves it:
+	// every member on it drops it and the holder, claimed_at, done_at and
+	// claim_expires_at are cleared. No completion is recorded, no points move and
+	// available_at is left as it is. The caller holds the household's member
+	// locks first.
+	ExpireHouseholdQuestClaims(ctx context.Context, arg ExpireHouseholdQuestClaimsParams) (int64, error)
 	// Returns a quest whose claim has run out to the pool: every member on it
 	// drops it (all its participant rows go) and the holder, claimed_at, done_at
 	// and claim_expires_at are cleared, in one statement. No completion is
@@ -146,6 +179,11 @@ type Querier interface {
 	// reads it.
 	GetHouseholdQuestView(ctx context.Context, arg GetHouseholdQuestViewParams) (GetHouseholdQuestViewRow, error)
 	GetHouseholdReward(ctx context.Context, arg GetHouseholdRewardParams) (HouseholdReward, error)
+	// The household's local date at now and the last date it rolled over (NULL
+	// when it never has). Run as a statement of its own after
+	// LockHouseholdForRollover, so it reads a rollover that committed while the
+	// lock waited.
+	GetHouseholdRolloverState(ctx context.Context, arg GetHouseholdRolloverStateParams) (GetHouseholdRolloverStateRow, error)
 	GetMemberPendingRedemptionForReward(ctx context.Context, arg GetMemberPendingRedemptionForRewardParams) (RewardRedemption, error)
 	GetMemberQuestStreak(ctx context.Context, arg GetMemberQuestStreakParams) (MemberQuestStreak, error)
 	GetOldestRecentVerificationCode(ctx context.Context, userID uuid.UUID) (pgtype.Timestamptz, error)
@@ -199,6 +237,23 @@ type Querier interface {
 	// the combo locks (LockCombosForQuest), so the award check cannot race
 	// another payer.
 	ListCombosCompletedByMemberOnDay(ctx context.Context, arg ListCombosCompletedByMemberOnDayParams) ([]ListCombosCompletedByMemberOnDayRow, error)
+	// The household's schedules due at now, at most one per quest, for
+	// assignSchedules to assign through AssignScheduledQuest (quests.sql owns the
+	// write to household_quests). A schedule is a candidate when its quest is
+	// free under ClaimQuest's rules: not held (claimed_by IS NULL), not resting
+	// (available_at at or before now) and the member within its age range
+	// (quest_age_eligible). A one-off (repeat false) is due when dated on or
+	// before local_date and after after_date (any date when NULL): it fires on
+	// its date only. A repeated schedule is due whenever it is dated on or before
+	// local_date, whatever after_date is, and is never consumed: it assigns its
+	// quest each time the quest is free at a pass, so the quest's own cooldown
+	// (available_at, set from repeat_days when it is marked done) is its cadence
+	// and the schedule stores no interval. schedule_id, when set, narrows it to
+	// that one schedule. Of several schedules of one quest the one with the
+	// latest date wins (then the earliest created): after missed midnights the
+	// claim is for local_date, so the schedule nearest it is the one assigned and
+	// a one-off dated on an earlier missed day ends with its day.
+	ListDueSchedules(ctx context.Context, arg ListDueSchedulesParams) ([]ListDueSchedulesRow, error)
 	// Events overlapping [range_start, range_end).
 	ListEventsInRange(ctx context.Context, arg ListEventsInRangeParams) ([]Event, error)
 	// Held quests whose claim has run out (claim_expires_at, the household-local
@@ -225,6 +280,15 @@ type Querier interface {
 	// participants: the members on the quest when it is shared, earliest first.
 	ListHouseholdQuests(ctx context.Context, arg ListHouseholdQuestsParams) ([]ListHouseholdQuestsRow, error)
 	ListHouseholdRewards(ctx context.Context, householdID uuid.UUID) ([]HouseholdReward, error)
+	// Households, after after_id in id order and at most max_rows, that have a
+	// schedule still due at now, judged at the household's local date at now
+	// (households.timezone): a one-off dated on or before that date and after
+	// its last rollover date (any date, when it has never rolled over), or a
+	// repeated schedule dated on or before that date while the household has
+	// not yet rolled over to it. A repeated schedule is judged at every local
+	// midnight, so its household is due once each local day. A household with
+	// nothing due is left to the expiry sweep alone.
+	ListHouseholdsDueForRollover(ctx context.Context, arg ListHouseholdsDueForRolloverParams) ([]uuid.UUID, error)
 	ListHouseholdsForUser(ctx context.Context, userID uuid.UUID) ([]ListHouseholdsForUserRow, error)
 	// For each of the given quests of the household, the household's members
 	// whose birthday puts them outside its age range today (quest_age_eligible,
@@ -238,6 +302,8 @@ type Querier interface {
 	// the description and cost snapshotted on the request, so editing or
 	// deleting the reward later never changes the history.
 	ListMemberRewardHistory(ctx context.Context, arg ListMemberRewardHistoryParams) ([]RewardRedemption, error)
+	// The member's schedules with quest details, filtered by household_id and member_id.
+	ListMemberUpcomingSchedules(ctx context.Context, arg ListMemberUpcomingSchedulesParams) ([]ListMemberUpcomingSchedulesRow, error)
 	// Completions waiting for approval, one row each, oldest mark-done first,
 	// with the chore's name, current points and teamwork bonus, the member who
 	// marked it done, and every member it covers (member_ids and member_names,
@@ -254,6 +320,9 @@ type Querier interface {
 	ListQuestLibrary(ctx context.Context) ([]QuestLibrary, error)
 	// The members on one quest, earliest first; none when it is not shared.
 	ListQuestParticipants(ctx context.Context, arg ListQuestParticipantsParams) ([]uuid.UUID, error)
+	// The household's schedules, soonest date first, with the quest's and
+	// member's names.
+	ListQuestSchedules(ctx context.Context, householdID uuid.UUID) ([]ListQuestSchedulesRow, error)
 	// Household reward and reward redemption queries are scoped by household_id.
 	// Membership is checked by the service layer first; the household_id
 	// predicate guarantees a reward or redemption ID from another household can
@@ -271,6 +340,14 @@ type Querier interface {
 	// with the key-share lock a foreign-key check takes, so rows that would point
 	// at this member wait until the transaction ends.
 	LockFamilyMember(ctx context.Context, arg LockFamilyMemberParams) (uuid.UUID, error)
+	// Locks the household row for the rest of the transaction, so one rollover
+	// (or one schedule created for today) of a household runs at a time. FOR NO
+	// KEY UPDATE leaves foreign-key checks against the household unblocked.
+	LockHouseholdForRollover(ctx context.Context, householdID uuid.UUID) (uuid.UUID, error)
+	// Locks every member row of the household, in id order (the order
+	// lockQuestMembers takes them), before any quest row: member first, as
+	// Accept and FamilyService.Remove lock.
+	LockHouseholdMembers(ctx context.Context, householdID uuid.UUID) ([]uuid.UUID, error)
 	// Locks one quest row of the household for the rest of the transaction,
 	// taken in a statement of its own after the caller's member locks. A
 	// statement run after it reads the quest's participants in a snapshot that
@@ -295,6 +372,9 @@ type Querier interface {
 	LockPendingRedemption(ctx context.Context, arg LockPendingRedemptionParams) (RewardRedemption, error)
 	LockUserProvisioning(ctx context.Context, id uuid.UUID) (pgtype.Timestamptz, error)
 	MarkGoogleCalendarConnectionBroken(ctx context.Context, userID uuid.UUID) (int64, error)
+	// Records that the household's schedules up to rollover_date are done. It
+	// never moves the date back.
+	MarkHouseholdRolledOver(ctx context.Context, arg MarkHouseholdRolledOverParams) error
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
 	MarkPasswordResetTokenUsed(ctx context.Context, id uuid.UUID) (int64, error)
 	// A member on the quest marks it done: its holder, or any participant when

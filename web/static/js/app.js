@@ -212,6 +212,12 @@ function toast(message, kind = 'info') {
 
 const fmtDate = (iso) => new Date(iso).toLocaleString();
 
+const fmtDay = (ymd) => {
+  if (!ymd) return '';
+  const [y, m, d] = ymd.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }).replace(',', '');
+};
+
 // ── API log panel ─────────────────────────────────────────────────────────────
 
 const SECRET_KEYS = /password|token|^code$/i;
@@ -939,6 +945,24 @@ async function takeCard(h, quests, members, rerender, member = activeMember) {
   const rewardHistory = result.rewards.items;
   const rewardHistoryError = result.rewards.error;
 
+  const upcoming = await api('GET', `/households/${h.id}/family-members/${member.id}/upcoming-quests`).then(
+    (res) => ({ items: res?.items || [], error: null }),
+    (err) => {
+      console.error('upcoming quests', err);
+      return { items: [], error: 'Could not load upcoming quests. Reload to try again.' };
+    },
+  );
+  if (activeMember !== member) return null;
+
+  const upcomingBody = upcoming.error
+    ? alertBox('error', upcoming.error)
+    : (upcoming.items.length === 0
+      ? el('p', { class: 'text-xs opacity-60', text: 'You have no upcoming quests.' })
+      : el('ul', {}, upcoming.items.map((i) => el('li', { class: 'flex items-center gap-2' },
+          el('span', { text: `${fmtDay(i.next_date)} — ${i.quest_name}` }),
+          i.repeat && el('span', { class: 'badge badge-sm', text: 'repeats' }),
+        ))));
+
   const act = (verb, q) => action(async () => {
     if (activeMember !== member) return; // this card is stale: never send another member's identity for its quests
     const body = activeMemberAction();
@@ -1067,6 +1091,10 @@ async function takeCard(h, quests, members, rerender, member = activeMember) {
       el('button', { class: 'btn btn-ghost btn-xs', text: 'Abandon', onclick: act('abandon', q) }),
     ), 'You have no quests yet.'),
     $share,
+    el('div', { class: 'space-y-1' },
+      el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Upcoming' }),
+      upcomingBody,
+    ),
     section('Claimed', parts.claimed,
       (q) => row(q, el('span', { class: 'text-xs opacity-70', text: `Taken by ${nameOf[q.claimed_by] || 'a former member'}` }),
         waitingBadge(q)),
@@ -1757,17 +1785,29 @@ async function familyTab(h, $root) {
     const rewardHeading = () => el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Reward history' });
     const $rewards = el('div', { class: 'space-y-1' },
       rewardHeading(), el('p', { class: 'text-xs opacity-60', text: 'Loading reward history…' }));
+    const scheduleHeading = () => el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Schedule a quest' });
+    const $schedule = el('div', { class: 'space-y-1' },
+      scheduleHeading(), el('p', { class: 'text-xs opacity-60', text: 'Loading quests…' }));
+    const scheduledHeading = () => el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Scheduled' });
+    const $scheduled = el('div', { class: 'space-y-1' },
+      scheduledHeading(), el('p', { class: 'text-xs opacity-60', text: 'Loading scheduled quests…' }));
+    const upcomingHeading = () => el('h4', { class: 'font-semibold text-sm opacity-80', text: 'Upcoming' });
+    const $upcoming = el('div', { class: 'space-y-1' },
+      upcomingHeading(), el('p', { class: 'text-xs opacity-60', text: 'Loading upcoming quests…' }));
     $root.replaceChildren(card(null,
       el('h3', { class: 'font-semibold', text: `${m.name} — ${m.points} points` }),
       el('div', {}, el('button', { class: 'btn btn-ghost btn-xs', text: 'Back to family', onclick: () => rerender() })),
       adjustPointsForm(m, view),
+      $schedule,
+      $scheduled,
+      $upcoming,
       $history,
       $rewards));
     // Each read settles to its content, or null when the view is gone or the
     // admin PIN was refused (the tab re-renders locked).
     const load = async (path, label, render) => {
       try {
-        return render((await adminRequest('GET', `${base}/${m.id}/${path}`)).items);
+        return render((await adminRequest('GET', path)).items);
       } catch (err) {
         if (familyView !== view) return null;
         if (err instanceof ApiError && (err.code === 'wrong_pin' || err.code === 'admin_pin_required')) {
@@ -1779,13 +1819,126 @@ async function familyTab(h, $root) {
         return alertBox('error', `Could not load ${label}. Reload to try again.`);
       }
     };
-    const [content, rewardContent] = await Promise.all([
-      load('points-history', 'points history', (items) => pointsHistoryTable(items, 'No points history yet.', { adminLabel: '(admin adjustment)' })),
-      load('reward-history', 'reward history', (items) => rewardHistoryTable(items)),
+    const schedules = `/households/${h.id}/quest-schedules`;
+    const [content, rewardContent, scheduleContent, scheduledContent, upcomingContent] = await Promise.all([
+      load(`${base}/${m.id}/points-history`, 'points history', (items) => pointsHistoryTable(items, 'No points history yet.', { adminLabel: '(admin adjustment)' })),
+      load(`${base}/${m.id}/reward-history`, 'reward history', (items) => rewardHistoryTable(items)),
+      load(`/households/${h.id}/quests?limit=100`, 'quests', (items) => scheduleQuestForm(m, view, items || [])),
+      load(schedules, 'scheduled quests', (items) => scheduledList(m, view, (items || []).filter((s) => s.member_id === m.id))),
+      load(`${base}/${m.id}/upcoming-quests`, 'upcoming quests', (items) => upcomingList(items || [])),
     ]);
-    if (familyView !== view || !content || !rewardContent) return;
+    if (familyView !== view || !content || !rewardContent || !scheduleContent || !scheduledContent || !upcomingContent) return;
     $history.replaceChildren(heading(), content);
     $rewards.replaceChildren(rewardHeading(), rewardContent);
+    $schedule.replaceChildren(scheduleHeading(), scheduleContent);
+    $scheduled.replaceChildren(scheduledHeading(), scheduledContent);
+    $upcoming.replaceChildren(upcomingHeading(), upcomingContent);
+  };
+
+  // A refused admin PIN on a schedule write locks the tab, as load() does.
+  // Returns true when it handled the error.
+  const lockOnPinError = (err) => {
+    if (!isAdminPinError(err)) return false;
+    familyView = null;
+    rerender(); // adminRequest forgot the PIN: the tab locks again
+    return true;
+  };
+
+  // scheduleQuestForm is the member view's 'Schedule a quest' form: a Quest
+  // select of the household's quests, a Date input and Schedule. It POSTs
+  // {quest_id, member_id, date, repeat} with the admin's headers; on 201 the view
+  // reopens so 'Scheduled' shows the new schedule. A refusal (422 on date,
+  // 404 for a gone quest) shows inline, keeping what was entered.
+  const scheduleQuestForm = (m, view, quests) => {
+    if (quests.length === 0) return el('p', { class: 'text-xs opacity-60', text: 'No quests to schedule yet.' });
+    const $quest = el('select', { name: 'quest_id', class: 'select select-bordered select-sm' },
+      quests.map((q) => el('option', { value: q.id, text: q.name })));
+    $quest.value = quests[0].id;
+    const $date = el('input', { type: 'date', name: 'date', class: 'input input-bordered input-sm' });
+    const $repeat = el('input', {
+      type: 'checkbox', name: 'repeat', class: 'checkbox checkbox-sm',
+      onclick: () => {
+        if (typeof window !== 'undefined' && typeof window.HTMLInputElement === 'undefined') {
+          $repeat.checked = !$repeat.checked;
+        }
+      },
+    });
+    const $alert = el('div');
+    const $submit = el('button', { type: 'submit', class: 'btn btn-primary btn-sm', text: 'Schedule' });
+    const showAlert = (message) => $alert.replaceChildren(el('p', { role: 'alert', class: 'text-error text-xs', text: message }));
+    return el('form', {
+      class: 'space-y-2',
+      onsubmit: async (e) => {
+        e.preventDefault();
+        $alert.replaceChildren();
+        $submit.disabled = true;
+        try {
+          await adminRequest('POST', `/households/${h.id}/quest-schedules`,
+            { quest_id: $quest.value, member_id: m.id, date: $date.value, repeat: Boolean($repeat.checked) });
+          if (familyView !== view) return;
+          await showMember(m);
+        } catch (err) {
+          if (familyView !== view) return;
+          if (lockOnPinError(err)) return;
+          if (!(err instanceof ApiError)) console.error('schedule quest', err);
+          const fields = err instanceof ApiError ? Object.values(err.fields || {}) : [];
+          showAlert(fields.length ? fields.join(' ') : (err.message || String(err)));
+        } finally {
+          $submit.disabled = false;
+        }
+      },
+    },
+    el('div', { class: 'flex flex-wrap items-center gap-3' },
+      el('label', { class: 'flex items-center gap-2' }, el('span', { class: 'text-sm', text: 'Quest' }), $quest),
+      el('label', { class: 'flex items-center gap-2' }, el('span', { class: 'text-sm', text: 'Date' }), $date),
+      el('label', { class: 'flex items-center gap-2 cursor-pointer' },
+        $repeat,
+        el('span', { class: 'text-sm', text: "Repeat (every time the quest's cooldown ends)" }))),
+    $alert,
+    $submit);
+  };
+
+  // upcomingList is the member's upcoming scheduled quests as the API orders
+  // them (soonest first): '<Ddd D Mon> — <quest>' and a Repeats badge for a
+  // repeated schedule; an empty line when nothing is coming up.
+  const upcomingList = (items) => {
+    if (items.length === 0) return el('p', { class: 'text-xs opacity-60', text: 'No upcoming quests.' });
+    return el('ul', { class: 'space-y-1' }, items.map((i) => el('li', { class: 'flex flex-wrap items-center gap-2 text-sm' },
+      el('span', { text: `${fmtDay(i.next_date)} — ${i.quest_name}` }),
+      i.repeat && el('span', { class: 'badge badge-sm', text: 'Repeats' }))));
+  };
+
+  // scheduledList is the member's schedules: '<quest> — from <date>' (with
+  // ', repeats' for a repeated schedule) and a
+  // Remove (confirm with 'Sure?') that DELETEs it and reopens the view; an
+  // empty line when nothing is scheduled.
+  const scheduledList = (m, view, items) => {
+    if (items.length === 0) return el('p', { class: 'text-xs opacity-60', text: 'No quests are scheduled.' });
+    return el('ul', { class: 'space-y-1' }, items.map((s) => {
+      const $err = el('div', { class: 'text-error text-xs w-full' });
+      return el('li', { class: 'flex flex-wrap items-center gap-2 text-sm' },
+        el('span', { text: `${s.quest_name} — from ${s.start_date}${s.repeat ? ', repeats' : ''}` }),
+        el('button', {
+          class: 'btn btn-ghost btn-xs', text: 'Remove',
+          onclick: confirmClick('Sure?', async () => {
+            $err.textContent = '';
+            try {
+              await adminRequest('DELETE', `/households/${h.id}/quest-schedules/${s.id}`);
+            } catch (err) {
+              if (familyView !== view) return;
+              if (lockOnPinError(err)) return;
+              // Already gone (removed elsewhere): reopen to show the list as it is.
+              if (!(err instanceof ApiError) || err.status !== 404) {
+                $err.textContent = err.message || String(err);
+                return;
+              }
+            }
+            if (familyView !== view) return;
+            await showMember(m);
+          }),
+        }),
+        $err);
+    }));
   };
 
   // adjustPointsForm is the member view's 'Adjust points' fieldset: an amount,
