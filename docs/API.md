@@ -44,7 +44,9 @@ Token pair response:
  "refresh_token": "…", "refresh_token_expires_at": "…", "user": {…}}
 ```
 
-Native apps: store the refresh token in Keychain / Android Keystore, and send `device_name` (e.g. "Sam's iPhone") on login/refresh/verify so the sessions list is readable.
+Native apps: store the refresh token in Keychain / Android Keystore, and send `device_name` (e.g. "Sam's iPhone") on login/refresh/verify/google so the sessions list is readable.
+
+For Google sign-in (`POST /auth/google`), the web uses Google Identity Services, iOS the GoogleSignIn SDK, and Android Credential Manager with Sign in with Google. Before signing in, apps call `GET /auth/config`, which returns the web client ID and the `google_sign_in` and `google_calendar` flags (`{"google_sign_in": bool, "google_calendar": bool, "google_client_id": string}`). When Google sign-in is not configured on the server, `google_sign_in` reports `false` and `POST /auth/google` responds with `404 not_found` without contacting Google. For `aud`, the server accepts the configured web client ID, plus optional iOS and Android client IDs when configured; when the iOS or Android client ID is not configured, only web tokens are accepted. Every failure (forged signature, expired token, untrusted issuer, unauthorized `aud`, unverified email, or an email conflict with an unverified account or a different Google identity) returns one generic error (`401 invalid_credentials`), revealing nothing about why, and creates no account or session.
 
 ## Endpoints
 
@@ -52,8 +54,10 @@ Native apps: store the refresh token in Keychain / Android Keystore, and send `d
 
 | Method & path | Body | Response |
 |---|---|---|
+| `GET /auth/config` | none | `{google_sign_in, google_calendar, google_client_id}` |
 | `POST /auth/register` | `email, password, display_name` | `202` |
 | `POST /auth/login` | `email, password, device_name?` | `200` token pair |
+| `POST /auth/google` | `id_token, device_name?` | `200` token pair |
 | `POST /auth/refresh` | `refresh_token, device_name?` | `200` token pair |
 | `POST /auth/verify-email` | `token, device_name?` | `200` token pair |
 | `POST /auth/forgot-password` | `email` | `202` (always) |
