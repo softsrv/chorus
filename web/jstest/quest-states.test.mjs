@@ -1,5 +1,5 @@
 // Unit tests for the Quests tab's empty states, streak bonus and combos read.
-// Run: node --test web/jstest/
+// Run: node --test web/jstest/quest-states.test.mjs (whole suite: make test-js)
 
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';

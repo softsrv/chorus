@@ -1,5 +1,5 @@
 // Unit tests for quest age ranges and the Family tab's birthdays.
-// Run: node --test web/jstest/
+// Run: node --test web/jstest/quest-ages.test.mjs (whole suite: make test-js)
 
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';

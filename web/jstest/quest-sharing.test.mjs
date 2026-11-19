@@ -1,5 +1,5 @@
 // Unit tests for quest sharing in the Quests tab.
-// Run: node --test web/jstest/
+// Run: node --test web/jstest/quest-sharing.test.mjs (whole suite: make test-js)
 
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
