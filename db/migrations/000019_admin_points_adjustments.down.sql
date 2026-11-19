@@ -1,4 +1,4 @@
--- 000018_admin_points_adjustments.down.sql
+-- 000019_admin_points_adjustments.down.sql
 -- Back to the 000016 constraints. The old constraints cannot hold an admin
 -- row (kind 'admin', possibly negative), so while any exists this migration
 -- refuses and changes nothing: going down would otherwise fail midway or

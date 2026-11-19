@@ -23,7 +23,7 @@ make vet / fmt / lint
 
 # Database
 make migrate-up | migrate-down | migrate-status
-make migrate-roundtrip-test       # Round-trip (down -all then up) on chorus_test; every new migration needs a working .down.sql
+make migrate-roundtrip-test       # Round-trip (down -all then up) on chorus_test; every new migration needs a working .down.sql; TestIntegration_MigrationsRoundTrip (internal/app) checks each down restores the prior schema snapshot
 make migrate-create NAME=<name>
 make sqlc-generate                # Regenerate internal/db/ from db/queries/
 make services-reset               # Wipe the local DB volume
