@@ -17,7 +17,7 @@ The contract the iOS/Android apps and the web test client build against. Base pa
 
 | Status | `code` | Meaning |
 |---|---|---|
-| 400 | `invalid_json`, `invalid_token` | Malformed request or bad emailed token |
+| 400 | `invalid_json`, `invalid_token`, `google_calendar_failed` | `invalid_json` / `invalid_token`: malformed request or bad emailed token. `google_calendar_failed`: `POST /me/google-calendar/connect` could not exchange the code (rejected, reused, empty, missing required scopes or unsupported platform); the message is generic, no Google text. |
 | 401 | `unauthenticated`, `token_expired`, `invalid_credentials`, `invalid_refresh_token`, `google_sign_in_failed` | See auth flow below |
 | 403 | `email_not_verified`, `forbidden`, `wrong_pin`, `admin_pin_required` | `wrong_pin`: a member or admin PIN did not match. `admin_pin_required`: an admin PIN is set and the `X-Admin-PIN` header was missing. Neither signs you out. |
 | 404 | `not_found` | |

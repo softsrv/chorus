@@ -591,6 +591,17 @@ func TestGoogleCalendar_CallbackRefusals(t *testing.T) {
 			if status < 400 || status >= 500 {
 				t.Fatalf("status = %d, want 4xx", status)
 			}
+			var res struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal([]byte(body), &res); err != nil {
+				t.Fatalf("decode body: %v (body: %q)", err, body)
+			}
+			if res.Error.Code != "google_calendar_failed" {
+				t.Errorf("error.code = %q, want %q; body: %s", res.Error.Code, "google_calendar_failed", body)
+			}
 			for _, leak := range []string{sentinel, "invalid_grant", "oauth2", "pgx", "sql", "exchange"} {
 				if strings.Contains(body, leak) {
 					t.Errorf("response leaks %q: body %q", leak, body)
