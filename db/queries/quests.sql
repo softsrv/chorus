@@ -82,8 +82,15 @@ DELETE FROM household_quests WHERE household_id = $1 AND id = $2;
 -- the quest's age range (quest_age_eligible, in the household's timezone: no
 -- birthday or no limits always pass), read only from this household's
 -- members; a member out of range, or not in this household, gets no row.
+-- Accepting stamps claim_expires_at: the household-local midnight that ends
+-- today (quest_claim_expires_at), after which the expiry sweep returns the
+-- quest to the pool.
 UPDATE household_quests
-SET claimed_by = sqlc.arg(member_id), claimed_at = NOW(), updated_at = NOW()
+SET claimed_by = sqlc.arg(member_id), claimed_at = NOW(), updated_at = NOW(),
+    claim_expires_at = (
+        SELECT quest_claim_expires_at(NOW(), h.timezone)
+        FROM households h WHERE h.id = household_quests.household_id
+    )
 WHERE household_quests.household_id = sqlc.arg(household_id) AND household_quests.id = sqlc.arg(id)
   AND household_quests.claimed_by IS NULL
   AND (household_quests.available_at IS NULL OR household_quests.available_at <= NOW())
@@ -176,7 +183,7 @@ WHERE q.household_id = m.household_id AND q.id = m.id
 RETURNING q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes,
           q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at,
           q.created_at, q.updated_at, q.shareable, q.teamwork_bonus, q.streak_bonus,
-          q.min_age, q.max_age;
+          q.min_age, q.max_age, q.claim_expires_at;
 
 -- name: ShareQuest :many
 -- The holder of a shareable quest adds another member of the household to
@@ -307,6 +314,45 @@ SET claimed_by = m.next_member,
     updated_at = NOW()
 FROM mine m
 WHERE q.household_id = m.household_id AND q.id = m.id AND m.holder;
+
+-- name: ListExpiredQuestClaims :many
+-- Held quests whose claim has run out (claim_expires_at, the household-local
+-- midnight ending the day the quest was accepted, is now or past), across
+-- every household, earliest deadline first, at most max_rows per run. The
+-- expiry sweep releases each one in a transaction of its own
+-- (ExpireQuestClaim); what it misses is listed again on the next run.
+SELECT q.household_id, q.id, q.claimed_by
+FROM household_quests q
+WHERE q.claimed_by IS NOT NULL AND q.claim_expires_at <= NOW()
+ORDER BY q.claim_expires_at, q.id
+LIMIT sqlc.arg(max_rows);
+
+-- name: ExpireQuestClaim :one
+-- Returns a quest whose claim has run out to the pool: every member on it
+-- drops it (all its participant rows go) and the holder, claimed_at, done_at
+-- and claim_expires_at are cleared, in one statement. No completion is
+-- recorded, no points move and available_at is left as it is. The expiry is
+-- re-checked here: the caller holds the row locks of every member on the
+-- quest and then the quest's row lock (LockHouseholdQuest), so a quest marked
+-- done, abandoned or released meanwhile is no longer held and matches no row.
+-- A quest not in this household matches no row either.
+WITH expired AS (
+    SELECT q.household_id, q.id
+    FROM household_quests q
+    WHERE q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id)
+      AND q.claimed_by IS NOT NULL AND q.claim_expires_at <= NOW()
+), dropped AS (
+    DELETE FROM household_quest_participants p
+    USING expired e
+    WHERE p.household_id = e.household_id AND p.quest_id = e.id
+    RETURNING p.member_id
+)
+UPDATE household_quests q
+SET claimed_by = NULL, claimed_at = NULL, done_at = NULL, claim_expires_at = NULL,
+    updated_at = NOW()
+FROM expired e
+WHERE q.household_id = e.household_id AND q.id = e.id
+RETURNING q.id;
 
 -- name: LockMemberPendingCompletions :many
 -- Locks, in id order, every pending completion of the household that the
@@ -495,7 +541,7 @@ WITH done AS (
 SELECT d.id, d.household_id, d.library_id, d.name, d.points, d.repeat_days, d.notes,
        d.claimed_by, d.claimed_at, d.done_at, d.completed_at, d.available_at,
        d.created_at, d.updated_at, d.shareable, d.teamwork_bonus, d.streak_bonus,
-       d.min_age, d.max_age
+       d.min_age, d.max_age, d.claim_expires_at
 FROM done d;
 
 -- name: GetMemberQuestStreak :one

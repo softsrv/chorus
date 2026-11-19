@@ -54,7 +54,7 @@ WHERE q.household_id = m.household_id AND q.id = m.id
 RETURNING q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes,
           q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at,
           q.created_at, q.updated_at, q.shareable, q.teamwork_bonus, q.streak_bonus,
-          q.min_age, q.max_age
+          q.min_age, q.max_age, q.claim_expires_at
 `
 
 type AbandonQuestParams struct {
@@ -98,6 +98,7 @@ func (q *Queries) AbandonQuest(ctx context.Context, arg AbandonQuestParams) (Hou
 		&i.StreakBonus,
 		&i.MinAge,
 		&i.MaxAge,
+		&i.ClaimExpiresAt,
 	)
 	return i, err
 }
@@ -248,7 +249,11 @@ func (q *Queries) CancelMemberPendingCompletions(ctx context.Context, arg Cancel
 
 const claimQuest = `-- name: ClaimQuest :one
 UPDATE household_quests
-SET claimed_by = $1, claimed_at = NOW(), updated_at = NOW()
+SET claimed_by = $1, claimed_at = NOW(), updated_at = NOW(),
+    claim_expires_at = (
+        SELECT quest_claim_expires_at(NOW(), h.timezone)
+        FROM households h WHERE h.id = household_quests.household_id
+    )
 WHERE household_quests.household_id = $2 AND household_quests.id = $3
   AND household_quests.claimed_by IS NULL
   AND (household_quests.available_at IS NULL OR household_quests.available_at <= NOW())
@@ -258,7 +263,7 @@ WHERE household_quests.household_id = $2 AND household_quests.id = $3
       WHERE m.household_id = $2 AND m.id = $1
         AND quest_age_eligible(m.birthday, h.timezone, household_quests.min_age, household_quests.max_age)
   )
-RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at, shareable, teamwork_bonus, streak_bonus, min_age, max_age
+RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at, shareable, teamwork_bonus, streak_bonus, min_age, max_age, claim_expires_at
 `
 
 type ClaimQuestParams struct {
@@ -273,6 +278,9 @@ type ClaimQuestParams struct {
 // the quest's age range (quest_age_eligible, in the household's timezone: no
 // birthday or no limits always pass), read only from this household's
 // members; a member out of range, or not in this household, gets no row.
+// Accepting stamps claim_expires_at: the household-local midnight that ends
+// today (quest_claim_expires_at), after which the expiry sweep returns the
+// quest to the pool.
 func (q *Queries) ClaimQuest(ctx context.Context, arg ClaimQuestParams) (HouseholdQuest, error) {
 	row := q.db.QueryRow(ctx, claimQuest, arg.MemberID, arg.HouseholdID, arg.ID)
 	var i HouseholdQuest
@@ -296,6 +304,7 @@ func (q *Queries) ClaimQuest(ctx context.Context, arg ClaimQuestParams) (Househo
 		&i.StreakBonus,
 		&i.MinAge,
 		&i.MaxAge,
+		&i.ClaimExpiresAt,
 	)
 	return i, err
 }
@@ -303,7 +312,7 @@ func (q *Queries) ClaimQuest(ctx context.Context, arg ClaimQuestParams) (Househo
 const createHouseholdQuest = `-- name: CreateHouseholdQuest :one
 INSERT INTO household_quests (id, household_id, library_id, name, points, repeat_days, notes, shareable, teamwork_bonus, streak_bonus, min_age, max_age, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
-RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at, shareable, teamwork_bonus, streak_bonus, min_age, max_age
+RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at, shareable, teamwork_bonus, streak_bonus, min_age, max_age, claim_expires_at
 `
 
 type CreateHouseholdQuestParams struct {
@@ -359,6 +368,7 @@ func (q *Queries) CreateHouseholdQuest(ctx context.Context, arg CreateHouseholdQ
 		&i.StreakBonus,
 		&i.MinAge,
 		&i.MaxAge,
+		&i.ClaimExpiresAt,
 	)
 	return i, err
 }
@@ -380,8 +390,48 @@ func (q *Queries) DeleteHouseholdQuest(ctx context.Context, arg DeleteHouseholdQ
 	return result.RowsAffected(), nil
 }
 
+const expireQuestClaim = `-- name: ExpireQuestClaim :one
+WITH expired AS (
+    SELECT q.household_id, q.id
+    FROM household_quests q
+    WHERE q.household_id = $1 AND q.id = $2
+      AND q.claimed_by IS NOT NULL AND q.claim_expires_at <= NOW()
+), dropped AS (
+    DELETE FROM household_quest_participants p
+    USING expired e
+    WHERE p.household_id = e.household_id AND p.quest_id = e.id
+    RETURNING p.member_id
+)
+UPDATE household_quests q
+SET claimed_by = NULL, claimed_at = NULL, done_at = NULL, claim_expires_at = NULL,
+    updated_at = NOW()
+FROM expired e
+WHERE q.household_id = e.household_id AND q.id = e.id
+RETURNING q.id
+`
+
+type ExpireQuestClaimParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	ID          uuid.UUID `json:"id"`
+}
+
+// Returns a quest whose claim has run out to the pool: every member on it
+// drops it (all its participant rows go) and the holder, claimed_at, done_at
+// and claim_expires_at are cleared, in one statement. No completion is
+// recorded, no points move and available_at is left as it is. The expiry is
+// re-checked here: the caller holds the row locks of every member on the
+// quest and then the quest's row lock (LockHouseholdQuest), so a quest marked
+// done, abandoned or released meanwhile is no longer held and matches no row.
+// A quest not in this household matches no row either.
+func (q *Queries) ExpireQuestClaim(ctx context.Context, arg ExpireQuestClaimParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, expireQuestClaim, arg.HouseholdID, arg.ID)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
 const getHouseholdQuest = `-- name: GetHouseholdQuest :one
-SELECT id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at, shareable, teamwork_bonus, streak_bonus, min_age, max_age FROM household_quests WHERE household_id = $1 AND id = $2
+SELECT id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at, shareable, teamwork_bonus, streak_bonus, min_age, max_age, claim_expires_at FROM household_quests WHERE household_id = $1 AND id = $2
 `
 
 type GetHouseholdQuestParams struct {
@@ -412,12 +462,13 @@ func (q *Queries) GetHouseholdQuest(ctx context.Context, arg GetHouseholdQuestPa
 		&i.StreakBonus,
 		&i.MinAge,
 		&i.MaxAge,
+		&i.ClaimExpiresAt,
 	)
 	return i, err
 }
 
 const getHouseholdQuestView = `-- name: GetHouseholdQuestView :one
-SELECT q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at, q.shareable, q.teamwork_bonus, q.streak_bonus, q.min_age, q.max_age, EXISTS (
+SELECT q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at, q.shareable, q.teamwork_bonus, q.streak_bonus, q.min_age, q.max_age, q.claim_expires_at, EXISTS (
     SELECT 1 FROM quest_completions c
     WHERE c.household_id = q.household_id AND c.quest_id = q.id AND c.status = 'pending'
 ) AS awaiting_approval,
@@ -466,6 +517,7 @@ func (q *Queries) GetHouseholdQuestView(ctx context.Context, arg GetHouseholdQue
 		&i.HouseholdQuest.StreakBonus,
 		&i.HouseholdQuest.MinAge,
 		&i.HouseholdQuest.MaxAge,
+		&i.HouseholdQuest.ClaimExpiresAt,
 		&i.AwaitingApproval,
 		&i.Participants,
 	)
@@ -556,8 +608,47 @@ func (q *Queries) GetQuestLibraryItem(ctx context.Context, id uuid.UUID) (QuestL
 	return i, err
 }
 
+const listExpiredQuestClaims = `-- name: ListExpiredQuestClaims :many
+SELECT q.household_id, q.id, q.claimed_by
+FROM household_quests q
+WHERE q.claimed_by IS NOT NULL AND q.claim_expires_at <= NOW()
+ORDER BY q.claim_expires_at, q.id
+LIMIT $1
+`
+
+type ListExpiredQuestClaimsRow struct {
+	HouseholdID uuid.UUID  `json:"household_id"`
+	ID          uuid.UUID  `json:"id"`
+	ClaimedBy   *uuid.UUID `json:"claimed_by"`
+}
+
+// Held quests whose claim has run out (claim_expires_at, the household-local
+// midnight ending the day the quest was accepted, is now or past), across
+// every household, earliest deadline first, at most max_rows per run. The
+// expiry sweep releases each one in a transaction of its own
+// (ExpireQuestClaim); what it misses is listed again on the next run.
+func (q *Queries) ListExpiredQuestClaims(ctx context.Context, maxRows int32) ([]ListExpiredQuestClaimsRow, error) {
+	rows, err := q.db.Query(ctx, listExpiredQuestClaims, maxRows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListExpiredQuestClaimsRow{}
+	for rows.Next() {
+		var i ListExpiredQuestClaimsRow
+		if err := rows.Scan(&i.HouseholdID, &i.ID, &i.ClaimedBy); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listHouseholdQuests = `-- name: ListHouseholdQuests :many
-SELECT q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at, q.shareable, q.teamwork_bonus, q.streak_bonus, q.min_age, q.max_age, EXISTS (
+SELECT q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at, q.shareable, q.teamwork_bonus, q.streak_bonus, q.min_age, q.max_age, q.claim_expires_at, EXISTS (
     SELECT 1 FROM quest_completions c
     WHERE c.household_id = q.household_id AND c.quest_id = q.id AND c.status = 'pending'
 ) AS awaiting_approval,
@@ -615,6 +706,7 @@ func (q *Queries) ListHouseholdQuests(ctx context.Context, arg ListHouseholdQues
 			&i.HouseholdQuest.StreakBonus,
 			&i.HouseholdQuest.MinAge,
 			&i.HouseholdQuest.MaxAge,
+			&i.HouseholdQuest.ClaimExpiresAt,
 			&i.AwaitingApproval,
 			&i.Participants,
 		); err != nil {
@@ -941,7 +1033,7 @@ WITH done AS (
           WHERE p.household_id = q.household_id AND p.quest_id = q.id
             AND p.member_id = $3::uuid
       ))
-    RETURNING q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at, q.shareable, q.teamwork_bonus, q.streak_bonus, q.min_age, q.max_age, h.timezone
+    RETURNING q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q.notes, q.claimed_by, q.claimed_at, q.done_at, q.completed_at, q.available_at, q.created_at, q.updated_at, q.shareable, q.teamwork_bonus, q.streak_bonus, q.min_age, q.max_age, q.claim_expires_at, h.timezone
 ), streaked AS (
     INSERT INTO member_quest_streaks (
         household_id, member_id, quest_id,
@@ -1003,7 +1095,7 @@ WITH done AS (
 SELECT d.id, d.household_id, d.library_id, d.name, d.points, d.repeat_days, d.notes,
        d.claimed_by, d.claimed_at, d.done_at, d.completed_at, d.available_at,
        d.created_at, d.updated_at, d.shareable, d.teamwork_bonus, d.streak_bonus,
-       d.min_age, d.max_age
+       d.min_age, d.max_age, d.claim_expires_at
 FROM done d
 `
 
@@ -1015,25 +1107,26 @@ type MarkQuestDoneParams struct {
 }
 
 type MarkQuestDoneRow struct {
-	ID            uuid.UUID          `json:"id"`
-	HouseholdID   uuid.UUID          `json:"household_id"`
-	LibraryID     *uuid.UUID         `json:"library_id"`
-	Name          string             `json:"name"`
-	Points        int32              `json:"points"`
-	RepeatDays    int32              `json:"repeat_days"`
-	Notes         string             `json:"notes"`
-	ClaimedBy     *uuid.UUID         `json:"claimed_by"`
-	ClaimedAt     pgtype.Timestamptz `json:"claimed_at"`
-	DoneAt        pgtype.Timestamptz `json:"done_at"`
-	CompletedAt   pgtype.Timestamptz `json:"completed_at"`
-	AvailableAt   pgtype.Timestamptz `json:"available_at"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
-	Shareable     bool               `json:"shareable"`
-	TeamworkBonus int32              `json:"teamwork_bonus"`
-	StreakBonus   int32              `json:"streak_bonus"`
-	MinAge        pgtype.Int4        `json:"min_age"`
-	MaxAge        pgtype.Int4        `json:"max_age"`
+	ID             uuid.UUID          `json:"id"`
+	HouseholdID    uuid.UUID          `json:"household_id"`
+	LibraryID      *uuid.UUID         `json:"library_id"`
+	Name           string             `json:"name"`
+	Points         int32              `json:"points"`
+	RepeatDays     int32              `json:"repeat_days"`
+	Notes          string             `json:"notes"`
+	ClaimedBy      *uuid.UUID         `json:"claimed_by"`
+	ClaimedAt      pgtype.Timestamptz `json:"claimed_at"`
+	DoneAt         pgtype.Timestamptz `json:"done_at"`
+	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
+	AvailableAt    pgtype.Timestamptz `json:"available_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	Shareable      bool               `json:"shareable"`
+	TeamworkBonus  int32              `json:"teamwork_bonus"`
+	StreakBonus    int32              `json:"streak_bonus"`
+	MinAge         pgtype.Int4        `json:"min_age"`
+	MaxAge         pgtype.Int4        `json:"max_age"`
+	ClaimExpiresAt pgtype.Timestamptz `json:"claim_expires_at"`
 }
 
 // A member on the quest marks it done: its holder, or any participant when
@@ -1087,6 +1180,7 @@ func (q *Queries) MarkQuestDone(ctx context.Context, arg MarkQuestDoneParams) (M
 		&i.StreakBonus,
 		&i.MinAge,
 		&i.MaxAge,
+		&i.ClaimExpiresAt,
 	)
 	return i, err
 }
@@ -1440,7 +1534,7 @@ SET name = $3, points = $4, repeat_days = $5, notes = $6,
     shareable = $7, teamwork_bonus = $8, streak_bonus = $9,
     min_age = $10, max_age = $11, updated_at = NOW()
 WHERE household_id = $1 AND id = $2
-RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at, shareable, teamwork_bonus, streak_bonus, min_age, max_age
+RETURNING id, household_id, library_id, name, points, repeat_days, notes, claimed_by, claimed_at, done_at, completed_at, available_at, created_at, updated_at, shareable, teamwork_bonus, streak_bonus, min_age, max_age, claim_expires_at
 `
 
 type UpdateHouseholdQuestParams struct {
@@ -1497,6 +1591,7 @@ func (q *Queries) UpdateHouseholdQuest(ctx context.Context, arg UpdateHouseholdQ
 		&i.StreakBonus,
 		&i.MinAge,
 		&i.MaxAge,
+		&i.ClaimExpiresAt,
 	)
 	return i, err
 }

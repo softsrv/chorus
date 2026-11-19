@@ -75,6 +75,9 @@ type Querier interface {
 	// the quest's age range (quest_age_eligible, in the household's timezone: no
 	// birthday or no limits always pass), read only from this household's
 	// members; a member out of range, or not in this household, gets no row.
+	// Accepting stamps claim_expires_at: the household-local midnight that ends
+	// today (quest_claim_expires_at), after which the expiry sweep returns the
+	// quest to the pool.
 	ClaimQuest(ctx context.Context, arg ClaimQuestParams) (HouseholdQuest, error)
 	// Single use: conditional on used_at IS NULL, unexpired, and the flow's
 	// purpose, so a state can't be replayed or used to complete another flow.
@@ -120,6 +123,15 @@ type Querier interface {
 	DeleteStaleSignInHandoffs(ctx context.Context) (int64, error)
 	DeleteStaleVerificationCodes(ctx context.Context) (int64, error)
 	DeleteUserByID(ctx context.Context, id uuid.UUID) error
+	// Returns a quest whose claim has run out to the pool: every member on it
+	// drops it (all its participant rows go) and the holder, claimed_at, done_at
+	// and claim_expires_at are cleared, in one statement. No completion is
+	// recorded, no points move and available_at is left as it is. The expiry is
+	// re-checked here: the caller holds the row locks of every member on the
+	// quest and then the quest's row lock (LockHouseholdQuest), so a quest marked
+	// done, abandoned or released meanwhile is no longer held and matches no row.
+	// A quest not in this household matches no row either.
+	ExpireQuestClaim(ctx context.Context, arg ExpireQuestClaimParams) (uuid.UUID, error)
 	GetAdminPin(ctx context.Context, householdID uuid.UUID) (HouseholdAdminPin, error)
 	GetEvent(ctx context.Context, arg GetEventParams) (Event, error)
 	GetFamilyMember(ctx context.Context, arg GetFamilyMemberParams) (FamilyMember, error)
@@ -195,6 +207,12 @@ type Querier interface {
 	ListCombosCompletedByMemberOnDay(ctx context.Context, arg ListCombosCompletedByMemberOnDayParams) ([]ListCombosCompletedByMemberOnDayRow, error)
 	// Events overlapping [range_start, range_end).
 	ListEventsInRange(ctx context.Context, arg ListEventsInRangeParams) ([]Event, error)
+	// Held quests whose claim has run out (claim_expires_at, the household-local
+	// midnight ending the day the quest was accepted, is now or past), across
+	// every household, earliest deadline first, at most max_rows per run. The
+	// expiry sweep releases each one in a transaction of its own
+	// (ExpireQuestClaim); what it misses is listed again on the next run.
+	ListExpiredQuestClaims(ctx context.Context, maxRows int32) ([]ListExpiredQuestClaimsRow, error)
 	// Every member of the household with their birthday and their age today in
 	// the household's timezone (quest_member_age). As above, age is 0 and not
 	// meaningful for a member with no birthday.
