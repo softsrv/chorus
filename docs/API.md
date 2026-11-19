@@ -18,7 +18,7 @@ The contract the iOS/Android apps and the web test client build against. Base pa
 | Status | `code` | Meaning |
 |---|---|---|
 | 400 | `invalid_json`, `invalid_token` | Malformed request or bad emailed token |
-| 401 | `unauthenticated`, `token_expired`, `invalid_credentials`, `invalid_refresh_token` | See auth flow below |
+| 401 | `unauthenticated`, `token_expired`, `invalid_credentials`, `invalid_refresh_token`, `google_sign_in_failed` | See auth flow below |
 | 403 | `email_not_verified`, `forbidden`, `wrong_pin`, `admin_pin_required` | `wrong_pin`: a member or admin PIN did not match. `admin_pin_required`: an admin PIN is set and the `X-Admin-PIN` header was missing. Neither signs you out. |
 | 404 | `not_found` | |
 | 409 | `already_verified`, `quest_taken`, `already_participant`, `age_restricted` | Conflict: email is already verified, or quest conflict (already taken, member already participant, or a member outside the quest's age range on accept or share). `age_restricted` carries the message `This quest is outside that member's age range.` |
@@ -46,7 +46,7 @@ Token pair response:
 
 Native apps: store the refresh token in Keychain / Android Keystore, and send `device_name` (e.g. "Sam's iPhone") on login/refresh/verify/google so the sessions list is readable.
 
-For Google sign-in (`POST /auth/google`), the web uses Google Identity Services, iOS the GoogleSignIn SDK, and Android Credential Manager with Sign in with Google. Before signing in, apps call `GET /auth/config`, which returns the web client ID and the `google_sign_in` and `google_calendar` flags (`{"google_sign_in": bool, "google_calendar": bool, "google_client_id": string}`). When Google sign-in is not configured on the server, `google_sign_in` reports `false` and `POST /auth/google` responds with `404 not_found` without contacting Google. For `aud`, the server accepts the configured web client ID, plus optional iOS and Android client IDs when configured; when the iOS or Android client ID is not configured, only web tokens are accepted. Every failure (forged signature, expired token, untrusted issuer, unauthorized `aud`, unverified email, or an email conflict with an unverified account or a different Google identity) returns one generic error (`401 invalid_credentials`), revealing nothing about why, and creates no account or session.
+For Google sign-in (`POST /auth/google`), the web uses Google Identity Services, iOS the GoogleSignIn SDK, and Android Credential Manager with Sign in with Google. Before signing in, apps call `GET /auth/config`, which returns the web client ID and the `google_sign_in` and `google_calendar` flags (`{"google_sign_in": bool, "google_calendar": bool, "google_client_id": string}`). When Google sign-in is not configured on the server, `google_sign_in` reports `false` and `POST /auth/google` responds with `404 not_found` without contacting Google. For `aud`, the server accepts the configured web client ID, plus optional iOS and Android client IDs when configured; when the iOS or Android client ID is not configured, only web tokens are accepted. Every failure (forged signature, expired token, untrusted issuer, unauthorized `aud`, unverified email, or an email conflict with an unverified account or a different Google identity) returns one generic error (`401 google_sign_in_failed`), revealing nothing about why, and creates no account or session.
 
 ## Endpoints
 
