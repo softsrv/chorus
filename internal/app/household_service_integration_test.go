@@ -479,6 +479,153 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		t.Errorf("alice's combo was modified by outsider: %+v, %v", got, err)
 	}
 
+	// Quest schedule isolation (CLM-9): every schedule call by an outsider is
+	// ErrNotFound, even with the outsider's own correct admin PIN; another
+	// household's quest, member or schedule id is not found through the
+	// caller's own household, and nothing is written or removed.
+	schedules := app.NewQuestScheduleService(q, pool)
+	later := time.Now().AddDate(0, 0, 30).Format(time.DateOnly)
+	aliceSchedule, err := schedules.Schedule(ctx, alice, h.ID, app.ScheduleInput{QuestID: aliceQuest.ID, MemberID: aliceMember.ID, Date: later}, "")
+	if err != nil {
+		t.Fatalf("alice Schedule: %v", err)
+	}
+	const malloryPin = "9999"
+	if err := familySvc.SetAdminPin(ctx, mallory, mh.ID, malloryPin, ""); err != nil {
+		t.Fatalf("mallory SetAdminPin: %v", err)
+	}
+	malloryQuest, err := quests.Create(ctx, mallory, mh.ID, app.QuestInput{Name: "Mallory chore", Points: num(1)}, malloryPin)
+	if err != nil {
+		t.Fatalf("Create mallory quest: %v", err)
+	}
+	mallorySchedule, err := schedules.Schedule(ctx, mallory, mh.ID, app.ScheduleInput{QuestID: malloryQuest.ID, MemberID: malloryMember.ID, Date: later}, malloryPin)
+	if err != nil {
+		t.Fatalf("mallory Schedule in own household: %v", err)
+	}
+	scheduleRows := func() int {
+		t.Helper()
+		var n int
+		if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM quest_schedules").Scan(&n); err != nil {
+			t.Fatalf("count quest_schedules: %v", err)
+		}
+		return n
+	}
+	rowsBefore := scheduleRows()
+	_, checks["schedule quest"] = schedules.Schedule(ctx, mallory, h.ID, app.ScheduleInput{QuestID: aliceQuest.ID, MemberID: aliceMember.ID, Date: later}, malloryPin)
+	_, checks["schedule quest as own member"] = schedules.Schedule(ctx, mallory, h.ID, app.ScheduleInput{QuestID: aliceQuest.ID, MemberID: malloryMember.ID, Date: later}, malloryPin)
+	_, checks["list schedules"] = schedules.List(ctx, mallory, h.ID, malloryPin)
+	checks["cancel schedule"] = schedules.Cancel(ctx, mallory, h.ID, aliceSchedule.ID, malloryPin)
+	checks["cancel schedule via own household"] = schedules.Cancel(ctx, mallory, mh.ID, aliceSchedule.ID, malloryPin)
+	_, checks["schedule alice's quest via own household"] = schedules.Schedule(ctx, mallory, mh.ID, app.ScheduleInput{QuestID: aliceQuest.ID, MemberID: malloryMember.ID, Date: later}, malloryPin)
+	_, checks["schedule alice's member via own household"] = schedules.Schedule(ctx, mallory, mh.ID, app.ScheduleInput{QuestID: malloryQuest.ID, MemberID: aliceMember.ID, Date: later}, malloryPin)
+	// Alice, a real admin of her own household, cannot reach the other
+	// household's quest, member or schedule through it.
+	_, checks["alice schedules other household's quest"] = schedules.Schedule(ctx, alice, h.ID, app.ScheduleInput{QuestID: malloryQuest.ID, MemberID: aliceMember.ID, Date: later}, "")
+	_, checks["alice schedules other household's member"] = schedules.Schedule(ctx, alice, h.ID, app.ScheduleInput{QuestID: aliceQuest.ID, MemberID: malloryMember.ID, Date: later}, "")
+	checks["alice cancels other household's schedule"] = schedules.Cancel(ctx, alice, h.ID, mallorySchedule.ID, "")
+	if got := scheduleRows(); got != rowsBefore {
+		t.Errorf("quest_schedules rows after cross-household attempts = %d, want %d", got, rowsBefore)
+	}
+	if got, err := schedules.List(ctx, alice, h.ID, ""); err != nil || len(got) != 1 || got[0].ID != aliceSchedule.ID || got[0].HouseholdID != h.ID {
+		t.Errorf("alice's schedules after outsider attempts = %+v, %v; want only %v", got, err, aliceSchedule.ID)
+	}
+	if got, err := schedules.List(ctx, mallory, mh.ID, malloryPin); err != nil || len(got) != 1 || got[0].ID != mallorySchedule.ID {
+		t.Errorf("mallory's own schedules = %+v, %v; want only %v", got, err, mallorySchedule.ID)
+	}
+	if err := familySvc.ClearAdminPin(ctx, mallory, mh.ID, malloryPin); err != nil {
+		t.Fatalf("mallory ClearAdminPin: %v", err)
+	}
+
+	// Each household rolls over at its own local midnight (CLM-9): Auckland
+	// and Los Angeles each have a schedule for the same calendar date D. At an
+	// instant past Auckland's midnight of D but still D-1 in Los Angeles, only
+	// Auckland's quest is assigned; Los Angeles's quest and schedule are left
+	// alone until its own midnight, which in turn leaves Auckland's untouched.
+	akl, err := time.LoadLocation("Pacific/Auckland")
+	if err != nil {
+		t.Fatalf("load Pacific/Auckland: %v", err)
+	}
+	lax, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Fatalf("load America/Los_Angeles: %v", err)
+	}
+	aklToday := time.Now().In(akl)
+	dDate := time.Date(aklToday.Year(), aklToday.Month(), aklToday.Day()+2, 0, 0, 0, 0, time.UTC)
+	dayD := dDate.Format(time.DateOnly)
+	aklMidnight := time.Date(dDate.Year(), dDate.Month(), dDate.Day(), 0, 0, 0, 0, akl)
+	laxMidnight := time.Date(dDate.Year(), dDate.Month(), dDate.Day(), 0, 0, 0, 0, lax)
+	aklInstant := aklMidnight.Add(time.Hour)
+	if got := aklInstant.In(lax).Format(time.DateOnly); got >= dayD {
+		t.Fatalf("test setup: Los Angeles date at %v is %s, want before %s", aklInstant, got, dayD)
+	}
+	type tzHousehold struct {
+		id, member, quest, schedule uuid.UUID
+	}
+	newTZHousehold := func(name, tz string) tzHousehold {
+		t.Helper()
+		hh, err := households.Create(ctx, alice, app.HouseholdInput{Name: name, Timezone: tz})
+		if err != nil {
+			t.Fatalf("create %s household: %v", name, err)
+		}
+		m, err := familySvc.Create(ctx, alice, hh.ID, app.FamilyMemberInput{Name: name + " Kid"}, "")
+		if err != nil {
+			t.Fatalf("create %s member: %v", name, err)
+		}
+		qq, err := quests.Create(ctx, alice, hh.ID, app.QuestInput{Name: name + " chore", Points: num(1)}, "")
+		if err != nil {
+			t.Fatalf("create %s quest: %v", name, err)
+		}
+		s, err := schedules.Schedule(ctx, alice, hh.ID, app.ScheduleInput{QuestID: qq.ID, MemberID: m.ID, Date: dayD}, "")
+		if err != nil {
+			t.Fatalf("schedule %s quest: %v", name, err)
+		}
+		return tzHousehold{id: hh.ID, member: m.ID, quest: qq.ID, schedule: s.ID}
+	}
+	aklH := newTZHousehold("Auckland", "Pacific/Auckland")
+	laxH := newTZHousehold("Los Angeles", "America/Los_Angeles")
+	holderOf := func(hh tzHousehold) *uuid.UUID {
+		t.Helper()
+		var holder *uuid.UUID
+		if err := pool.QueryRow(ctx, "SELECT claimed_by FROM household_quests WHERE household_id = $1 AND id = $2", hh.id, hh.quest).Scan(&holder); err != nil {
+			t.Fatalf("read quest holder: %v", err)
+		}
+		return holder
+	}
+	scheduleExists := func(hh tzHousehold) bool {
+		t.Helper()
+		var n int
+		if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM quest_schedules WHERE household_id = $1 AND id = $2", hh.id, hh.schedule).Scan(&n); err != nil {
+			t.Fatalf("read schedule: %v", err)
+		}
+		return n == 1
+	}
+	if n, err := app.RolloverDueHouseholds(ctx, q, pool, aklInstant); err != nil || n != 1 {
+		t.Errorf("rollover at Auckland's midnight assigned %d, %v; want 1", n, err)
+	}
+	if got := holderOf(aklH); got == nil || *got != aklH.member {
+		t.Errorf("Auckland quest holder after its midnight = %v, want %v", got, aklH.member)
+	}
+	if scheduleExists(aklH) {
+		t.Errorf("Auckland one-off schedule still present after its day was assigned")
+	}
+	if got := holderOf(laxH); got != nil {
+		t.Errorf("Los Angeles quest assigned before its own midnight: holder %v", got)
+	}
+	if !scheduleExists(laxH) {
+		t.Errorf("Los Angeles schedule removed by Auckland's rollover")
+	}
+	if n, err := app.RolloverDueHouseholds(ctx, q, pool, laxMidnight.Add(time.Hour)); err != nil || n != 1 {
+		t.Errorf("rollover at Los Angeles's midnight assigned %d, %v; want 1", n, err)
+	}
+	if got := holderOf(laxH); got == nil || *got != laxH.member {
+		t.Errorf("Los Angeles quest holder after its midnight = %v, want %v", got, laxH.member)
+	}
+	if got := holderOf(aklH); got == nil || *got != aklH.member {
+		t.Errorf("Auckland quest touched by Los Angeles's rollover: holder %v, want %v", got, aklH.member)
+	}
+	if got, err := schedules.List(ctx, alice, h.ID, ""); err != nil || len(got) != 1 || got[0].ID != aliceSchedule.ID {
+		t.Errorf("alice's household schedules touched by other households' rollovers: %+v, %v", got, err)
+	}
+
 	for name, err := range checks {
 		if !errors.Is(err, app.ErrNotFound) {
 			t.Errorf("%s: expected ErrNotFound, got %v", name, err)
@@ -559,8 +706,23 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	} else {
 		t.Errorf("alice's quest list after share: %v", err)
 	}
-	if rows, _, err := quests.List(ctx, mallory, mh.ID, app.QuestPage{Limit: 10}); err != nil || len(rows) != 0 {
-		t.Errorf("mallory's own quest list shows other households' quests: %+v, %v", rows, err)
+	// Mallory's own household now holds her quest; her list must show only
+	// quests of her household, never Alice's or Bob's.
+	if rows, _, err := quests.List(ctx, mallory, mh.ID, app.QuestPage{Limit: 100}); err != nil {
+		t.Errorf("mallory's own quest list: %v", err)
+	} else {
+		sawOwn := false
+		for _, r := range rows {
+			if r.HouseholdID != mh.ID || r.ID == aliceQuest.ID || r.ID == aliceQuest2.ID {
+				t.Errorf("mallory's own quest list shows another household's quest: %+v", r.HouseholdQuest)
+			}
+			if r.ID == malloryQuest.ID {
+				sawOwn = true
+			}
+		}
+		if !sawOwn {
+			t.Errorf("mallory's own quest list misses her quest %v: %+v", malloryQuest.ID, rows)
+		}
 	}
 	if rows, err := quests.ListPending(ctx, alice, h.ID, ""); err != nil || len(rows) != 1 || rows[0].QuestID != alicePending.ID ||
 		rows[0].MemberID != aliceMember.ID {
@@ -957,6 +1119,78 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	if _, err := q.AddMemberPoints(ctx, db.AddMemberPointsParams{HouseholdID: bh.ID, ID: bobMember.ID, Delta: -35}); err != nil {
 		t.Fatalf("restore bob member points: %v", err)
 	}
+
+	// CLM-8: the quest expiry sweep keys every statement by the household of
+	// the quest it releases. Household B holds a shared quest with a deadline
+	// still ahead; household A holds an overdue one.
+	bobKid, err := familySvc.Create(ctx, bob, bh.ID, app.FamilyMemberInput{Name: "Bob Kid"}, "")
+	if err != nil {
+		t.Fatalf("Create bob kid: %v", err)
+	}
+	bobTeam, err := quests.Create(ctx, bob, bh.ID, app.QuestInput{Name: "Bob Team", Points: num(10), Shareable: true}, "")
+	if err != nil {
+		t.Fatalf("Create bob team quest: %v", err)
+	}
+	if _, err := quests.Accept(ctx, bob, bh.ID, bobTeam.ID, asBob); err != nil {
+		t.Fatalf("Accept bob team quest: %v", err)
+	}
+	if _, err := quests.Share(ctx, bob, bh.ID, bobTeam.ID, asBob, app.MemberAction{MemberID: bobKid.ID}); err != nil {
+		t.Fatalf("Share bob team quest: %v", err)
+	}
+	bobTeamSnapshot := func() string {
+		t.Helper()
+		return rowJSON(t, pool, `SELECT to_jsonb(q)::text FROM household_quests q WHERE id = $1`, bobTeam.ID) +
+			rowJSON(t, pool, `SELECT coalesce(jsonb_agg(to_jsonb(p) ORDER BY p.member_id), '[]')::text
+				FROM household_quest_participants p WHERE quest_id = $1`, bobTeam.ID)
+	}
+	bobTeamBefore := bobTeamSnapshot()
+	if n := participantRows(t, pool, bobTeam.ID); n != 2 {
+		t.Fatalf("bob team participants before expiry: %d, want 2", n)
+	}
+	bobTeamRow, err := q.GetHouseholdQuest(ctx, db.GetHouseholdQuestParams{HouseholdID: bh.ID, ID: bobTeam.ID})
+	if err != nil || bobTeamRow.ClaimedBy == nil || !bobTeamRow.ClaimExpiresAt.Valid || !bobTeamRow.ClaimExpiresAt.Time.After(time.Now()) {
+		t.Fatalf("bob team quest before expiry: %+v, %v; want held with a future deadline", bobTeamRow, err)
+	}
+
+	// Probe: releasing B's quest through household A's id matches no row even
+	// when B's deadline has passed, and changes nothing.
+	if _, err := pool.Exec(ctx, `UPDATE household_quests SET claim_expires_at = NOW() - INTERVAL '1 minute' WHERE household_id = $1 AND id = $2`, bh.ID, bobTeam.ID); err != nil {
+		t.Fatalf("back-date bob team deadline: %v", err)
+	}
+	if _, err := q.ExpireQuestClaim(ctx, db.ExpireQuestClaimParams{HouseholdID: h.ID, ID: bobTeam.ID}); !errors.Is(err, pgx.ErrNoRows) {
+		t.Errorf("ExpireQuestClaim with household A and B's quest: %v, want pgx.ErrNoRows", err)
+	}
+	if n := participantRows(t, pool, bobTeam.ID); n != 2 {
+		t.Errorf("bob team participants after cross-household ExpireQuestClaim: %d, want 2", n)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE household_quests SET claim_expires_at = $3 WHERE household_id = $1 AND id = $2`, bh.ID, bobTeam.ID, bobTeamRow.ClaimExpiresAt); err != nil {
+		t.Fatalf("restore bob team deadline: %v", err)
+	}
+	if got := bobTeamSnapshot(); got != bobTeamBefore {
+		t.Errorf("cross-household ExpireQuestClaim changed B's quest:\n got %s\nwant %s", got, bobTeamBefore)
+	}
+
+	aliceOverdue, err := quests.Create(ctx, alice, h.ID, app.QuestInput{Name: "Overdue in A", Points: num(3)}, "")
+	if err != nil {
+		t.Fatalf("Create alice overdue quest: %v", err)
+	}
+	if _, err := quests.Accept(ctx, alice, h.ID, aliceOverdue.ID, asAlice); err != nil {
+		t.Fatalf("Accept alice overdue quest: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE household_quests SET claim_expires_at = NOW() - INTERVAL '1 minute' WHERE household_id = $1 AND id = $2`, h.ID, aliceOverdue.ID); err != nil {
+		t.Fatalf("back-date alice overdue deadline: %v", err)
+	}
+	if _, err := quests.ExpireOverdueQuests(ctx); err != nil {
+		t.Fatalf("ExpireOverdueQuests: %v", err)
+	}
+	gotAliceOverdue, err := q.GetHouseholdQuest(ctx, db.GetHouseholdQuestParams{HouseholdID: h.ID, ID: aliceOverdue.ID})
+	if err != nil || gotAliceOverdue.ClaimedBy != nil || gotAliceOverdue.ClaimedAt.Valid || gotAliceOverdue.ClaimExpiresAt.Valid {
+		t.Errorf("alice overdue quest after sweep: %+v, %v; want released", gotAliceOverdue, err)
+	}
+	if got := bobTeamSnapshot(); got != bobTeamBefore {
+		t.Errorf("sweep of household A changed B's held quest:\n got %s\nwant %s", got, bobTeamBefore)
+	}
+	assertExpirySweepOnlyFromRunQuestExpiry(t)
 
 	// Non-member (Mallory) gets ErrNotFound deleting household A, and A stays intact.
 	if err := households.Delete(ctx, mallory, h.ID); !errors.Is(err, app.ErrNotFound) {

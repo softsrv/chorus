@@ -270,3 +270,92 @@ func TestQuestAgeRangeJSON(t *testing.T) {
 		}
 	}
 }
+
+// TestQuestClaimExpiresAtJSON pins claim_expires_at in quest JSON: null for an
+// unheld quest, the RFC3339 UTC instant for a held one.
+func TestQuestClaimExpiresAtJSON(t *testing.T) {
+	t.Parallel()
+
+	decode := func(v any) map[string]any {
+		t.Helper()
+		data, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("json.Marshal failed: %v", err)
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(data, &raw); err != nil {
+			t.Fatalf("json.Unmarshal failed: %v", err)
+		}
+		return raw
+	}
+
+	unheld := decode(toQuest(app.QuestView{
+		HouseholdQuest: db.HouseholdQuest{
+			ID:   uuid.New(),
+			Name: "Unheld Quest",
+		},
+	}))
+	val, ok := unheld["claim_expires_at"]
+	if !ok {
+		t.Errorf("claim_expires_at key missing from unheld quest JSON")
+	} else if val != nil {
+		t.Errorf("unheld claim_expires_at = %v, want null", val)
+	}
+
+	instant := time.Date(2026, 11, 20, 5, 0, 0, 0, time.UTC)
+	heldMember := uuid.New()
+	held := decode(toQuest(app.QuestView{
+		HouseholdQuest: db.HouseholdQuest{
+			ID:             uuid.New(),
+			Name:           "Held Quest",
+			ClaimedBy:      &heldMember,
+			ClaimedAt:      pgtype.Timestamptz{Time: instant.Add(-1 * time.Hour), Valid: true},
+			ClaimExpiresAt: pgtype.Timestamptz{Time: instant, Valid: true},
+		},
+	}))
+	val, ok = held["claim_expires_at"]
+	if !ok {
+		t.Errorf("claim_expires_at key missing from held quest JSON")
+	} else if got, ok := val.(string); !ok || got != instant.Format(time.RFC3339) {
+		t.Errorf("held claim_expires_at = %v, want %s", val, instant.Format(time.RFC3339))
+	}
+}
+
+// TestQuestScheduleJSON pins the schedule wire shape: the ids, the quest and
+// member names, start_date as YYYY-MM-DD and created_at in UTC, and no
+// household_id or other model field.
+func TestQuestScheduleJSON(t *testing.T) {
+	t.Parallel()
+
+	created := time.Date(2026, 11, 19, 3, 0, 0, 0, time.FixedZone("CST", -6*3600))
+	s := app.QuestSchedule{
+		ID:          uuid.MustParse("018f25b3-8b77-7000-8000-0000000000a1"),
+		HouseholdID: uuid.MustParse("018f25b3-8b77-7000-8000-0000000000a2"),
+		QuestID:     uuid.MustParse("018f25b3-8b77-7000-8000-0000000000a3"),
+		QuestName:   "Feed the cat",
+		MemberID:    uuid.MustParse("018f25b3-8b77-7000-8000-0000000000a4"),
+		MemberName:  "Sam",
+		StartDate:   "2026-11-21",
+		CreatedAt:   created,
+	}
+	data, err := json.Marshal(toQuestSchedule(s))
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+	want := map[string]any{
+		"id":          s.ID.String(),
+		"quest_id":    s.QuestID.String(),
+		"quest_name":  "Feed the cat",
+		"member_id":   s.MemberID.String(),
+		"member_name": "Sam",
+		"start_date":  "2026-11-21",
+		"created_at":  "2026-11-19T09:00:00Z",
+	}
+	if !reflect.DeepEqual(raw, want) {
+		t.Errorf("schedule JSON = %v, want %v", raw, want)
+	}
+}

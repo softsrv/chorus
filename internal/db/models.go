@@ -164,25 +164,26 @@ type HouseholdMembersRetired struct {
 }
 
 type HouseholdQuest struct {
-	ID            uuid.UUID          `json:"id"`
-	HouseholdID   uuid.UUID          `json:"household_id"`
-	LibraryID     *uuid.UUID         `json:"library_id"`
-	Name          string             `json:"name"`
-	Points        int32              `json:"points"`
-	RepeatDays    int32              `json:"repeat_days"`
-	Notes         string             `json:"notes"`
-	ClaimedBy     *uuid.UUID         `json:"claimed_by"`
-	ClaimedAt     pgtype.Timestamptz `json:"claimed_at"`
-	DoneAt        pgtype.Timestamptz `json:"done_at"`
-	CompletedAt   pgtype.Timestamptz `json:"completed_at"`
-	AvailableAt   pgtype.Timestamptz `json:"available_at"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
-	Shareable     bool               `json:"shareable"`
-	TeamworkBonus int32              `json:"teamwork_bonus"`
-	StreakBonus   int32              `json:"streak_bonus"`
-	MinAge        pgtype.Int4        `json:"min_age"`
-	MaxAge        pgtype.Int4        `json:"max_age"`
+	ID             uuid.UUID          `json:"id"`
+	HouseholdID    uuid.UUID          `json:"household_id"`
+	LibraryID      *uuid.UUID         `json:"library_id"`
+	Name           string             `json:"name"`
+	Points         int32              `json:"points"`
+	RepeatDays     int32              `json:"repeat_days"`
+	Notes          string             `json:"notes"`
+	ClaimedBy      *uuid.UUID         `json:"claimed_by"`
+	ClaimedAt      pgtype.Timestamptz `json:"claimed_at"`
+	DoneAt         pgtype.Timestamptz `json:"done_at"`
+	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
+	AvailableAt    pgtype.Timestamptz `json:"available_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	Shareable      bool               `json:"shareable"`
+	TeamworkBonus  int32              `json:"teamwork_bonus"`
+	StreakBonus    int32              `json:"streak_bonus"`
+	MinAge         pgtype.Int4        `json:"min_age"`
+	MaxAge         pgtype.Int4        `json:"max_age"`
+	ClaimExpiresAt pgtype.Timestamptz `json:"claim_expires_at"`
 }
 
 type HouseholdQuestParticipant struct {
@@ -190,6 +191,11 @@ type HouseholdQuestParticipant struct {
 	QuestID     uuid.UUID          `json:"quest_id"`
 	MemberID    uuid.UUID          `json:"member_id"`
 	JoinedAt    pgtype.Timestamptz `json:"joined_at"`
+}
+
+type HouseholdQuestRollover struct {
+	HouseholdID      uuid.UUID   `json:"household_id"`
+	LastRolloverDate pgtype.Date `json:"last_rollover_date"`
 }
 
 type HouseholdReward struct {
@@ -274,6 +280,15 @@ type QuestLibrary struct {
 	Notes       string             `json:"notes"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	StreakBonus int32              `json:"streak_bonus"`
+}
+
+type QuestSchedule struct {
+	ID          uuid.UUID          `json:"id"`
+	HouseholdID uuid.UUID          `json:"household_id"`
+	QuestID     uuid.UUID          `json:"quest_id"`
+	MemberID    uuid.UUID          `json:"member_id"`
+	StartDate   pgtype.Date        `json:"start_date"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 type RefreshToken struct {
