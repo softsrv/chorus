@@ -55,7 +55,8 @@ test-integration: migrate-test migrate-roundtrip-test
 	go test -race -tags integration -p 1 ./...
 
 # System tests exec the built binary (or test the Docker image when SYSTEST_IMAGE is set).
-test-system: migrate-test
+# tailwind first: the binary embeds the generated stylesheet the tests assert.
+test-system: migrate-test tailwind
 	go test -race -tags systest -p 1 ./systest/...
 
 # test-system-image builds the image and runs system tests against it (Linux-only: uses host networking).

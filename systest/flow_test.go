@@ -19,18 +19,6 @@ const (
 // staticRef matches every src="/static/..." and href="/static/..." on a page.
 var staticRef = regexp.MustCompile(`(?:src|href)="(/static/[^"]+)"`)
 
-// stylesheetBuilt reports whether the app under test embeds the generated
-// stylesheet. The image always does (its Dockerfile runs Tailwind before
-// building). The binary TestMain builds from this checkout embeds it only if
-// web/static/css/dist/app.css exists here (`make tailwind`).
-func stylesheetBuilt() bool {
-	if os.Getenv("SYSTEST_IMAGE") != "" {
-		return true
-	}
-	_, err := os.Stat("../web/static/css/dist/app.css")
-	return err == nil
-}
-
 // TestSystem_CoreFlow drives the started app the way a new user does,
 // against a freshly migrated database of its own with no users: health and
 // readiness, the web client, a refused unauthenticated request, then sign-up
@@ -85,14 +73,16 @@ func TestSystem_CoreFlow(t *testing.T) {
 		}
 		sort.Strings(paths)
 
+		// Every linked asset is asserted in both modes, the generated
+		// stylesheet included: the image builds it in its Dockerfile, and
+		// binary mode needs it built before TestMain embeds it (make
+		// test-system and CI run `make tailwind` first). A missing stylesheet
+		// fails here rather than being skipped.
 		for _, p := range paths {
-			if p == stylesheetPath && !stylesheetBuilt() {
-				// Binary mode from a checkout where `make tailwind` never
-				// ran: the stylesheet is gitignored and generated, so this
-				// binary does not embed it. The image always builds it, and
-				// every image job runs this test with the assertion on.
-				t.Logf("%s not asserted: binary built without the generated stylesheet (run `make tailwind` to include it)", p)
-				continue
+			if p == stylesheetPath && os.Getenv("SYSTEST_IMAGE") == "" {
+				if _, err := os.Stat("../web/static/css/dist/app.css"); err != nil {
+					t.Errorf("binary mode: web/static/css/dist/app.css is not built, so the binary under test cannot serve %s; run `make test-system` (it runs `make tailwind` first): %v", p, err)
+				}
 			}
 			r := app.do("GET", p, "", nil).expect(t, "GET "+p, http.StatusOK)
 			if len(r.Body) == 0 {
