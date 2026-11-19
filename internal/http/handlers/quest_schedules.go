@@ -14,11 +14,12 @@ type questScheduleServicer interface {
 	Schedule(ctx context.Context, userID, householdID uuid.UUID, in app.ScheduleInput, adminPin string) (app.QuestSchedule, error)
 	List(ctx context.Context, userID, householdID uuid.UUID, adminPin string) ([]app.QuestSchedule, error)
 	Cancel(ctx context.Context, userID, householdID, scheduleID uuid.UUID, adminPin string) error
+	Upcoming(ctx context.Context, userID, householdID, memberID uuid.UUID) ([]app.UpcomingQuest, error)
 }
 
-// QuestScheduleHandler serves /api/v1/households/{householdID}/quest-schedules.
-// Every route is admin-only and carries the admin PIN in X-Admin-PIN once
-// one is set.
+// QuestScheduleHandler serves /api/v1/households/{householdID}/quest-schedules,
+// whose routes are admin-only and carry the admin PIN in X-Admin-PIN once one
+// is set, and a member's upcoming-quests read, open to any household member.
 type QuestScheduleHandler struct {
 	svc questScheduleServicer
 }
@@ -87,4 +88,25 @@ func (h *QuestScheduleHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.NoContent(w)
+}
+
+// Upcoming returns a member's schedules with the date each will next be
+// assigned, soonest first. Any household member may read it (no admin PIN);
+// none answers {"items": []}, never null; a non-member, or a member of another
+// household, is 404.
+func (h *QuestScheduleHandler) Upcoming(w http.ResponseWriter, r *http.Request) {
+	hid, ok := pathUUID(w, r, "householdID")
+	if !ok {
+		return
+	}
+	mid, ok := pathUUID(w, r, "memberID")
+	if !ok {
+		return
+	}
+	items, err := h.svc.Upcoming(r.Context(), currentUser(r), hid, mid)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond.JSON(w, http.StatusOK, listResponse[upcomingQuestJSON]{Items: mapSlice(items, toUpcomingQuest)})
 }

@@ -225,6 +225,29 @@ func toQuestSchedule(s app.QuestSchedule) questScheduleJSON {
 	}
 }
 
+// upcomingQuestJSON is one of a member's schedules: start_date is the date it
+// was scheduled from and next_date the household-local date (YYYY-MM-DD) it
+// will next be assigned on; repeat says it fires again after that.
+type upcomingQuestJSON struct {
+	ID        uuid.UUID `json:"id"`
+	QuestID   uuid.UUID `json:"quest_id"`
+	QuestName string    `json:"quest_name"`
+	StartDate string    `json:"start_date"`
+	NextDate  string    `json:"next_date"`
+	Repeat    bool      `json:"repeat"`
+}
+
+func toUpcomingQuest(u app.UpcomingQuest) upcomingQuestJSON {
+	return upcomingQuestJSON{
+		ID:        u.ID,
+		QuestID:   u.QuestID,
+		QuestName: u.QuestName,
+		StartDate: u.StartDate,
+		NextDate:  u.NextDate,
+		Repeat:    u.Repeat,
+	}
+}
+
 // int4Ptr is nil for a NULL column, so it marshals as null.
 func int4Ptr(n pgtype.Int4) *int32 {
 	if !n.Valid {

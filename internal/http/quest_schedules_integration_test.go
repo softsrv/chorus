@@ -4,6 +4,7 @@ package http_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -103,6 +104,14 @@ func TestAPI_QuestSchedules(t *testing.T) {
 	s.expect(http.StatusOK, "GET", hp+"/quest-schedules", parent.AccessToken, nil, &list)
 	if list.Items == nil || len(list.Items) != 0 {
 		t.Fatalf("empty list: %+v", list.Items)
+	}
+
+	// A member with nothing scheduled reads 200 {"items": []}: the raw body's
+	// items is an empty array, never null or missing (CLM-3).
+	var raw map[string]json.RawMessage
+	s.expect(http.StatusOK, "GET", hp+"/family-members/"+sam.String()+"/upcoming-quests", parent.AccessToken, nil, &raw)
+	if got := strings.TrimSpace(string(raw["items"])); got != "[]" {
+		t.Fatalf("empty upcoming: items = %q, want []", got)
 	}
 
 	// A missing, malformed, oversized or past date is 422 on fields.date.
