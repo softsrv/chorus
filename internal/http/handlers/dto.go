@@ -122,9 +122,12 @@ func toFamilyMember(m db.FamilyMember) familyMemberJSON {
 }
 
 // questJSON is a household quest. The lifecycle fields (claimed_by,
-// claimed_at, claim_expires_at, completed_at, available_at) are read-only and change only
-// through quest actions. claim_expires_at is the deadline when a held quest returns to
-// the pool if not completed. completed_at is when it was last marked done and
+// claimed_at, claim_expires_at, completed_at, available_at) are read-only:
+// they change through quest actions and, for a held quest, through the
+// expiry sweep. claim_expires_at is the household-local midnight that ends
+// the day the quest was accepted; if it is not marked done by then, the
+// sweep (not a member action) clears claimed_by, claimed_at and
+// claim_expires_at and the quest is back in the pool. completed_at is when it was last marked done and
 // available_at when its cooldown from that moment ends. available says the
 // quest is in the pool; awaiting_approval says at least one of its
 // completions waits for the administrator to approve or reject it.

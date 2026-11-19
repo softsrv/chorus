@@ -648,6 +648,63 @@ func TestIntegration_QuestExpiry_FailedRelease(t *testing.T) {
 	}
 }
 
+// TestIntegration_QuestExpiry_OldWriterHold: a hold written the way the
+// binary before 000021 writes it (claimed_by and claimed_at alone, no
+// deadline), as it does between the manual migrate-up and the restart, still
+// ends at the local midnight of the day it was claimed: the database stamps
+// the deadline, mark-done and share refuse it once that day is over, and the
+// sweep returns it to the pool with no completion.
+func TestIntegration_QuestExpiry_OldWriterHold(t *testing.T) {
+	w := newExpiryWorld(t, "questexpiryoldwriter", "Old binary")
+	ann, ben := w.member("Ann"), w.member("Ben")
+	quest := w.quest(app.QuestInput{Name: "Sweep the porch", Points: num(15), Shareable: true})
+
+	// The old ClaimQuest, a day ago: no claim_expires_at in its SET.
+	if _, err := w.pool.Exec(w.ctx,
+		`UPDATE household_quests SET claimed_by = $3, claimed_at = NOW() - INTERVAL '1 day', updated_at = NOW()
+		 WHERE household_id = $1 AND id = $2 AND claimed_by IS NULL`, w.h, quest, ann.MemberID); err != nil {
+		t.Fatalf("old-shape accept: %v", err)
+	}
+	held := w.get(quest)
+	if !held.ClaimExpiresAt.Valid || held.ClaimExpiresAt.Time.After(time.Now()) {
+		t.Fatalf("old-shape hold deadline: %+v, want stamped and already past", held.ClaimExpiresAt)
+	}
+	// A deadline can't be cleared from a held quest either.
+	if _, err := w.pool.Exec(w.ctx,
+		`UPDATE household_quests SET claim_expires_at = NULL WHERE id = $1`, quest); err != nil {
+		t.Fatalf("clear deadline: %v", err)
+	}
+	if got := w.get(quest); !got.ClaimExpiresAt.Valid || !got.ClaimExpiresAt.Time.Equal(held.ClaimExpiresAt.Time) {
+		t.Fatalf("held quest deadline after clearing it: %+v, want %+v restamped", got.ClaimExpiresAt, held.ClaimExpiresAt)
+	}
+
+	before := w.snapshot(quest)
+	if _, err := w.quests.MarkDone(w.ctx, w.admin, w.h, quest, ann); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("mark done of an old-shape hold past its day: %v, want ErrNotFound", err)
+	}
+	if _, err := w.quests.Share(w.ctx, w.admin, w.h, quest, ann, ben); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("share of an old-shape hold past its day: %v, want ErrNotFound", err)
+	}
+	if after := w.snapshot(quest); after != before {
+		t.Errorf("refused actions changed the quest:\n got %s\nwant %s", after, before)
+	}
+
+	if _, err := w.quests.ExpireOverdueQuests(w.ctx); err != nil {
+		t.Fatalf("ExpireOverdueQuests: %v", err)
+	}
+	got := w.get(quest)
+	if got.ClaimedBy != nil || got.ClaimedAt.Valid || got.ClaimExpiresAt.Valid {
+		t.Errorf("after sweep claimed_by=%v claimed_at=%v claim_expires_at=%v, want back in the pool",
+			got.ClaimedBy, got.ClaimedAt, got.ClaimExpiresAt)
+	}
+	if !app.QuestAvailable(got, time.Now()) {
+		t.Errorf("old-shape hold not available after the sweep: %+v", got)
+	}
+	if n := completionRows(t, w.pool, quest); n != 0 {
+		t.Errorf("completions of the expired quest: %d, want 0", n)
+	}
+}
+
 // TestIntegration_QuestExpiry_Race: the sweep racing a participant's abandon
 // and the holder's share of the same overdue shared quest never leaves a
 // half state. The share is refused (ErrNotFound: the day has ended), the

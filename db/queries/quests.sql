@@ -203,7 +203,7 @@ WITH quest AS (
     FROM household_quests q
     WHERE q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id)
       AND q.shareable AND q.claimed_by = sqlc.arg(member_id)::uuid
-      AND (q.claim_expires_at IS NULL OR q.claim_expires_at > NOW())
+      AND q.claim_expires_at > NOW()
     -- Locked and re-checked, so a share racing the holder's mark-done,
     -- abandon or the expiry sweep either sees the quest still held or writes
     -- nothing.
@@ -238,7 +238,7 @@ RETURNING member_id;
 -- (claim_expires_at at or before now). NOW() is the transaction's start, so
 -- inside one transaction this agrees with ShareQuest's and MarkQuestDone's
 -- own expiry checks. A quest not in this household gets no row.
-SELECT (q.claim_expires_at IS NOT NULL AND q.claim_expires_at <= NOW())::boolean AS lapsed
+SELECT (q.claim_expires_at IS NULL OR q.claim_expires_at <= NOW())::boolean AS lapsed
 FROM household_quests q
 WHERE q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id);
 
@@ -494,7 +494,7 @@ WITH done AS (
     WHERE h.id = q.household_id
       AND q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id)
       AND q.claimed_by IS NOT NULL
-      AND (q.claim_expires_at IS NULL OR q.claim_expires_at > NOW())
+      AND q.claim_expires_at > NOW()
       AND (q.claimed_by = sqlc.arg(member_id)::uuid OR EXISTS (
           SELECT 1 FROM household_quest_participants p
           WHERE p.household_id = q.household_id AND p.quest_id = q.id

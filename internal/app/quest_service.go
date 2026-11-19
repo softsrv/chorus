@@ -602,7 +602,9 @@ func heldForShare(ctx context.Context, qtx *db.Queries, quest db.HouseholdQuest,
 		return false, nil
 	}
 	if !quest.ClaimExpiresAt.Valid {
-		return true, nil
+		// A hold always carries a deadline (the household_quests CHECK and
+		// trigger); one without is never treated as open-ended.
+		return false, nil
 	}
 	lapsed, err := notFoundIfNoRows(qtx.QuestClaimLapsed(ctx, db.QuestClaimLapsedParams{HouseholdID: quest.HouseholdID, ID: quest.ID}))
 	if errors.Is(err, ErrNotFound) {
