@@ -504,6 +504,94 @@ func TestIntegration_QuestSchedules(t *testing.T) {
 	})
 }
 
+// TestIntegration_QuestScheduleUpcoming proves CLM-1 against real Postgres:
+// Upcoming returns one item per schedule of the member with its start date,
+// next date and repeat flag, ordered by next date and then quest name. A
+// repeated schedule whose quest rests until a later local midnight shows that
+// later date, so it sorts after schedules that start after it. A member with
+// nothing scheduled gets an empty, non-nil list; a member id outside the
+// household, or a caller who is not a member, gets ErrNotFound.
+func TestIntegration_QuestScheduleUpcoming(t *testing.T) {
+	w := newScheduleWorld(t, "schedupcoming")
+	sam := w.member("Sam")
+	ann := w.member("Ann")
+	w.setAdminPin("4321")
+
+	daily := w.quest(app.QuestInput{Name: "Daily", Points: num(5)})
+	beta := w.quest(app.QuestInput{Name: "Beta", Points: num(5)})
+	alpha := w.quest(app.QuestInput{Name: "Alpha", Points: num(5)})
+	bake := w.quest(app.QuestInput{Name: "Bake", Points: num(5)})
+	water := w.quest(app.QuestInput{Name: "Water plants", Points: num(5), RepeatDays: num(7)})
+
+	setRepeat := func(id uuid.UUID) {
+		t.Helper()
+		if _, err := w.pool.Exec(w.ctx, `UPDATE quest_schedules SET repeat = TRUE WHERE household_id = $1 AND id = $2`, w.h, id); err != nil {
+			t.Fatalf("set repeat: %v", err)
+		}
+	}
+	setRepeat(w.schedule(daily, sam, 1).ID)
+	w.schedule(beta, sam, 2) // made before Alpha: the tie is broken by name, not by creation
+	w.schedule(alpha, sam, 2)
+	w.schedule(bake, sam, 3)
+	// Water plants starts first, but its quest rests until day 5's midnight:
+	// a repeated schedule cannot fire before then.
+	waterSched := w.schedule(water, sam, 1)
+	setRepeat(waterSched.ID)
+	if _, err := w.pool.Exec(w.ctx, `UPDATE household_quests SET available_at = $1 WHERE household_id = $2 AND id = $3`,
+		w.localMidnight(5), w.h, water); err != nil {
+		t.Fatalf("rest quest: %v", err)
+	}
+
+	got, err := w.schedules.Upcoming(w.ctx, w.admin, w.h, sam)
+	if err != nil {
+		t.Fatalf("Upcoming: %v", err)
+	}
+	type item struct {
+		quest      uuid.UUID
+		name       string
+		start, nxt string
+		repeat     bool
+	}
+	want := []item{
+		{daily, "Daily", w.date(1), w.date(1), true},
+		{alpha, "Alpha", w.date(2), w.date(2), false},
+		{beta, "Beta", w.date(2), w.date(2), false},
+		{bake, "Bake", w.date(3), w.date(3), false},
+		{water, "Water plants", w.date(1), w.date(5), true},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Upcoming = %+v, want %d items", got, len(want))
+	}
+	for i, g := range got {
+		wi := want[i]
+		if g.QuestID != wi.quest || g.QuestName != wi.name || g.StartDate != wi.start || g.NextDate != wi.nxt || g.Repeat != wi.repeat {
+			t.Errorf("item %d = {%s start %s next %s repeat %v}, want {%s start %s next %s repeat %v}",
+				i, g.QuestName, g.StartDate, g.NextDate, g.Repeat, wi.name, wi.start, wi.nxt, wi.repeat)
+		}
+	}
+	if got[4].ID != waterSched.ID {
+		t.Errorf("Water plants item id = %v, want schedule %v", got[4].ID, waterSched.ID)
+	}
+
+	// Upcoming needs no admin PIN, and a member with nothing scheduled gets [].
+	none, err := w.schedules.Upcoming(w.ctx, w.admin, w.h, ann)
+	if err != nil || none == nil || len(none) != 0 {
+		t.Errorf("Upcoming(ann) = %#v, %v; want an empty, non-nil list", none, err)
+	}
+
+	other := newScheduleWorld(t, "schedupcomingother")
+	otherKid := other.member("Other kid")
+	if _, err := w.schedules.Upcoming(w.ctx, w.admin, w.h, uuid.New()); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("unknown member: err = %v, want ErrNotFound", err)
+	}
+	if _, err := w.schedules.Upcoming(w.ctx, w.admin, w.h, otherKid); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("member of another household: err = %v, want ErrNotFound", err)
+	}
+	if _, err := w.schedules.Upcoming(w.ctx, other.admin, w.h, sam); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("non-member caller: err = %v, want ErrNotFound", err)
+	}
+}
+
 type lockedWriter struct {
 	w  *bytes.Buffer
 	mu *sync.Mutex
