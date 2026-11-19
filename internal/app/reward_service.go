@@ -347,7 +347,11 @@ func (s *RewardService) Approve(ctx context.Context, userID, householdID, redemp
 			Reward: red.Description, Member: member.Name, Points: member.Points, Cost: red.Cost,
 		}
 	}
-	approved, err := notFoundIfNoRows(qtx.ApproveRewardRedemption(ctx, db.ApproveRewardRedemptionParams{HouseholdID: householdID, ID: redemptionID}))
+	approved, err := notFoundIfNoRows(qtx.ApproveRewardRedemption(ctx, db.ApproveRewardRedemptionParams{
+		HouseholdID: householdID,
+		ID:          redemptionID,
+		StatusBy:    &userID,
+	}))
 	if err != nil {
 		return db.RewardRedemption{}, db.FamilyMember{}, err
 	}
@@ -381,7 +385,11 @@ func (s *RewardService) Reject(ctx context.Context, userID, householdID, redempt
 	if _, err := lockPendingRedemption(ctx, qtx, householdID, redemptionID); err != nil {
 		return db.RewardRedemption{}, err
 	}
-	rejected, err := notFoundIfNoRows(qtx.RejectRewardRedemption(ctx, db.RejectRewardRedemptionParams{HouseholdID: householdID, ID: redemptionID}))
+	rejected, err := notFoundIfNoRows(qtx.RejectRewardRedemption(ctx, db.RejectRewardRedemptionParams{
+		HouseholdID: householdID,
+		ID:          redemptionID,
+		StatusBy:    &userID,
+	}))
 	if err != nil {
 		return db.RewardRedemption{}, err
 	}

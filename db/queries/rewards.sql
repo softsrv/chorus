@@ -88,13 +88,13 @@ FOR UPDATE;
 
 -- name: ApproveRewardRedemption :one
 UPDATE reward_redemptions
-SET status = 'approved', decided_at = NOW()
+SET status = 'approved', decided_at = NOW(), status_by = $3
 WHERE household_id = $1 AND id = $2 AND status = 'pending'
 RETURNING *;
 
 -- name: RejectRewardRedemption :one
 UPDATE reward_redemptions
-SET status = 'rejected', decided_at = NOW()
+SET status = 'rejected', decided_at = NOW(), status_by = $3
 WHERE household_id = $1 AND id = $2 AND status = 'pending'
 RETURNING *;
 

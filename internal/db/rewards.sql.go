@@ -14,18 +14,19 @@ import (
 
 const approveRewardRedemption = `-- name: ApproveRewardRedemption :one
 UPDATE reward_redemptions
-SET status = 'approved', decided_at = NOW()
+SET status = 'approved', decided_at = NOW(), status_by = $3
 WHERE household_id = $1 AND id = $2 AND status = 'pending'
-RETURNING id, household_id, member_id, reward_id, description, cost, status, requested_at, decided_at
+RETURNING id, household_id, member_id, reward_id, description, cost, status, requested_at, decided_at, status_by
 `
 
 type ApproveRewardRedemptionParams struct {
-	HouseholdID uuid.UUID `json:"household_id"`
-	ID          uuid.UUID `json:"id"`
+	HouseholdID uuid.UUID  `json:"household_id"`
+	ID          uuid.UUID  `json:"id"`
+	StatusBy    *uuid.UUID `json:"status_by"`
 }
 
 func (q *Queries) ApproveRewardRedemption(ctx context.Context, arg ApproveRewardRedemptionParams) (RewardRedemption, error) {
-	row := q.db.QueryRow(ctx, approveRewardRedemption, arg.HouseholdID, arg.ID)
+	row := q.db.QueryRow(ctx, approveRewardRedemption, arg.HouseholdID, arg.ID, arg.StatusBy)
 	var i RewardRedemption
 	err := row.Scan(
 		&i.ID,
@@ -37,6 +38,7 @@ func (q *Queries) ApproveRewardRedemption(ctx context.Context, arg ApproveReward
 		&i.Status,
 		&i.RequestedAt,
 		&i.DecidedAt,
+		&i.StatusBy,
 	)
 	return i, err
 }
@@ -102,7 +104,7 @@ const createRewardRedemption = `-- name: CreateRewardRedemption :one
 INSERT INTO reward_redemptions (id, household_id, member_id, reward_id, description, cost, status, requested_at)
 VALUES ($1, $2, $3, $4, $5, $6, 'pending', NOW())
 ON CONFLICT (household_id, member_id, reward_id) WHERE status = 'pending' DO NOTHING
-RETURNING id, household_id, member_id, reward_id, description, cost, status, requested_at, decided_at
+RETURNING id, household_id, member_id, reward_id, description, cost, status, requested_at, decided_at, status_by
 `
 
 type CreateRewardRedemptionParams struct {
@@ -138,6 +140,7 @@ func (q *Queries) CreateRewardRedemption(ctx context.Context, arg CreateRewardRe
 		&i.Status,
 		&i.RequestedAt,
 		&i.DecidedAt,
+		&i.StatusBy,
 	)
 	return i, err
 }
@@ -184,7 +187,7 @@ func (q *Queries) GetHouseholdReward(ctx context.Context, arg GetHouseholdReward
 }
 
 const getMemberPendingRedemptionForReward = `-- name: GetMemberPendingRedemptionForReward :one
-SELECT id, household_id, member_id, reward_id, description, cost, status, requested_at, decided_at FROM reward_redemptions
+SELECT id, household_id, member_id, reward_id, description, cost, status, requested_at, decided_at, status_by FROM reward_redemptions
 WHERE household_id = $1 AND member_id = $2 AND reward_id = $3 AND status = 'pending'
 `
 
@@ -207,6 +210,7 @@ func (q *Queries) GetMemberPendingRedemptionForReward(ctx context.Context, arg G
 		&i.Status,
 		&i.RequestedAt,
 		&i.DecidedAt,
+		&i.StatusBy,
 	)
 	return i, err
 }
@@ -282,7 +286,7 @@ func (q *Queries) ListHouseholdRewards(ctx context.Context, householdID uuid.UUI
 }
 
 const listMemberPendingRedemptions = `-- name: ListMemberPendingRedemptions :many
-SELECT id, household_id, member_id, reward_id, description, cost, status, requested_at, decided_at FROM reward_redemptions
+SELECT id, household_id, member_id, reward_id, description, cost, status, requested_at, decided_at, status_by FROM reward_redemptions
 WHERE household_id = $1 AND member_id = $2 AND status = 'pending'
 ORDER BY requested_at ASC, id ASC
 `
@@ -311,6 +315,7 @@ func (q *Queries) ListMemberPendingRedemptions(ctx context.Context, arg ListMemb
 			&i.Status,
 			&i.RequestedAt,
 			&i.DecidedAt,
+			&i.StatusBy,
 		); err != nil {
 			return nil, err
 		}
@@ -323,7 +328,7 @@ func (q *Queries) ListMemberPendingRedemptions(ctx context.Context, arg ListMemb
 }
 
 const listMemberRewardHistory = `-- name: ListMemberRewardHistory :many
-SELECT id, household_id, member_id, reward_id, description, cost, status, requested_at, decided_at FROM reward_redemptions
+SELECT id, household_id, member_id, reward_id, description, cost, status, requested_at, decided_at, status_by FROM reward_redemptions
 WHERE household_id = $1 AND member_id = $2 AND status = 'approved'
 ORDER BY decided_at DESC, id DESC
 LIMIT $3 OFFSET $4
@@ -363,6 +368,7 @@ func (q *Queries) ListMemberRewardHistory(ctx context.Context, arg ListMemberRew
 			&i.Status,
 			&i.RequestedAt,
 			&i.DecidedAt,
+			&i.StatusBy,
 		); err != nil {
 			return nil, err
 		}
@@ -467,7 +473,7 @@ func (q *Queries) ListRewardLibrary(ctx context.Context) ([]RewardLibrary, error
 }
 
 const lockPendingRedemption = `-- name: LockPendingRedemption :one
-SELECT id, household_id, member_id, reward_id, description, cost, status, requested_at, decided_at FROM reward_redemptions
+SELECT id, household_id, member_id, reward_id, description, cost, status, requested_at, decided_at, status_by FROM reward_redemptions
 WHERE household_id = $1 AND id = $2 AND member_id = $3 AND status = 'pending'
 FOR UPDATE
 `
@@ -493,24 +499,26 @@ func (q *Queries) LockPendingRedemption(ctx context.Context, arg LockPendingRede
 		&i.Status,
 		&i.RequestedAt,
 		&i.DecidedAt,
+		&i.StatusBy,
 	)
 	return i, err
 }
 
 const rejectRewardRedemption = `-- name: RejectRewardRedemption :one
 UPDATE reward_redemptions
-SET status = 'rejected', decided_at = NOW()
+SET status = 'rejected', decided_at = NOW(), status_by = $3
 WHERE household_id = $1 AND id = $2 AND status = 'pending'
-RETURNING id, household_id, member_id, reward_id, description, cost, status, requested_at, decided_at
+RETURNING id, household_id, member_id, reward_id, description, cost, status, requested_at, decided_at, status_by
 `
 
 type RejectRewardRedemptionParams struct {
-	HouseholdID uuid.UUID `json:"household_id"`
-	ID          uuid.UUID `json:"id"`
+	HouseholdID uuid.UUID  `json:"household_id"`
+	ID          uuid.UUID  `json:"id"`
+	StatusBy    *uuid.UUID `json:"status_by"`
 }
 
 func (q *Queries) RejectRewardRedemption(ctx context.Context, arg RejectRewardRedemptionParams) (RewardRedemption, error) {
-	row := q.db.QueryRow(ctx, rejectRewardRedemption, arg.HouseholdID, arg.ID)
+	row := q.db.QueryRow(ctx, rejectRewardRedemption, arg.HouseholdID, arg.ID, arg.StatusBy)
 	var i RewardRedemption
 	err := row.Scan(
 		&i.ID,
@@ -522,6 +530,7 @@ func (q *Queries) RejectRewardRedemption(ctx context.Context, arg RejectRewardRe
 		&i.Status,
 		&i.RequestedAt,
 		&i.DecidedAt,
+		&i.StatusBy,
 	)
 	return i, err
 }
