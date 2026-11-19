@@ -1,4 +1,4 @@
--- Recreate tables dropped in 000021_drop_google_redirect_state.up.sql
+-- Recreate tables dropped in 000022_drop_google_redirect_state.up.sql
 -- Matching the definitions from 000005_google_sign_in.up.sql
 
 CREATE TABLE oauth_states (

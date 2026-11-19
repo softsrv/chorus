@@ -1,4 +1,4 @@
--- 000018_admin_points_adjustments.up.sql
+-- 000019_admin_points_adjustments.up.sql
 -- Admin points adjustments: points_awards.kind may be 'admin', and only an
 -- admin row may carry a negative amount (any non-zero whole number). Quest,
 -- combo and streak rows keep points >= 0. family_members.points >= 0 is
