@@ -88,13 +88,13 @@ FOR UPDATE;
 
 -- name: ApproveRewardRedemption :one
 UPDATE reward_redemptions
-SET status = 'approved', decided_at = NOW()
+SET status = 'approved', decided_at = NOW(), status_by = $3
 WHERE household_id = $1 AND id = $2 AND status = 'pending'
 RETURNING *;
 
 -- name: RejectRewardRedemption :one
 UPDATE reward_redemptions
-SET status = 'rejected', decided_at = NOW()
+SET status = 'rejected', decided_at = NOW(), status_by = $3
 WHERE household_id = $1 AND id = $2 AND status = 'pending'
 RETURNING *;
 
@@ -103,5 +103,5 @@ RETURNING *;
 -- locks each row it cancels, after the caller's lock on the member row
 -- (member first, the order Approve and Reject use). No points move.
 UPDATE reward_redemptions
-SET status = 'cancelled', decided_at = NOW()
+SET status = 'cancelled', decided_at = NOW(), status_by = $3
 WHERE household_id = $1 AND member_id = $2 AND status = 'pending';

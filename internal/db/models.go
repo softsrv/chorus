@@ -184,6 +184,11 @@ type HouseholdQuestParticipant struct {
 	JoinedAt    pgtype.Timestamptz `json:"joined_at"`
 }
 
+type HouseholdQuestRollover struct {
+	HouseholdID      uuid.UUID   `json:"household_id"`
+	LastRolloverDate pgtype.Date `json:"last_rollover_date"`
+}
+
 type HouseholdReward struct {
 	ID          uuid.UUID          `json:"id"`
 	HouseholdID uuid.UUID          `json:"household_id"`
@@ -237,6 +242,7 @@ type QuestCompletion struct {
 	ApprovedAt  pgtype.Timestamptz `json:"approved_at"`
 	Status      string             `json:"status"`
 	StreakCount pgtype.Int4        `json:"streak_count"`
+	StatusBy    *uuid.UUID         `json:"status_by"`
 }
 
 type QuestCompletionMember struct {
@@ -255,6 +261,16 @@ type QuestLibrary struct {
 	Notes       string             `json:"notes"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	StreakBonus int32              `json:"streak_bonus"`
+}
+
+type QuestSchedule struct {
+	ID          uuid.UUID          `json:"id"`
+	HouseholdID uuid.UUID          `json:"household_id"`
+	QuestID     uuid.UUID          `json:"quest_id"`
+	MemberID    uuid.UUID          `json:"member_id"`
+	StartDate   pgtype.Date        `json:"start_date"`
+	Repeat      bool               `json:"repeat"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 type RefreshToken struct {
@@ -287,6 +303,7 @@ type RewardRedemption struct {
 	Status      string             `json:"status"`
 	RequestedAt pgtype.Timestamptz `json:"requested_at"`
 	DecidedAt   pgtype.Timestamptz `json:"decided_at"`
+	StatusBy    *uuid.UUID         `json:"status_by"`
 }
 
 type User struct {

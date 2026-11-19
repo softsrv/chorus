@@ -98,7 +98,7 @@ func testAuthService(t *testing.T, pool *pgxpool.Pool, mailer *captureMailer) *a
 		JWTSecret:      "integration-test-secret-32-bytes!!!",
 		AccessExpiry:   15 * time.Minute,
 		RefreshExpiry:  720 * time.Hour,
-		BCryptCost:     10, // bcrypt's minimum sane cost; keeps tests fast
+		BCryptCost:     4, // bcrypt's minimum cost: tests need a valid hash, not a slow one
 		PasswordMinLen: 8,
 		AppBaseURL:     "http://localhost:8080",
 		AppName:        "Chorus",

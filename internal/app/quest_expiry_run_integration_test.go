@@ -21,7 +21,7 @@ func TestIntegration_RunQuestExpiry_SweepsAtStartupAndStopsOnCancel(t *testing.T
 	authSvc := testAuthService(t, pool, mailer)
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	quests := app.NewQuestService(q, pool)
 	ctx := context.Background()
 
