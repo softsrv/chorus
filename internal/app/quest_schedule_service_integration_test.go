@@ -710,6 +710,61 @@ func TestIntegration_QuestScheduleUpcoming(t *testing.T) {
 	if _, err := w.schedules.Upcoming(w.ctx, w.admin, w.h, uuid.New()); !errors.Is(err, app.ErrNotFound) {
 		t.Errorf("Upcoming for a member not in the household: err = %v, want ErrNotFound", err)
 	}
+
+	// CLM-9: repeated schedules carry repeat, and their next date is the
+	// local date the next midnight pass can assign them: the start date for
+	// a free quest, the local date of available_at for a resting one.
+	t.Run("repeat_flag_and_next_date", func(t *testing.T) {
+		w := newScheduleWorld(t, "schedupreps")
+		sam := w.member("Sam")
+		resting := w.quest(app.QuestInput{Name: "Clean your room", Points: num(5), RepeatDays: num(7)})
+		free := w.quest(app.QuestInput{Name: "Feed the cat", Points: num(5), RepeatDays: num(1)})
+		oneOff := w.quest(app.QuestInput{Name: "Water the plants", Points: num(5)})
+
+		// The 7-day quest is done today: it rests until a local midnight
+		// well after tomorrow, the day its schedule starts.
+		if _, err := w.quests.Accept(w.ctx, w.admin, w.h, resting, app.MemberAction{MemberID: sam}); err != nil {
+			t.Fatalf("accept: %v", err)
+		}
+		w.markDone(resting, sam)
+		got, err := w.q.GetHouseholdQuest(w.ctx, db.GetHouseholdQuestParams{HouseholdID: w.h, ID: resting})
+		if err != nil || !got.AvailableAt.Valid {
+			t.Fatalf("resting quest = %+v, %v; want available_at set", got, err)
+		}
+		restDate := got.AvailableAt.Time.In(w.loc).Format(time.DateOnly)
+		if restDate <= w.date(3) {
+			t.Fatalf("test setup: available_at date %s is not after %s", restDate, w.date(3))
+		}
+
+		restingS := w.scheduleOn(resting, sam, w.date(1), true)
+		freeS := w.scheduleOn(free, sam, w.date(3), true)
+		oneOffS := w.scheduleOn(oneOff, sam, w.date(5), false)
+
+		up, err := w.schedules.Upcoming(w.ctx, w.admin, w.h, sam)
+		if err != nil {
+			t.Fatalf("Upcoming: %v", err)
+		}
+		want := []struct {
+			id           uuid.UUID
+			start, next  string
+			repeat       bool
+			questMessage string
+		}{
+			{freeS.ID, w.date(3), w.date(3), true, "free repeated quest"},
+			{oneOffS.ID, w.date(5), w.date(5), false, "one-off"},
+			{restingS.ID, w.date(1), restDate, true, "resting repeated quest"},
+		}
+		if len(up) != len(want) {
+			t.Fatalf("Upcoming = %+v, want %d items", up, len(want))
+		}
+		for i, wnt := range want {
+			u := up[i]
+			if u.ID != wnt.id || u.StartDate != wnt.start || u.NextDate != wnt.next || u.Repeat != wnt.repeat {
+				t.Errorf("Upcoming[%d] = %+v, want the %s: start %s, next %s, repeat %v",
+					i, u, wnt.questMessage, wnt.start, wnt.next, wnt.repeat)
+			}
+		}
+	})
 }
 
 // TestIntegration_QuestRolloverRepeat proves the repeated schedule against
