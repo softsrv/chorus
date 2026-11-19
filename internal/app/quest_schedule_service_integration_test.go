@@ -526,6 +526,28 @@ func TestIntegration_QuestSchedules(t *testing.T) {
 		}
 	})
 
+	t.Run("missed_midnights_same_quest_assigns_the_latest_day", func(t *testing.T) {
+		w := newScheduleWorld(t, "schedmissedsame")
+		ann := w.member("Ann")
+		bob := w.member("Bob")
+		q := w.quest(app.QuestInput{Name: "Shared chore", Points: num(5)})
+		w.schedule(q, ann, 1) // Monday's one-off
+		w.schedule(q, bob, 2) // Tuesday's one-off, the same quest
+		// The server was down over both midnights: the claim is for
+		// Tuesday, so Tuesday's member holds it and Monday's one-off ends
+		// with its day.
+		now := w.localMidnight(2).Add(time.Hour)
+		if n := w.rollover(now); n != 1 {
+			t.Fatalf("first run after two missed midnights assigned %d, want 1", n)
+		}
+		if got := w.holder(q); !isHeldBy(got, bob) {
+			t.Fatalf("after missed midnights the quest is held by %v, want Bob %v (today's schedule)", got, bob)
+		}
+		if ids := w.scheduleIDs(); len(ids) != 0 {
+			t.Errorf("one-off schedules after their pass: %v", ids)
+		}
+	})
+
 	t.Run("concurrent_runs_assign_once", func(t *testing.T) {
 		w := newScheduleWorld(t, "schedconc")
 		ann := w.member("Ann")

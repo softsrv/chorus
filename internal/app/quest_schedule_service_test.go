@@ -20,10 +20,15 @@ func TestNextDate(t *testing.T) {
 		}
 		return &d
 	}
-	// available_at at 2026-11-24 10:30 UTC is 2026-11-24 23:30 local.
+	// available_at at 2026-11-24 10:30 UTC is 2026-11-24 23:30 local: a
+	// mid-day rest end, assigned at the 2026-11-25 local midnight.
 	resting := time.Date(2026, 11, 24, 10, 30, 0, 0, time.UTC)
-	// available_at at 2026-11-24 11:30 UTC is 2026-11-25 00:30 local.
+	// available_at at 2026-11-24 11:30 UTC is 2026-11-25 00:30 local:
+	// assigned at the 2026-11-26 local midnight.
 	restingPastLocalMidnight := time.Date(2026, 11, 24, 11, 30, 0, 0, time.UTC)
+	// available_at at 2026-11-24 11:00 UTC is exactly 2026-11-25 00:00 local,
+	// as mark done sets it: assigned at that midnight.
+	restingToMidnight := time.Date(2026, 11, 24, 11, 0, 0, 0, time.UTC)
 
 	cases := []struct {
 		name         string
@@ -42,8 +47,9 @@ func TestNextDate(t *testing.T) {
 		{name: "repeat whose today has rolled over shows tomorrow", start: "2026-11-01", repeat: true, lastRollover: date("2026-11-21"), want: "2026-11-22", wantOK: true},
 		{name: "repeat whose today has not rolled over shows today", start: "2026-11-01", repeat: true, lastRollover: date("2026-11-20"), want: "2026-11-21", wantOK: true},
 		{name: "repeat in a household that never rolled over shows today", start: "2026-11-01", repeat: true, want: "2026-11-21", wantOK: true},
-		{name: "repeat resting shows the local date its rest ends", start: "2026-11-01", repeat: true, availableAt: &resting, lastRollover: date("2026-11-21"), want: "2026-11-24", wantOK: true},
-		{name: "rest ending after local midnight is the next local day", start: "2026-11-01", repeat: true, availableAt: &restingPastLocalMidnight, lastRollover: date("2026-11-21"), want: "2026-11-25", wantOK: true},
+		{name: "repeat resting until a local midnight shows that date", start: "2026-11-01", repeat: true, availableAt: &restingToMidnight, lastRollover: date("2026-11-21"), want: "2026-11-25", wantOK: true},
+		{name: "repeat resting until mid-day shows the next local midnight", start: "2026-11-01", repeat: true, availableAt: &resting, lastRollover: date("2026-11-21"), want: "2026-11-25", wantOK: true},
+		{name: "rest ending just after local midnight waits for the next one", start: "2026-11-01", repeat: true, availableAt: &restingPastLocalMidnight, lastRollover: date("2026-11-21"), want: "2026-11-26", wantOK: true},
 		{name: "rest already over leaves the rollover date", start: "2026-11-01", repeat: true, availableAt: date("2026-11-10"), lastRollover: date("2026-11-21"), want: "2026-11-22", wantOK: true},
 		{name: "malformed start date", start: "21/11/2026", wantOK: false},
 	}

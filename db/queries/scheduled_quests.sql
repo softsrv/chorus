@@ -90,50 +90,39 @@ WHERE household_id = sqlc.arg(household_id)
 ORDER BY id
 FOR UPDATE;
 
--- name: AssignDueSchedules :many
--- Assigns the household's due schedules at now, under ClaimQuest's rules: the
--- quest is not held (claimed_by IS NULL), not resting (available_at at or
--- before now) and the member is within its age range (quest_age_eligible).
--- A one-off (repeat false) is due when dated on or before local_date and
--- after after_date (any date when NULL): it fires on its date only. A
--- repeated schedule is due whenever it is dated on or before local_date,
--- whatever after_date is, and is never consumed: it assigns its quest each
--- time the quest is free at a pass, so the quest's own cooldown (available_at,
--- set from repeat_days when it is marked done) is its cadence and the
--- schedule stores no interval. schedule_id, when set, narrows it to that one
--- schedule. Of several
--- schedules of one quest the earliest eligible one wins. The quest is left as
--- Accept leaves it: claimed_by and claimed_at set, claim_expires_at the local
--- midnight ending the day of now. Returns the quests assigned.
-WITH due AS (
-    SELECT DISTINCT ON (s.quest_id) s.quest_id, s.member_id
-    FROM quest_schedules s
-    JOIN household_quests q ON q.household_id = s.household_id AND q.id = s.quest_id
-    JOIN family_members m ON m.household_id = s.household_id AND m.id = s.member_id
-    JOIN households h ON h.id = s.household_id
-    WHERE s.household_id = sqlc.arg(household_id)::uuid
-      AND s.start_date <= sqlc.arg(local_date)::date
-      AND (s.repeat OR sqlc.narg(after_date)::date IS NULL OR s.start_date > sqlc.narg(after_date)::date)
-      AND (sqlc.narg(schedule_id)::uuid IS NULL OR s.id = sqlc.narg(schedule_id)::uuid)
-      AND q.claimed_by IS NULL
-      AND (q.available_at IS NULL OR q.available_at <= sqlc.arg(now)::timestamptz)
-      AND quest_age_eligible(m.birthday, h.timezone, q.min_age, q.max_age)
-    ORDER BY s.quest_id, s.start_date, s.created_at, s.id
-)
-UPDATE household_quests q
-SET claimed_by = d.member_id, claimed_at = sqlc.arg(now)::timestamptz, updated_at = NOW(),
-    claim_expires_at = (
-        SELECT quest_claim_expires_at(sqlc.arg(now)::timestamptz, h.timezone)
-        FROM households h WHERE h.id = q.household_id
-    )
-FROM due d
-WHERE q.household_id = sqlc.arg(household_id)::uuid AND q.id = d.quest_id
+-- name: ListDueSchedules :many
+-- The household's schedules due at now, at most one per quest, for
+-- assignSchedules to assign through AssignScheduledQuest (quests.sql owns the
+-- write to household_quests). A schedule is a candidate when its quest is
+-- free under ClaimQuest's rules: not held (claimed_by IS NULL), not resting
+-- (available_at at or before now) and the member within its age range
+-- (quest_age_eligible). A one-off (repeat false) is due when dated on or
+-- before local_date and after after_date (any date when NULL): it fires on
+-- its date only. A repeated schedule is due whenever it is dated on or before
+-- local_date, whatever after_date is, and is never consumed: it assigns its
+-- quest each time the quest is free at a pass, so the quest's own cooldown
+-- (available_at, set from repeat_days when it is marked done) is its cadence
+-- and the schedule stores no interval. schedule_id, when set, narrows it to
+-- that one schedule. Of several schedules of one quest the one with the
+-- latest date wins (then the earliest created): after missed midnights the
+-- claim is for local_date, so the schedule nearest it is the one assigned and
+-- a one-off dated on an earlier missed day ends with its day.
+SELECT DISTINCT ON (s.quest_id) s.id, s.quest_id, s.member_id
+FROM quest_schedules s
+JOIN household_quests q ON q.household_id = s.household_id AND q.id = s.quest_id
+JOIN family_members m ON m.household_id = s.household_id AND m.id = s.member_id
+JOIN households h ON h.id = s.household_id
+WHERE s.household_id = sqlc.arg(household_id)::uuid
+  AND s.start_date <= sqlc.arg(local_date)::date
+  AND (s.repeat OR sqlc.narg(after_date)::date IS NULL OR s.start_date > sqlc.narg(after_date)::date)
+  AND (sqlc.narg(schedule_id)::uuid IS NULL OR s.id = sqlc.narg(schedule_id)::uuid)
   AND q.claimed_by IS NULL
   AND (q.available_at IS NULL OR q.available_at <= sqlc.arg(now)::timestamptz)
-RETURNING q.id, q.claimed_by;
+  AND quest_age_eligible(m.birthday, h.timezone, q.min_age, q.max_age)
+ORDER BY s.quest_id, s.start_date DESC, s.created_at, s.id;
 
 -- name: DeleteFinishedSchedules :execrows
--- Ends the one-off schedules AssignDueSchedules just judged (same window and
+-- Ends the one-off schedules ListDueSchedules just judged (same window and
 -- schedule_id): those assigned and those skipped because the quest was held
 -- or resting. A schedule skipped because the member is outside the quest's
 -- age range is kept for the admin to see; it is never due again, since its

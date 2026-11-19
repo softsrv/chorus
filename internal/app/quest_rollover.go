@@ -157,19 +157,34 @@ func rolloverHousehold(ctx context.Context, q *db.Queries, pool pgxBeginner, hou
 // afterDate (any, when not valid) and up to localDate, and its repeated
 // schedules dated up to localDate, narrowed to scheduleID when it is set,
 // then ends the one-off schedules it judged (all but those skipped for age).
-// Repeated schedules are never ended here. The caller holds the household's
-// lock and the member locks.
+// ListDueSchedules picks at most one schedule per quest, the latest dated;
+// AssignScheduledQuest (quests.sql, the owner of household_quests' claim
+// state) writes the claim. Repeated schedules are never ended here. The
+// caller holds the household's lock and the member locks.
 func assignSchedules(ctx context.Context, qtx *db.Queries, householdID uuid.UUID, now pgtype.Timestamptz, localDate, afterDate pgtype.Date, scheduleID *uuid.UUID) (int, error) {
-	rows, err := qtx.AssignDueSchedules(ctx, db.AssignDueSchedulesParams{
+	due, err := qtx.ListDueSchedules(ctx, db.ListDueSchedulesParams{
 		Now: now, HouseholdID: householdID, LocalDate: localDate, AfterDate: afterDate, ScheduleID: scheduleID,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("assign due schedules: %w", err)
+		return 0, fmt.Errorf("list due schedules: %w", err)
+	}
+	assigned := 0
+	for _, d := range due {
+		memberID := d.MemberID
+		if _, err := qtx.AssignScheduledQuest(ctx, db.AssignScheduledQuestParams{
+			MemberID: &memberID, Now: now, HouseholdID: householdID, ID: d.QuestID,
+		}); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				continue
+			}
+			return 0, fmt.Errorf("assign scheduled quest %s: %w", d.QuestID, err)
+		}
+		assigned++
 	}
 	if _, err := qtx.DeleteFinishedSchedules(ctx, db.DeleteFinishedSchedulesParams{
 		HouseholdID: householdID, LocalDate: localDate, AfterDate: afterDate, ScheduleID: scheduleID,
 	}); err != nil {
 		return 0, fmt.Errorf("delete finished schedules: %w", err)
 	}
-	return len(rows), nil
+	return assigned, nil
 }

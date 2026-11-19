@@ -12,88 +12,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const assignDueSchedules = `-- name: AssignDueSchedules :many
-WITH due AS (
-    SELECT DISTINCT ON (s.quest_id) s.quest_id, s.member_id
-    FROM quest_schedules s
-    JOIN household_quests q ON q.household_id = s.household_id AND q.id = s.quest_id
-    JOIN family_members m ON m.household_id = s.household_id AND m.id = s.member_id
-    JOIN households h ON h.id = s.household_id
-    WHERE s.household_id = $2::uuid
-      AND s.start_date <= $3::date
-      AND (s.repeat OR $4::date IS NULL OR s.start_date > $4::date)
-      AND ($5::uuid IS NULL OR s.id = $5::uuid)
-      AND q.claimed_by IS NULL
-      AND (q.available_at IS NULL OR q.available_at <= $1::timestamptz)
-      AND quest_age_eligible(m.birthday, h.timezone, q.min_age, q.max_age)
-    ORDER BY s.quest_id, s.start_date, s.created_at, s.id
-)
-UPDATE household_quests q
-SET claimed_by = d.member_id, claimed_at = $1::timestamptz, updated_at = NOW(),
-    claim_expires_at = (
-        SELECT quest_claim_expires_at($1::timestamptz, h.timezone)
-        FROM households h WHERE h.id = q.household_id
-    )
-FROM due d
-WHERE q.household_id = $2::uuid AND q.id = d.quest_id
-  AND q.claimed_by IS NULL
-  AND (q.available_at IS NULL OR q.available_at <= $1::timestamptz)
-RETURNING q.id, q.claimed_by
-`
-
-type AssignDueSchedulesParams struct {
-	Now         pgtype.Timestamptz `json:"now"`
-	HouseholdID uuid.UUID          `json:"household_id"`
-	LocalDate   pgtype.Date        `json:"local_date"`
-	AfterDate   pgtype.Date        `json:"after_date"`
-	ScheduleID  *uuid.UUID         `json:"schedule_id"`
-}
-
-type AssignDueSchedulesRow struct {
-	ID        uuid.UUID  `json:"id"`
-	ClaimedBy *uuid.UUID `json:"claimed_by"`
-}
-
-// Assigns the household's due schedules at now, under ClaimQuest's rules: the
-// quest is not held (claimed_by IS NULL), not resting (available_at at or
-// before now) and the member is within its age range (quest_age_eligible).
-// A one-off (repeat false) is due when dated on or before local_date and
-// after after_date (any date when NULL): it fires on its date only. A
-// repeated schedule is due whenever it is dated on or before local_date,
-// whatever after_date is, and is never consumed: it assigns its quest each
-// time the quest is free at a pass, so the quest's own cooldown (available_at,
-// set from repeat_days when it is marked done) is its cadence and the
-// schedule stores no interval. schedule_id, when set, narrows it to that one
-// schedule. Of several
-// schedules of one quest the earliest eligible one wins. The quest is left as
-// Accept leaves it: claimed_by and claimed_at set, claim_expires_at the local
-// midnight ending the day of now. Returns the quests assigned.
-func (q *Queries) AssignDueSchedules(ctx context.Context, arg AssignDueSchedulesParams) ([]AssignDueSchedulesRow, error) {
-	rows, err := q.db.Query(ctx, assignDueSchedules,
-		arg.Now,
-		arg.HouseholdID,
-		arg.LocalDate,
-		arg.AfterDate,
-		arg.ScheduleID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []AssignDueSchedulesRow{}
-	for rows.Next() {
-		var i AssignDueSchedulesRow
-		if err := rows.Scan(&i.ID, &i.ClaimedBy); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const createQuestSchedule = `-- name: CreateQuestSchedule :one
 
 WITH ins AS (
@@ -186,7 +104,7 @@ type DeleteFinishedSchedulesParams struct {
 	ScheduleID  *uuid.UUID  `json:"schedule_id"`
 }
 
-// Ends the one-off schedules AssignDueSchedules just judged (same window and
+// Ends the one-off schedules ListDueSchedules just judged (same window and
 // schedule_id): those assigned and those skipped because the quest was held
 // or resting. A schedule skipped because the member is outside the quest's
 // age range is kept for the admin to see; it is never due again, since its
@@ -250,6 +168,78 @@ func (q *Queries) GetHouseholdRolloverState(ctx context.Context, arg GetHousehol
 	var i GetHouseholdRolloverStateRow
 	err := row.Scan(&i.LocalDate, &i.LastRolloverDate)
 	return i, err
+}
+
+const listDueSchedules = `-- name: ListDueSchedules :many
+SELECT DISTINCT ON (s.quest_id) s.id, s.quest_id, s.member_id
+FROM quest_schedules s
+JOIN household_quests q ON q.household_id = s.household_id AND q.id = s.quest_id
+JOIN family_members m ON m.household_id = s.household_id AND m.id = s.member_id
+JOIN households h ON h.id = s.household_id
+WHERE s.household_id = $1::uuid
+  AND s.start_date <= $2::date
+  AND (s.repeat OR $3::date IS NULL OR s.start_date > $3::date)
+  AND ($4::uuid IS NULL OR s.id = $4::uuid)
+  AND q.claimed_by IS NULL
+  AND (q.available_at IS NULL OR q.available_at <= $5::timestamptz)
+  AND quest_age_eligible(m.birthday, h.timezone, q.min_age, q.max_age)
+ORDER BY s.quest_id, s.start_date DESC, s.created_at, s.id
+`
+
+type ListDueSchedulesParams struct {
+	HouseholdID uuid.UUID          `json:"household_id"`
+	LocalDate   pgtype.Date        `json:"local_date"`
+	AfterDate   pgtype.Date        `json:"after_date"`
+	ScheduleID  *uuid.UUID         `json:"schedule_id"`
+	Now         pgtype.Timestamptz `json:"now"`
+}
+
+type ListDueSchedulesRow struct {
+	ID       uuid.UUID `json:"id"`
+	QuestID  uuid.UUID `json:"quest_id"`
+	MemberID uuid.UUID `json:"member_id"`
+}
+
+// The household's schedules due at now, at most one per quest, for
+// assignSchedules to assign through AssignScheduledQuest (quests.sql owns the
+// write to household_quests). A schedule is a candidate when its quest is
+// free under ClaimQuest's rules: not held (claimed_by IS NULL), not resting
+// (available_at at or before now) and the member within its age range
+// (quest_age_eligible). A one-off (repeat false) is due when dated on or
+// before local_date and after after_date (any date when NULL): it fires on
+// its date only. A repeated schedule is due whenever it is dated on or before
+// local_date, whatever after_date is, and is never consumed: it assigns its
+// quest each time the quest is free at a pass, so the quest's own cooldown
+// (available_at, set from repeat_days when it is marked done) is its cadence
+// and the schedule stores no interval. schedule_id, when set, narrows it to
+// that one schedule. Of several schedules of one quest the one with the
+// latest date wins (then the earliest created): after missed midnights the
+// claim is for local_date, so the schedule nearest it is the one assigned and
+// a one-off dated on an earlier missed day ends with its day.
+func (q *Queries) ListDueSchedules(ctx context.Context, arg ListDueSchedulesParams) ([]ListDueSchedulesRow, error) {
+	rows, err := q.db.Query(ctx, listDueSchedules,
+		arg.HouseholdID,
+		arg.LocalDate,
+		arg.AfterDate,
+		arg.ScheduleID,
+		arg.Now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListDueSchedulesRow{}
+	for rows.Next() {
+		var i ListDueSchedulesRow
+		if err := rows.Scan(&i.ID, &i.QuestID, &i.MemberID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listHouseholdsDueForRollover = `-- name: ListHouseholdsDueForRollover :many
