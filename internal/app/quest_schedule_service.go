@@ -52,7 +52,8 @@ type QuestSchedule struct {
 	CreatedAt   time.Time
 }
 
-// Schedule stores a one-off schedule of a quest for a member. It needs the
+// Schedule stores a schedule of a quest for a member, one-off or repeated
+// (in.Repeat). It needs the
 // admin role and, once one is set, the admin PIN (ErrAdminPinRequired,
 // ErrWrongPIN); a non-member gets ErrNotFound. A missing date, one that is
 // not YYYY-MM-DD, or one before today in the household's timezone is a

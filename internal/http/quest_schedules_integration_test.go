@@ -19,6 +19,7 @@ type questScheduleWire struct {
 	MemberID   uuid.UUID `json:"member_id"`
 	MemberName string    `json:"member_name"`
 	StartDate  string    `json:"start_date"`
+	Repeat     bool      `json:"repeat"`
 }
 
 type upcomingQuestWire struct {
@@ -162,7 +163,7 @@ func TestAPI_QuestSchedules(t *testing.T) {
 	var created questScheduleWire
 	s.expect(http.StatusCreated, "POST", hp+"/quest-schedules", parent.AccessToken, body(quest, sam, future), &created)
 	if created.ID == uuid.Nil || created.QuestID != quest || created.QuestName != "Feed the cat" ||
-		created.MemberID != sam || created.MemberName != "Sam" || created.StartDate != future {
+		created.MemberID != sam || created.MemberName != "Sam" || created.StartDate != future || created.Repeat {
 		t.Fatalf("created: %+v", created)
 	}
 	if n := count(hid); n != 1 {
@@ -251,5 +252,32 @@ func TestAPI_QuestSchedules(t *testing.T) {
 	refused("delete twice", http.StatusNotFound, "not_found", "DELETE", hp+"/quest-schedules/"+created.ID.String(), parent.AccessToken, right, nil)
 	if n := count(otherID); n != 1 {
 		t.Fatalf("other household schedules: %d, want 1", n)
+	}
+
+	// Repeat round trip (CLM-6): repeat true is stored and returned by POST
+	// and GET; an omitted repeat is false.
+	repeatBody := body(quest, sam, future)
+	repeatBody["repeat"] = true
+	var repeated questScheduleWire
+	s.expectWithHeaders(http.StatusCreated, "POST", hp+"/quest-schedules", parent.AccessToken, right, repeatBody, &repeated)
+	if !repeated.Repeat || repeated.QuestID != quest || repeated.MemberID != sam {
+		t.Fatalf("created with repeat true: %+v", repeated)
+	}
+	var stored bool
+	if err := s.pool.QueryRow(ctx, `SELECT repeat FROM quest_schedules WHERE household_id = $1 AND id = $2`, hid, repeated.ID).Scan(&stored); err != nil || !stored {
+		t.Fatalf("stored repeat = %v, %v; want true", stored, err)
+	}
+	var oneOff questScheduleWire
+	s.expectWithHeaders(http.StatusCreated, "POST", hp+"/quest-schedules", parent.AccessToken, right, body(quest, sam, future), &oneOff)
+	if oneOff.Repeat {
+		t.Fatalf("created without repeat: %+v, want repeat false", oneOff)
+	}
+	s.expectWithHeaders(http.StatusOK, "GET", hp+"/quest-schedules", parent.AccessToken, right, nil, &list)
+	gotRepeat := map[uuid.UUID]bool{}
+	for _, it := range list.Items {
+		gotRepeat[it.ID] = it.Repeat
+	}
+	if len(list.Items) != 2 || !gotRepeat[repeated.ID] || gotRepeat[oneOff.ID] {
+		t.Fatalf("list after repeat round trip: %+v, want %s repeat true and %s repeat false", list.Items, repeated.ID, oneOff.ID)
 	}
 }
