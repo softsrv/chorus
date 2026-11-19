@@ -74,6 +74,9 @@ func newIDTokenVerifier(clientIDs []string, jwksURL string, client *http.Client)
 // verify returns the identity a valid token carries. Every error is a refusal;
 // the caller logs the cause and shows only a generic error.
 func (v *idTokenVerifier) verify(ctx context.Context, raw string) (googleUserInfo, error) {
+	if strings.TrimSpace(raw) == "" {
+		return googleUserInfo{}, errors.New("empty id token")
+	}
 	var c googleIDClaims
 	_, err := jwt.ParseWithClaims(raw, &c, func(t *jwt.Token) (any, error) {
 		kid, _ := t.Header["kid"].(string)
@@ -96,7 +99,11 @@ func (v *idTokenVerifier) verify(ctx context.Context, raw string) (googleUserInf
 	if !v.audienceOK(c.Audience) {
 		return googleUserInfo{}, errors.New("id token audience is not a configured client id")
 	}
-	return googleUserInfo{Subject: c.Subject, Email: c.Email, EmailVerified: c.EmailVerified, Name: c.Name}, nil
+	info := googleUserInfo{Subject: c.Subject, Email: c.Email, EmailVerified: c.EmailVerified, Name: c.Name}
+	if !info.verified() {
+		return googleUserInfo{}, errors.New("id token email not verified")
+	}
+	return info, nil
 }
 
 func (v *idTokenVerifier) audienceOK(aud jwt.ClaimStrings) bool {
