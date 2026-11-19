@@ -121,6 +121,37 @@ test('CLM-3: a credential that follows the button click is not reported as a can
   assert.equal(calls.filter((c) => c.method === 'POST' && c.path === '/auth/google').length, 1);
 });
 
+// A credential slower than the grace period: the focus timer has already
+// guessed "cancelled". The sign-in that does complete must withdraw that
+// message (view and toast), so a completed sign-in is never left reported
+// as cancelled.
+test('CLM-3: a credential arriving after the cancel timer fired withdraws the cancelled message', async () => {
+  await loadApp();
+  clickGoogleButton();
+  returnToPage();
+  await wait(450);
+  await settle();
+  assert.match(env.document.body.textContent, /Google sign-in was cancelled/, 'the timer guessed a cancel');
+  await gis.callback({ credential: 'late-tok' });
+  await settle();
+  assert.doesNotMatch(env.document.body.textContent, /cancelled/, 'cancel withdrawn in view and toast');
+  assert.match(text(), /Google sign-in failed/, 'the late credential was sent and its outcome shown');
+  const posted = calls.filter((c) => c.method === 'POST' && c.path === '/auth/google');
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].body.id_token, 'late-tok');
+});
+
+test('CLM-3: a One Tap cancel notification followed by a credential withdraws the cancelled message', async () => {
+  await loadApp();
+  gis.prompt[0]({ isSkippedMoment: () => true, getSkippedReason: () => 'user_cancel', isDismissedMoment: () => false });
+  await settle();
+  assert.match(env.document.body.textContent, /Google sign-in was cancelled/);
+  await gis.callback({ credential: 'tok-after-onetap' });
+  await settle();
+  assert.doesNotMatch(env.document.body.textContent, /cancelled/);
+  assert.equal(calls.filter((c) => c.method === 'POST' && c.path === '/auth/google').length, 1);
+});
+
 test('CLM-3: an empty credential shows the cancelled message and sends nothing', async () => {
   await loadApp();
   await gis.callback({ credential: '' });

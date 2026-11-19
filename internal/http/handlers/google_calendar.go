@@ -28,9 +28,16 @@ type GoogleCalendarHandler struct {
 	svc googleCalendarServicer
 }
 
-// NewGoogleCalendarHandler constructs a GoogleCalendarHandler. svc may be nil.
+// NewGoogleCalendarHandler constructs a GoogleCalendarHandler. svc may be nil
+// (Google Calendar not configured). The nil check is on the concrete pointer:
+// storing a nil *app.GoogleCalendar in the interface field would make it
+// non-nil and Enabled would wrongly report true.
 func NewGoogleCalendarHandler(svc *app.GoogleCalendar) *GoogleCalendarHandler {
-	return &GoogleCalendarHandler{svc: svc}
+	h := &GoogleCalendarHandler{}
+	if svc != nil {
+		h.svc = svc
+	}
+	return h
 }
 
 // Enabled reports whether Google Calendar is configured.
