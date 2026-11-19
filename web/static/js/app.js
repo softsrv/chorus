@@ -1846,7 +1846,7 @@ async function familyTab(h, $root) {
 
   // scheduleQuestForm is the member view's 'Schedule a quest' form: a Quest
   // select of the household's quests, a Date input and Schedule. It POSTs
-  // {quest_id, member_id, date} with the admin's headers; on 201 the view
+  // {quest_id, member_id, date, repeat} with the admin's headers; on 201 the view
   // reopens so 'Scheduled' shows the new schedule. A refusal (422 on date,
   // 404 for a gone quest) shows inline, keeping what was entered.
   const scheduleQuestForm = (m, view, quests) => {
@@ -1908,7 +1908,8 @@ async function familyTab(h, $root) {
       i.repeat && el('span', { class: 'badge badge-sm', text: 'Repeats' }))));
   };
 
-  // scheduledList is the member's schedules: '<quest> — from <date>' and a
+  // scheduledList is the member's schedules: '<quest> — from <date>' (with
+  // ', repeats' for a repeated schedule) and a
   // Remove (confirm with 'Sure?') that DELETEs it and reopens the view; an
   // empty line when nothing is scheduled.
   const scheduledList = (m, view, items) => {
@@ -1916,7 +1917,7 @@ async function familyTab(h, $root) {
     return el('ul', { class: 'space-y-1' }, items.map((s) => {
       const $err = el('div', { class: 'text-error text-xs w-full' });
       return el('li', { class: 'flex flex-wrap items-center gap-2 text-sm' },
-        el('span', { text: `${s.quest_name} — from ${s.start_date}` }),
+        el('span', { text: `${s.quest_name} — from ${s.start_date}${s.repeat ? ', repeats' : ''}` }),
         el('button', {
           class: 'btn btn-ghost btn-xs', text: 'Remove',
           onclick: confirmClick('Sure?', async () => {
