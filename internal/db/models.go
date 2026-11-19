@@ -104,15 +104,6 @@ type GoogleCalendarConnection struct {
 	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
 }
 
-type GoogleSignInHandoff struct {
-	ID        uuid.UUID          `json:"id"`
-	CodeHash  string             `json:"code_hash"`
-	UserID    uuid.UUID          `json:"user_id"`
-	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
-	UsedAt    pgtype.Timestamptz `json:"used_at"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
-}
-
 type Household struct {
 	ID        uuid.UUID          `json:"id"`
 	Name      string             `json:"name"`
@@ -220,17 +211,6 @@ type MemberQuestStreak struct {
 	PrevExpiresAt  pgtype.Timestamptz `json:"prev_expires_at"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
-}
-
-type OauthState struct {
-	ID           uuid.UUID          `json:"id"`
-	StateHash    string             `json:"state_hash"`
-	Purpose      string             `json:"purpose"`
-	UserID       *uuid.UUID         `json:"user_id"`
-	PkceVerifier string             `json:"pkce_verifier"`
-	ExpiresAt    pgtype.Timestamptz `json:"expires_at"`
-	UsedAt       pgtype.Timestamptz `json:"used_at"`
-	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 }
 
 type PasswordResetToken struct {

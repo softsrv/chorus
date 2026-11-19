@@ -19,12 +19,13 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"golang.org/x/oauth2"
 
-	"github.com/softsrv/chorus/internal/auth"
 	"github.com/softsrv/chorus/internal/db"
 )
 
 const (
 	googleRevokeURL = "https://oauth2.googleapis.com/revoke"
+	// googleTokenInfoURL reports which account (sub) an access token belongs to.
+	googleTokenInfoURL = "https://oauth2.googleapis.com/tokeninfo"
 	// googleCalendarAPIURL is the Calendar API v3 base. Chorus reads calendar
 	// lists and entries from it; its only write is a PATCH of an entry's
 	// title (summary) when a member tags the entry.
@@ -42,8 +43,6 @@ const (
 )
 
 const (
-	oauthPurposeCalendar = "calendar"
-	calendarStateTTL     = 10 * time.Minute
 	// accessTokenSkew refreshes a little before the recorded expiry so a token
 	// isn't handed out moments before Google stops accepting it.
 	accessTokenSkew = time.Minute
@@ -59,26 +58,22 @@ const (
 	CalendarReadOnly  = "read_only"
 )
 
-// googleCalendarScopes is the exact set Connect requests.
+// googleCalendarScopes are the calendar scopes the SDK client asks for, which
+// grantedAccess recognises.
 var googleCalendarScopes = []string{ScopeCalendarListReadonly, ScopeCalendarEvents}
 
-var (
-	// ErrGoogleCalendarCancelled means the person cancelled or denied on Google.
-	ErrGoogleCalendarCancelled = errors.New("google calendar connect cancelled")
-	// ErrGoogleCalendarFailed is the single generic outcome for every other
-	// callback failure. The cause is logged, never shown.
-	ErrGoogleCalendarFailed = errors.New("google calendar connect failed")
-)
+// ErrGoogleCalendarFailed is the single generic outcome for every failed code
+// exchange or connect failure. The cause is only logged, never shown.
+var ErrGoogleCalendarFailed = errors.New("google calendar connect failed")
 
 // GoogleCalendarConfig configures GoogleCalendar. The URL fields default to
 // Google's endpoints when empty so tests can point the flow at a fake.
 type GoogleCalendarConfig struct {
 	ClientID     string
 	ClientSecret string
-	RedirectURL  string // APP_BASE_URL + /api/v1/me/google-calendar/callback
-	AuthURL      string
 	TokenURL     string
 	RevokeURL    string
+	TokenInfoURL string // default googleTokenInfoURL
 	APIBaseURL   string // Calendar API v3 base; default googleCalendarAPIURL
 	HTTPClient   *http.Client
 }
@@ -90,24 +85,20 @@ type CalendarStatus struct {
 	Access string
 }
 
-// GoogleCalendar connects a Chorus user's Google Calendar: the OAuth
-// authorization-code flow with PKCE and offline access, storing the tokens
+// GoogleCalendar connects a Chorus user's Google Calendar: storing the tokens
 // encrypted, one connection per user.
 type GoogleCalendar struct {
-	q         *db.Queries
-	cipher    *TokenCipher
-	oauth     oauth2.Config
-	revokeURL string
-	apiURL    string
-	client    *http.Client
+	q            *db.Queries
+	cipher       *TokenCipher
+	oauth        oauth2.Config
+	revokeURL    string
+	tokenInfoURL string
+	apiURL       string
+	client       *http.Client
 }
 
 // NewGoogleCalendar builds the calendar connection service.
 func NewGoogleCalendar(q *db.Queries, cipher *TokenCipher, cfg GoogleCalendarConfig) *GoogleCalendar {
-	authURL := cfg.AuthURL
-	if authURL == "" {
-		authURL = googleAuthURL
-	}
 	tokenURL := cfg.TokenURL
 	if tokenURL == "" {
 		tokenURL = googleTokenURL
@@ -115,6 +106,10 @@ func NewGoogleCalendar(q *db.Queries, cipher *TokenCipher, cfg GoogleCalendarCon
 	revokeURL := cfg.RevokeURL
 	if revokeURL == "" {
 		revokeURL = googleRevokeURL
+	}
+	tokenInfoURL := cfg.TokenInfoURL
+	if tokenInfoURL == "" {
+		tokenInfoURL = googleTokenInfoURL
 	}
 	apiURL := strings.TrimRight(cfg.APIBaseURL, "/")
 	if apiURL == "" {
@@ -130,126 +125,46 @@ func NewGoogleCalendar(q *db.Queries, cipher *TokenCipher, cfg GoogleCalendarCon
 		oauth: oauth2.Config{
 			ClientID:     cfg.ClientID,
 			ClientSecret: cfg.ClientSecret,
-			RedirectURL:  cfg.RedirectURL,
 			Scopes:       googleCalendarScopes,
 			Endpoint: oauth2.Endpoint{
-				AuthURL:   authURL,
 				TokenURL:  tokenURL,
 				AuthStyle: oauth2.AuthStyleInParams,
 			},
 		},
-		revokeURL: revokeURL,
-		apiURL:    apiURL,
-		client:    client,
+		revokeURL:    revokeURL,
+		tokenInfoURL: tokenInfoURL,
+		apiURL:       apiURL,
+		client:       client,
 	}
 }
 
-// AuthCodeURL builds the Google authorization URL for a state value and PKCE
-// verifier. Connect uses it; it is exported so its scopes can be checked.
-func (g *GoogleCalendar) AuthCodeURL(state, verifier string) string {
-	return g.oauth.AuthCodeURL(state,
-		oauth2.S256ChallengeOption(verifier),
-		oauth2.AccessTypeOffline,
-		oauth2.SetAuthURLParam("prompt", "consent"),
-	)
-}
+// Connect exchanges a one-time server auth code from Google SDK (web, iOS or
+// Android) for tokens using the web client's ID and secret, storing the access
+// and refresh tokens encrypted as one connection for the user.
+// platform is optional: absent or "web" exchanges with redirect_uri="postmessage";
+// "ios" or "android" exchanges with an empty redirect_uri.
+// Any other platform value or exchange failure maps to ErrGoogleCalendarFailed.
+func (g *GoogleCalendar) Connect(ctx context.Context, userID uuid.UUID, code, platform string) (CalendarStatus, error) {
+	if strings.TrimSpace(code) == "" {
+		return CalendarStatus{}, ErrGoogleCalendarFailed
+	}
 
-// CalendarStateTTL is how long a connect stays completable. The browser
-// binding cookie should not outlive it.
-const CalendarStateTTL = calendarStateTTL
-
-// calendarStateHash is the stored hash of a calendar state. It covers both
-// the state Google echoes back and the browser nonce held only in the
-// initiating browser's cookie, so a callback completes only when the browser
-// returning from Google is the one that started the connect.
-func calendarStateHash(state, nonce string) string {
-	return auth.HashToken(state + ":" + nonce)
-}
-
-// RedirectURL is the configured callback URL.
-func (g *GoogleCalendar) RedirectURL() string { return g.oauth.RedirectURL }
-
-// Connect mints a single-use state bound to userID and to a fresh browser
-// nonce (stored hashed together, purpose calendar, with its PKCE verifier and
-// a short expiry). It returns the URL to send the person to and the nonce,
-// which the caller must hand only to the initiating browser (an HttpOnly
-// cookie); the callback refuses without it.
-func (g *GoogleCalendar) Connect(ctx context.Context, userID uuid.UUID) (string, string, error) {
-	state, err := randomURLToken()
-	if err != nil {
-		return "", "", err
+	cfg := g.oauth
+	switch platform {
+	case "", "web":
+		cfg.RedirectURL = "postmessage"
+	case "ios", "android":
+		cfg.RedirectURL = ""
+	default:
+		slog.WarnContext(ctx, "google calendar: invalid platform", "platform", platform)
+		return CalendarStatus{}, ErrGoogleCalendarFailed
 	}
-	nonce, err := randomURLToken()
-	if err != nil {
-		return "", "", err
-	}
-	verifier := oauth2.GenerateVerifier()
-	id, err := uuid.NewV7()
-	if err != nil {
-		return "", "", fmt.Errorf("generate state id: %w", err)
-	}
-	uid := userID
-	if _, err := g.q.InsertOAuthState(ctx, db.InsertOAuthStateParams{
-		ID:           id,
-		StateHash:    calendarStateHash(state, nonce),
-		Purpose:      oauthPurposeCalendar,
-		UserID:       &uid,
-		PkceVerifier: verifier,
-		ExpiresAt:    pgtype.Timestamptz{Time: time.Now().Add(calendarStateTTL), Valid: true},
-	}); err != nil {
-		return "", "", fmt.Errorf("insert oauth state: %w", err)
-	}
-	return g.AuthCodeURL(state, verifier), nonce, nil
-}
-
-// Callback completes the Google side of a calendar connect for the user the
-// state was minted for, provided nonce is the browser nonce Connect issued
-// with that state. It returns ErrGoogleCalendarCancelled when Google reports
-// an error, and ErrGoogleCalendarFailed for anything else that goes wrong
-// (including a missing or mismatched nonce, which never reaches Google); the
-// cause is only logged.
-func (g *GoogleCalendar) Callback(ctx context.Context, state, code, errParam, nonce string) error {
-	if errParam != "" {
-		slog.InfoContext(ctx, "google calendar: provider returned error", "error_param", truncate(errParam, 64))
-		return ErrGoogleCalendarCancelled
-	}
-	if err := g.callback(ctx, state, code, nonce); err != nil {
-		slog.WarnContext(ctx, "google calendar: callback refused", "error", err)
-		return ErrGoogleCalendarFailed
-	}
-	return nil
-}
-
-func (g *GoogleCalendar) callback(ctx context.Context, state, code, nonce string) error {
-	if state == "" {
-		return errors.New("missing state")
-	}
-	if code == "" {
-		return errors.New("missing code")
-	}
-	if nonce == "" {
-		// The browser finishing consent is not the one that started it.
-		return errors.New("missing browser binding")
-	}
-	st, err := g.q.ConsumeOAuthState(ctx, db.ConsumeOAuthStateParams{
-		StateHash: calendarStateHash(state, nonce),
-		Purpose:   oauthPurposeCalendar,
-	})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return errors.New("state unknown, used, expired, for another flow or another browser")
-		}
-		return fmt.Errorf("consume state: %w", err)
-	}
-	if st.UserID == nil {
-		return errors.New("calendar state has no user")
-	}
-	userID := *st.UserID
 
 	httpCtx := context.WithValue(ctx, oauth2.HTTPClient, g.client)
-	tok, err := g.oauth.Exchange(httpCtx, code, oauth2.VerifierOption(st.PkceVerifier))
+	tok, err := cfg.Exchange(httpCtx, code)
 	if err != nil {
-		return fmt.Errorf("exchange code: %w", err)
+		slog.WarnContext(ctx, "google calendar: exchange code failed", "error", withoutURL(err))
+		return CalendarStatus{}, ErrGoogleCalendarFailed
 	}
 
 	granted, _ := tok.Extra("scope").(string)
@@ -257,39 +172,52 @@ func (g *GoogleCalendar) callback(ctx context.Context, state, code, nonce string
 	if !ok {
 		// Nothing usable was granted: give the token back and store nothing.
 		g.revoke(ctx, tok.AccessToken)
-		return errors.New("no calendar scope granted")
+		slog.WarnContext(ctx, "google calendar: no calendar scope granted", "granted", granted)
+		return CalendarStatus{}, ErrGoogleCalendarFailed
 	}
 
+	// Local failures (encryption, database, id generation) are not the
+	// caller's code being bad: they return a wrapped error, which the
+	// handler answers with the generic 500.
 	accessEnc, err := g.cipher.Encrypt(tok.AccessToken)
 	if err != nil {
-		return fmt.Errorf("encrypt access token: %w", err)
+		return CalendarStatus{}, fmt.Errorf("encrypt access token: %w", err)
 	}
 
 	var refreshEnc []byte
 	if tok.RefreshToken != "" {
 		if refreshEnc, err = g.cipher.Encrypt(tok.RefreshToken); err != nil {
-			return fmt.Errorf("encrypt refresh token: %w", err)
+			return CalendarStatus{}, fmt.Errorf("encrypt refresh token: %w", err)
 		}
 	} else {
 		// Google only sends a refresh token on first consent. Without one the
 		// connection can't outlive the access token, so it needs a stored
-		// refresh token that still works (a broken row's does not).
+		// refresh token that still works (a broken row's does not) and that
+		// belongs to the same Google account as the new access token: a
+		// reconnect with a different account must never pair one account's
+		// access token with another's refresh token.
 		existing, err := g.q.GetGoogleCalendarConnectionByUser(ctx, userID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				return errors.New("no refresh token returned and none stored")
+				slog.WarnContext(ctx, "google calendar: no refresh token returned and none stored")
+				return CalendarStatus{}, ErrGoogleCalendarFailed
 			}
-			return fmt.Errorf("get connection: %w", err)
+			return CalendarStatus{}, fmt.Errorf("get connection: %w", err)
 		}
 		if existing.Broken {
-			return errors.New("no refresh token returned and the stored one is broken")
+			slog.WarnContext(ctx, "google calendar: no refresh token returned and the stored one is broken")
+			return CalendarStatus{}, ErrGoogleCalendarFailed
+		}
+		if !g.sameGoogleAccount(ctx, tok.AccessToken, existing.RefreshTokenEnc) {
+			slog.WarnContext(ctx, "google calendar: no refresh token returned and the stored one is not proven to be the same Google account")
+			return CalendarStatus{}, ErrGoogleCalendarFailed
 		}
 		refreshEnc = existing.RefreshTokenEnc
 	}
 
 	id, err := uuid.NewV7()
 	if err != nil {
-		return fmt.Errorf("generate connection id: %w", err)
+		return CalendarStatus{}, fmt.Errorf("generate connection id: %w", err)
 	}
 	if _, err := g.q.UpsertGoogleCalendarConnection(ctx, db.UpsertGoogleCalendarConnectionParams{
 		ID:              id,
@@ -299,9 +227,90 @@ func (g *GoogleCalendar) callback(ctx context.Context, state, code, nonce string
 		TokenExpiry:     expiryTimestamp(tok.Expiry),
 		AccessLevel:     access,
 	}); err != nil {
-		return fmt.Errorf("upsert connection: %w", err)
+		return CalendarStatus{}, fmt.Errorf("upsert connection: %w", err)
 	}
-	return nil
+
+	return CalendarStatus{Status: CalendarConnected, Access: access}, nil
+}
+
+// sameGoogleAccount reports whether newAccess and the stored refresh token
+// belong to the same Google account. It mints an access token from the
+// stored refresh token and compares the subject Google's tokeninfo reports
+// for each. Any failure, or an empty subject, is "not proven": fail closed.
+func (g *GoogleCalendar) sameGoogleAccount(ctx context.Context, newAccess string, storedRefreshEnc []byte) bool {
+	storedRefresh, err := g.cipher.Decrypt(storedRefreshEnc)
+	if err != nil {
+		slog.WarnContext(ctx, "google calendar: stored refresh token unreadable", "error", err)
+		return false
+	}
+	httpCtx := context.WithValue(ctx, oauth2.HTTPClient, g.client)
+	oldTok, err := g.oauth.TokenSource(httpCtx, &oauth2.Token{RefreshToken: storedRefresh}).Token()
+	if err != nil {
+		slog.WarnContext(ctx, "google calendar: stored refresh token refused", "error", withoutURL(err))
+		return false
+	}
+	newSub, err := g.tokenSubject(ctx, newAccess)
+	if err != nil {
+		slog.WarnContext(ctx, "google calendar: tokeninfo for new token", "error", err)
+		return false
+	}
+	oldSub, err := g.tokenSubject(ctx, oldTok.AccessToken)
+	if err != nil {
+		slog.WarnContext(ctx, "google calendar: tokeninfo for stored token", "error", err)
+		return false
+	}
+	return newSub != "" && newSub == oldSub
+}
+
+// tokenSubject asks Google's tokeninfo endpoint which account (sub) an
+// access token was issued to. The token travels in a POST form body, never
+// the URL, and no returned error carries the request: the caller logs it.
+func (g *GoogleCalendar) tokenSubject(ctx context.Context, accessToken string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.tokenInfoURL,
+		strings.NewReader(url.Values{"access_token": {accessToken}}.Encode()))
+	if err != nil {
+		return "", errors.New("build tokeninfo request")
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := g.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("tokeninfo request failed: %w", withoutURL(err))
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("tokeninfo status %d", resp.StatusCode)
+	}
+	var out struct {
+		Sub string `json:"sub"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&out); err != nil {
+		return "", fmt.Errorf("decode tokeninfo: %w", err)
+	}
+	if out.Sub == "" {
+		return "", errors.New("tokeninfo has no sub")
+	}
+	return out.Sub, nil
+}
+
+// urlFreeError is a *url.Error with its URL dropped: net/http puts the full
+// request URL in its transport errors, and a URL can carry a credential.
+type urlFreeError struct {
+	op  string
+	err error
+}
+
+func (e *urlFreeError) Error() string { return e.op + ": " + e.err.Error() }
+func (e *urlFreeError) Unwrap() error { return e.err }
+
+// withoutURL returns err with its URL gone: when err holds a *url.Error, the
+// result is that error's method and (URL-free) cause only, and any wrapper
+// text around it, which may quote the URL, is dropped too.
+func withoutURL(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return &urlFreeError{op: ue.Op, err: withoutURL(ue.Err)}
+	}
+	return err
 }
 
 // grantedAccess decides the access level from the scope field of the token

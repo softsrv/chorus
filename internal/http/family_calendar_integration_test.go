@@ -270,7 +270,7 @@ func newFamilyTestServer(t *testing.T, fake *fakeFamilyGoogle) *calendarServer {
 		t.Fatalf("NewTokenCipher: %v", err)
 	}
 	gc := app.NewGoogleCalendar(q, cipher, app.GoogleCalendarConfig{
-		ClientID: "client-id", ClientSecret: "client-secret", RedirectURL: calCallbackURL,
+		ClientID: "client-id", ClientSecret: "client-secret",
 		TokenURL:   fake.srv.URL + "/token",
 		RevokeURL:  fake.srv.URL + "/revoke",
 		APIBaseURL: fake.srv.URL + "/calendar/v3",

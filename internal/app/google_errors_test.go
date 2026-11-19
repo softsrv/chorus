@@ -106,14 +106,3 @@ func TestAPIDoRateLimitReason(t *testing.T) {
 		})
 	}
 }
-
-// The stored state hash depends on the browser nonce, so the state alone
-// (as an attacker forwards it) never matches the row.
-func TestCalendarStateHashBindsNonce(t *testing.T) {
-	if calendarStateHash("s", "n1") == calendarStateHash("s", "n2") {
-		t.Error("hash ignores the nonce")
-	}
-	if calendarStateHash("s", "n1") == calendarStateHash("s", "") {
-		t.Error("hash with empty nonce matches")
-	}
-}

@@ -76,6 +76,38 @@ func TestLoadConfig_GoogleBothSetIsEnabled(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_GoogleAudienceList(t *testing.T) {
+	cases := []struct {
+		name         string
+		ios, android string
+		want         []string
+	}{
+		{"neither", "", "", []string{"web-id"}},
+		{"ios only", "ios-id", "", []string{"web-id", "ios-id"}},
+		{"android only", "", "android-id", []string{"web-id", "android-id"}},
+		{"both", "ios-id", "android-id", []string{"web-id", "ios-id", "android-id"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := requiredEnv()
+			env["GOOGLE_CLIENT_ID"] = "web-id"
+			env["GOOGLE_CLIENT_SECRET"] = "secret"
+			env["GOOGLE_IOS_CLIENT_ID"] = tc.ios
+			env["GOOGLE_ANDROID_CLIENT_ID"] = tc.android
+			cfg, err, logs := load(t, env)
+			if err != nil {
+				t.Fatalf("loadConfig: %v", err)
+			}
+			if strings.Join(cfg.Google.ClientIDs, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("audiences = %v, want %v", cfg.Google.ClientIDs, tc.want)
+			}
+			if logs != "" {
+				t.Fatalf("unexpected log output: %s", logs)
+			}
+		})
+	}
+}
+
 func TestLoadConfig_RequiredVarsStillRequired(t *testing.T) {
 	env := requiredEnv()
 	delete(env, "SMTP_HOST")

@@ -95,8 +95,10 @@ export async function authConfig() {
   return publicApi('GET', '/auth/config');
 }
 
-export async function googleRedeem(code, deviceName = DEVICE_NAME) {
-  const t = await publicApi('POST', '/auth/google/redeem', { code, device_name: deviceName });
+// googleSignIn exchanges a Google ID token (the credential Google's sign-in
+// button hands back) for a Chorus session. Tokens are stored only on success.
+export async function googleSignIn(idToken, deviceName = DEVICE_NAME) {
+  const t = await publicApi('POST', '/auth/google', { id_token: idToken, device_name: deviceName });
   setTokens(t);
   return t;
 }
