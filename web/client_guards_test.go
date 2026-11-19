@@ -1,8 +1,14 @@
 package web
 
 import (
+	"fmt"
 	"io/fs"
+	"os"
+	"path"
+	"path/filepath"
 	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -16,11 +22,39 @@ func readStatic(t *testing.T, name string) string {
 	return string(data)
 }
 
+// clientJS is every js/*.js file the page can load, by name.
 func clientJS(t *testing.T) map[string]string {
-	return map[string]string{
-		"js/app.js": readStatic(t, "js/app.js"),
-		"js/api.js": readStatic(t, "js/api.js"),
+	t.Helper()
+	names, err := fs.Glob(Static(false), "js/*.js")
+	if err != nil || len(names) == 0 {
+		t.Fatalf("list js/*.js: %v (%d files)", err, len(names))
 	}
+	out := make(map[string]string, len(names))
+	for _, name := range names {
+		out[name] = readStatic(t, name)
+	}
+	if _, ok := out["js/app.js"]; !ok {
+		t.Fatal("js/app.js missing from the client files")
+	}
+	return out
+}
+
+// allClientJS is all client JS concatenated in name order, for checks that
+// look for a string wherever in the client it now lives.
+func allClientJS(t *testing.T) string {
+	t.Helper()
+	files := clientJS(t)
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	for _, name := range names {
+		b.WriteString(files[name])
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // removedClientFeatures are the login-member, invite and chore surfaces the
@@ -52,8 +86,8 @@ func TestClientJS_NoLoginMembersInvitesOrChores(t *testing.T) {
 			t.Errorf("%s still contains retired client features: %v", name, hits)
 		}
 	}
-	app := readStatic(t, "js/app.js")
-	if !strings.Contains(app, "let tab = 'quests';") {
+	app := allClientJS(t)
+	if !strings.Contains(readStatic(t, "js/state.js"), "tab: 'quests',") {
 		t.Error("expected the default household tab to be 'quests'")
 	}
 	if !strings.Contains(app, "['quests', 'Quests']") || !strings.Contains(app, "['family', 'Family']") {
@@ -208,7 +242,7 @@ func TestClientJS_PinsNeverPersisted(t *testing.T) {
 			t.Errorf("%s persists a PIN: %q", name, m)
 		}
 	}
-	app := readStatic(t, "js/app.js")
+	app := allClientJS(t)
 	// Switching household must clear the active member and admin unlock.
 	sel := regexp.MustCompile(`(?s)function selectHousehold\(h\) \{\s*clearMemberState\(\);`)
 	if !sel.MatchString(app) {
@@ -217,14 +251,14 @@ func TestClientJS_PinsNeverPersisted(t *testing.T) {
 }
 
 func TestAppJS_TagPickerNamesFamilyMembers(t *testing.T) {
-	app := readStatic(t, "js/app.js")
+	app := allClientJS(t)
 	for _, want := range []string{"'Tag family members'", "tagSet.has(m.member_id)", "id: m.member_id", "let labelText = m.name;"} {
 		if !strings.Contains(app, want) {
-			t.Errorf("expected js/app.js to contain %q", want)
+			t.Errorf("expected client JS to contain %q", want)
 		}
 	}
 	if strings.Contains(app, "Tag household members") {
-		t.Error("js/app.js still says 'Tag household members'")
+		t.Error("client JS still says 'Tag household members'")
 	}
 }
 
@@ -235,8 +269,8 @@ func TestClientJS_AdminPinHeader(t *testing.T) {
 	if n := strings.Count(api, "{ auth: true, headers }"); n != 2 {
 		t.Errorf("expected api() to pass headers on the first attempt and the retry, found %d", n)
 	}
-	app := readStatic(t, "js/app.js")
-	if !strings.Contains(app, "{ headers: { 'X-Admin-PIN': adminPin } }") {
+	app := allClientJS(t)
+	if !strings.Contains(app, "{ headers: { 'X-Admin-PIN': state.adminPin } }") {
 		t.Error("expected admin-gated requests to send X-Admin-PIN")
 	}
 	if strings.Contains(app, "admin_pin:") {
@@ -245,7 +279,7 @@ func TestClientJS_AdminPinHeader(t *testing.T) {
 }
 
 func TestClientJS_QuestsTab(t *testing.T) {
-	app := readStatic(t, "js/app.js")
+	app := allClientJS(t)
 
 	t.Run("questsTab defined and routed", func(t *testing.T) {
 		if !strings.Contains(app, "async function questsTab(") {
@@ -294,7 +328,7 @@ func TestClientJS_QuestsTab(t *testing.T) {
 		}
 		for _, c := range checks {
 			if !strings.Contains(app, c.want) {
-				t.Errorf("%s: expected app.js to contain %q", c.name, c.want)
+				t.Errorf("%s: expected client JS to contain %q", c.name, c.want)
 			}
 		}
 	})
@@ -312,4 +346,183 @@ func TestClientJS_QuestsTab(t *testing.T) {
 			t.Error("expected questsTab to check managementUnlocked()")
 		}
 	})
+}
+
+// maxClientFileLines is the bar a hand-written client or jstest file stays
+// under, so each one can be read whole.
+const maxClientFileLines = 1000
+
+func lineCount(src string) int {
+	return strings.Count(strings.TrimSuffix(src, "\n"), "\n") + 1
+}
+
+// TestClientFiles_UnderSizeBar: no hand-written file under web/static/js or
+// web/jstest reaches maxClientFileLines.
+func TestClientFiles_UnderSizeBar(t *testing.T) {
+	t.Run("detector fires", func(t *testing.T) {
+		if lineCount(strings.Repeat("x\n", maxClientFileLines)) < maxClientFileLines {
+			t.Fatal("expected a file of maxClientFileLines lines to be at the bar")
+		}
+		if lineCount("a\nb\n") != 2 {
+			t.Fatal("expected two lines")
+		}
+	})
+	files := map[string]string{}
+	for name, src := range clientJS(t) {
+		files[path.Join("static", name)] = src
+	}
+	tests, err := filepath.Glob(filepath.Join("jstest", "*.mjs"))
+	if err != nil || len(tests) == 0 {
+		t.Fatalf("list jstest/*.mjs: %v (%d files)", err, len(tests))
+	}
+	for _, name := range tests {
+		data, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		files[filepath.ToSlash(name)] = string(data)
+	}
+	for name, src := range files {
+		if n := lineCount(src); n >= maxClientFileLines {
+			t.Errorf("web/%s has %d lines; keep each client file under %d", name, n, maxClientFileLines)
+		}
+	}
+}
+
+// importFrom matches a static import of a sibling module: from './x.js'.
+var importFrom = regexp.MustCompile(`(?m)^\s*import\b[^;]*?\bfrom\s+['"]\./([\w-]+\.js)['"]`)
+
+// exportLet matches a module exporting a mutable binding.
+var exportLet = regexp.MustCompile(`(?m)^\s*export\s+(let|var)\b`)
+
+// importGraph is each module's sibling imports, by file name.
+func importGraph(files map[string]string) map[string][]string {
+	g := map[string][]string{}
+	for name, src := range files {
+		base := path.Base(name)
+		g[base] = nil
+		for _, m := range importFrom.FindAllStringSubmatch(src, -1) {
+			g[base] = append(g[base], m[1])
+		}
+	}
+	return g
+}
+
+// importCycle returns one import cycle in g as a path, or nil.
+func importCycle(g map[string][]string) []string {
+	const (
+		unseen = iota
+		open
+		done
+	)
+	mark := map[string]int{}
+	var stack []string
+	var visit func(string) []string
+	visit = func(n string) []string {
+		mark[n] = open
+		stack = append(stack, n)
+		for _, d := range g[n] {
+			if mark[d] == open {
+				i := slices.Index(stack, d)
+				return append(slices.Clone(stack[i:]), d)
+			}
+			if mark[d] == unseen {
+				if c := visit(d); c != nil {
+					return c
+				}
+			}
+		}
+		stack = stack[:len(stack)-1]
+		mark[n] = done
+		return nil
+	}
+	names := make([]string, 0, len(g))
+	for n := range g {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		if mark[n] == unseen {
+			if c := visit(n); c != nil {
+				return c
+			}
+		}
+	}
+	return nil
+}
+
+// importRuleViolations checks the client's module layering: nothing imports
+// app.js (the entry); household.js imports only api.js, dom.js and state.js;
+// dom.js and state.js import no section module; every import names a file
+// that exists; and the graph has no cycle.
+func importRuleViolations(g map[string][]string) []string {
+	var out []string
+	allowed := map[string][]string{
+		"household.js": {"api.js", "dom.js", "state.js"},
+		"dom.js":       {"api.js"},
+		"state.js":     {},
+		"api.js":       {},
+	}
+	for from, deps := range g {
+		for _, d := range deps {
+			if _, ok := g[d]; !ok {
+				out = append(out, fmt.Sprintf("%s imports missing %s", from, d))
+			}
+			if d == "app.js" {
+				out = append(out, fmt.Sprintf("%s imports app.js", from))
+			}
+			if ok, limited := allowed[from]; limited && !slices.Contains(ok, d) {
+				out = append(out, fmt.Sprintf("%s may not import %s", from, d))
+			}
+		}
+	}
+	if c := importCycle(g); c != nil {
+		out = append(out, "import cycle: "+strings.Join(c, " -> "))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestClientJS_ImportGraph: the split client modules never import app.js,
+// keep the household/dom/state layering, form no import cycle, and hold
+// their mutable state only in state.js's state object (no exported let).
+func TestClientJS_ImportGraph(t *testing.T) {
+	t.Run("detector fires", func(t *testing.T) {
+		bad := map[string]string{
+			"js/app.js":       "import { questsTab } from './quests.js';",
+			"js/quests.js":    "import { x } from './family.js';\nimport { boot } from './app.js';",
+			"js/family.js":    "import {\n  y,\n} from './quests.js';",
+			"js/household.js": "import { questsTab } from './quests.js';",
+			"js/dom.js":       "import { state } from './state.js';",
+			"js/state.js":     "",
+			"js/api.js":       "",
+		}
+		got := strings.Join(importRuleViolations(importGraph(bad)), "\n")
+		for _, want := range []string{"quests.js imports app.js", "household.js may not import quests.js", "dom.js may not import state.js", "import cycle"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("expected violation %q, got:\n%s", want, got)
+			}
+		}
+		if !exportLet.MatchString("export let activeMember = null;") {
+			t.Error("expected detector to flag an exported let")
+		}
+	})
+	files := clientJS(t)
+	g := importGraph(files)
+	for _, mod := range []string{"app.js", "state.js", "dom.js", "household.js", "auth.js", "quests.js", "rewards.js", "family.js", "events.js", "account.js"} {
+		if _, ok := g[mod]; !ok {
+			t.Errorf("expected client module js/%s", mod)
+		}
+	}
+	if len(g["app.js"]) == 0 {
+		t.Error("expected app.js to import the section modules")
+	}
+	for _, v := range importRuleViolations(g) {
+		t.Error(v)
+	}
+	for name, src := range files {
+		if m := exportLet.FindString(src); m != "" {
+			t.Errorf("%s exports a mutable binding %q; client state belongs in state.js's state object", name, strings.TrimSpace(m))
+		}
+	}
 }

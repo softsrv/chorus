@@ -1,0 +1,1 @@
+{ "on": ["safe-by-default", "trust-the-edge", "checks-run-before-the-pr", "small-reversible-steps"] }
