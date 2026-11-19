@@ -27,7 +27,7 @@ func run(m *testing.M) int {
 	// run (or a CI job) that lost the variable goes red instead of passing
 	// with nothing exercised.
 	if os.Getenv("TEST_DATABASE_URL") == "" {
-		fmt.Fprintln(os.Stderr, "systest: TEST_DATABASE_URL is not set; the system tests need a migrated database (make test-system migrates chorus_test and sets it)")
+		fmt.Fprintln(os.Stderr, "systest: TEST_DATABASE_URL is not set; the system tests need a migrated database: set it in .env (see .env.example) or the environment, then run make test-system, which migrates it first")
 		return 1
 	}
 	if os.Getenv("SYSTEST_IMAGE") != "" {

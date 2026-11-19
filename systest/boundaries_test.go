@@ -10,7 +10,8 @@ import (
 )
 
 // TestSystem_HouseholdIsolationAndGoogleOff holds the running app to its two
-// boundaries. A user gets the same 404 for another household's resources as
+// boundaries. A member of one household gets the same 404 for another
+// household's resources as
 // for ones that don't exist. With Google unconfigured, the app reports Google
 // off and sends no request to Google, even when the test runner's own
 // environment carries Google settings.
@@ -53,6 +54,17 @@ func TestSystem_HouseholdIsolationAndGoogleOff(t *testing.T) {
 		quest2 := create("second quest", hp+"/quests", map[string]any{"name": "Systest counters", "points": 5, "repeat_days": 1})
 		reward := create("reward", hp+"/rewards", map[string]any{"description": "Systest movie night", "cost": 100})
 		combo := create("combo", hp+"/combos", map[string]any{"name": "Systest crew", "bonus_points": 20, "quest_ids": []string{quest1, quest2}})
+
+		// A is a member of a household of its own, so the reads below run
+		// the membership-scoped path: a member of household A asking for
+		// household B's data, not a stranger with no household.
+		var ah idOnly
+		app.do("POST", "/api/v1/households", a.AccessToken, map[string]string{"name": "Systest A Household", "timezone": "UTC"}).
+			expect(t, "A creates household", http.StatusCreated).decode(t, &ah)
+		if ah.ID == "" || ah.ID == hid {
+			t.Fatalf("A creates household: id %q (B's is %q)", ah.ID, hid)
+		}
+		app.do("GET", "/api/v1/households/"+ah.ID, a.AccessToken, nil).expect(t, "A reads own household", http.StatusOK)
 
 		// B can read its own data, so A's 404 below is about A, not the ids.
 		for _, p := range []string{hp, hp + "/family-members/" + member, hp + "/quests/" + quest1, hp + "/rewards/" + reward, hp + "/combos/" + combo} {

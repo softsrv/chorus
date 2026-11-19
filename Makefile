@@ -8,7 +8,7 @@ export
 .PHONY: dev run build test test-js test-integration test-system test-system-image test-cover boundaries fmt vet lint vulncheck secret-scan check \
         services-up services-down services-reset \
         daisyui-install tailwind tailwind-watch app \
-        migrate-up migrate-down migrate-create migrate-status migrate-test migrate-roundtrip-test \
+        migrate-up migrate-down migrate-create migrate-status require-test-db migrate-test migrate-roundtrip-test \
         sqlc-generate docker-build prod clean
 
 ## ── Development ─────────────────────────────────────────────────────────────
@@ -118,10 +118,17 @@ migrate-up:
 migrate-down:
 	migrate -path db/migrations -database "$(DATABASE_URL)" down 1
 
-migrate-test:
-	migrate -path db/migrations -database "$(TEST_DATABASE_URL)" up
+# Every target that touches the test database needs TEST_DATABASE_URL, from
+# .env (copy .env.example) or the environment. Fail fast with that, rather
+# than running migrate against an empty URL.
+require-test-db:
+	@test -n "$(TEST_DATABASE_URL)" || { echo "TEST_DATABASE_URL is not set: set it in .env (see .env.example) or the environment" >&2; exit 1; }
 
-migrate-roundtrip-test:
+# Migrates the way CI does (go run, pinned), so no migrate binary is needed.
+migrate-test: require-test-db
+	go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@v4.20.1 -path db/migrations -database "$(TEST_DATABASE_URL)" up
+
+migrate-roundtrip-test: require-test-db
 	@url='$(TEST_DATABASE_URL)'; u="$${url%%\?*}"; db="$${u##*/}"; case "$$db" in *_test) ;; *) echo "migrate-roundtrip-test: refusing to run: TEST_DATABASE_URL database name must end in _test (got '$$db')" >&2; exit 1;; esac
 	go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@v4.20.1 -path db/migrations -database "$(TEST_DATABASE_URL)" down -all
 	go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@v4.20.1 -path db/migrations -database "$(TEST_DATABASE_URL)" up
