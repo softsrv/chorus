@@ -39,20 +39,18 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - run: go mod download && go mod verify
+      - run: make mod-verify
       - name: Secret scan
         run: make secret-scan
       - name: Verify sqlc output is up to date
-        run: |
-          go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1 generate -f db/sqlc.yaml
-          git diff --exit-code internal/db
+        run: make sqlc-check
       - name: Migrate
         run: go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@v4.20.1 -path db/migrations -database "$TEST_DATABASE_URL" up
       - name: Migrate round-trip
         run: |
           go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@v4.20.1 -path db/migrations -database "$TEST_DATABASE_URL" down -all
           go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@v4.20.1 -path db/migrations -database "$TEST_DATABASE_URL" up
-      - run: gofmt -l . | tee /dev/stderr | (! read)
+      - run: make fmt-check
       - run: go vet ./... && go vet -tags integration ./... && go vet -tags systest ./...
       - name: Check part boundaries
         run: go test -run 'TestImportBoundaries|TestWebClientImportsStayInWeb' ./internal/archtest/
@@ -60,7 +58,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: node --test web/jstest/quests.test.mjs web/jstest/rewards.test.mjs web/jstest/combos.test.mjs web/jstest/family.test.mjs web/jstest/google.test.mjs
+      - run: make test-js
       - run: go test -race -tags integration -p 1 ./...
       # The binary-mode system test asserts the generated stylesheet loads, so
       # build it first with the same pinned, checksummed Tailwind CLI the
