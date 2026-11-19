@@ -84,9 +84,8 @@ func main() {
 	var googleSignIn *app.GoogleSignIn
 	if cfg.Google.Enabled {
 		googleSignIn = app.NewGoogleSignIn(queries, authSvc, app.GoogleSignInConfig{
-			ClientID:     cfg.Google.ClientID,
+			ClientIDs:    cfg.Google.ClientIDs,
 			ClientSecret: cfg.Google.ClientSecret,
-			RedirectURL:  strings.TrimRight(cfg.AppBaseURL, "/") + "/api/v1/auth/google/callback",
 		})
 	}
 
@@ -185,6 +184,9 @@ func main() {
 
 type GoogleConfig struct {
 	ClientID        string
+	IOSClientID     string
+	AndroidClientID string
+	ClientIDs       []string
 	ClientSecret    string
 	TokenKey        string
 	TokenKeyBytes   []byte
@@ -288,10 +290,22 @@ func loadConfig(getenv func(string) string, logger *slog.Logger) (config, error)
 		SMTPFromEmail: smtpFromEmail,
 		SMTPFromName:  getEnvOrDefault("SMTP_FROM_NAME", "Chorus"),
 		Google: GoogleConfig{
-			ClientID:     getEnvOrDefault("GOOGLE_CLIENT_ID", ""),
-			ClientSecret: getEnvOrDefault("GOOGLE_CLIENT_SECRET", ""),
-			TokenKey:     getEnvOrDefault("GOOGLE_TOKEN_KEY", ""),
+			ClientID:        getEnvOrDefault("GOOGLE_CLIENT_ID", ""),
+			IOSClientID:     getEnvOrDefault("GOOGLE_IOS_CLIENT_ID", ""),
+			AndroidClientID: getEnvOrDefault("GOOGLE_ANDROID_CLIENT_ID", ""),
+			ClientSecret:    getEnvOrDefault("GOOGLE_CLIENT_SECRET", ""),
+			TokenKey:        getEnvOrDefault("GOOGLE_TOKEN_KEY", ""),
 		},
+	}
+
+	if cfg.Google.ClientID != "" {
+		cfg.Google.ClientIDs = []string{cfg.Google.ClientID}
+		if cfg.Google.IOSClientID != "" {
+			cfg.Google.ClientIDs = append(cfg.Google.ClientIDs, cfg.Google.IOSClientID)
+		}
+		if cfg.Google.AndroidClientID != "" {
+			cfg.Google.ClientIDs = append(cfg.Google.ClientIDs, cfg.Google.AndroidClientID)
+		}
 	}
 
 	hasID := cfg.Google.ClientID != ""
