@@ -1067,7 +1067,7 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	// (a) Member path: PointsHistory reads GetFamilyMember once for the
 	// existence check; the 2nd read is VerifyMemberPin's pin_hash read.
 	memberFault := &faultDBTX{inner: pool, query: "GetFamilyMember", failOnCall: 2}
-	memberFaultSvc := app.NewFamilyService(db.New(memberFault), pool, 10)
+	memberFaultSvc := app.NewFamilyService(db.New(memberFault), pool, 4)
 	nonPinHist, err := memberFaultSvc.PointsHistory(ctx, alice, h.ID, aliceMember.ID, "1234", "", 50, 0)
 	if memberFault.calls < 2 {
 		t.Fatalf("member-path fault never reached VerifyMemberPin: %d GetFamilyMember calls, err %v", memberFault.calls, err)
@@ -1090,7 +1090,7 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 		t.Fatalf("SetAdminPin for admin-path fault: %v", err)
 	}
 	adminFault := &faultDBTX{inner: pool, query: "GetAdminPin", failOnCall: 1}
-	adminFaultSvc := app.NewFamilyService(db.New(adminFault), pool, 10)
+	adminFaultSvc := app.NewFamilyService(db.New(adminFault), pool, 4)
 	nonPinAdminHist, err := adminFaultSvc.PointsHistory(ctx, alice, h.ID, aliceMember.ID, "0000", "5555", 50, 0)
 	if adminFault.calls < 1 {
 		t.Fatalf("admin-path fault never reached the admin PIN check: err %v", err)
