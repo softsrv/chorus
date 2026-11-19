@@ -494,9 +494,10 @@ func (s *QuestService) Abandon(ctx context.Context, userID, householdID, questID
 // household, are ErrNotFound. A hold whose claim day has ended
 // (claim_expires_at at or before the database's now, even before the expiry
 // sweep has released it) is not held: ErrNotFound, checked before the
-// target's PIN and before the already-participant and age checks. Sharing with oneself or with a member already
-// on the quest is ErrAlreadyParticipant. A target outside the quest's age
-// range is ErrAgeRestricted. Nothing changes on any error. The first share
+// target's PIN and before the already-participant and age checks. Sharing
+// with oneself or with a member already on the quest is
+// ErrAlreadyParticipant. A target outside the quest's age range is
+// ErrAgeRestricted. Nothing changes on any error. The first share
 // records the holder as a participant too.
 func (s *QuestService) Share(ctx context.Context, userID, householdID, questID uuid.UUID, act, target MemberAction) (QuestView, error) {
 	if err := s.verifyActingMember(ctx, userID, householdID, act); err != nil {
