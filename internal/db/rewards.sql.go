@@ -45,20 +45,21 @@ func (q *Queries) ApproveRewardRedemption(ctx context.Context, arg ApproveReward
 
 const cancelMemberPendingRedemptions = `-- name: CancelMemberPendingRedemptions :execrows
 UPDATE reward_redemptions
-SET status = 'cancelled', decided_at = NOW()
+SET status = 'cancelled', decided_at = NOW(), status_by = $3
 WHERE household_id = $1 AND member_id = $2 AND status = 'pending'
 `
 
 type CancelMemberPendingRedemptionsParams struct {
-	HouseholdID uuid.UUID `json:"household_id"`
-	MemberID    uuid.UUID `json:"member_id"`
+	HouseholdID uuid.UUID  `json:"household_id"`
+	MemberID    uuid.UUID  `json:"member_id"`
+	StatusBy    *uuid.UUID `json:"status_by"`
 }
 
 // Cancels every request of a member who is leaving the household. The UPDATE
 // locks each row it cancels, after the caller's lock on the member row
 // (member first, the order Approve and Reject use). No points move.
 func (q *Queries) CancelMemberPendingRedemptions(ctx context.Context, arg CancelMemberPendingRedemptionsParams) (int64, error) {
-	result, err := q.db.Exec(ctx, cancelMemberPendingRedemptions, arg.HouseholdID, arg.MemberID)
+	result, err := q.db.Exec(ctx, cancelMemberPendingRedemptions, arg.HouseholdID, arg.MemberID, arg.StatusBy)
 	if err != nil {
 		return 0, err
 	}

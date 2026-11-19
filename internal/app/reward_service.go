@@ -419,8 +419,12 @@ func lockPendingRedemption(ctx context.Context, qtx *db.Queries, householdID, re
 // cancelMemberRedemptions cancels every pending request of a member who is
 // leaving the household, on qtx (bound to FamilyService.Remove's
 // transaction, after its lock on the member row). No points move.
-func cancelMemberRedemptions(ctx context.Context, qtx *db.Queries, householdID, memberID uuid.UUID) error {
-	if _, err := qtx.CancelMemberPendingRedemptions(ctx, db.CancelMemberPendingRedemptionsParams{HouseholdID: householdID, MemberID: memberID}); err != nil {
+func cancelMemberRedemptions(ctx context.Context, qtx *db.Queries, userID, householdID, memberID uuid.UUID) error {
+	if _, err := qtx.CancelMemberPendingRedemptions(ctx, db.CancelMemberPendingRedemptionsParams{
+		HouseholdID: householdID,
+		MemberID:    memberID,
+		StatusBy:    &userID,
+	}); err != nil {
 		return fmt.Errorf("cancel member redemptions: %w", err)
 	}
 	return nil
