@@ -56,16 +56,13 @@ const (
 	CalendarReadOnly  = "read_only"
 )
 
-// googleCalendarScopes is the exact set Connect requests.
+// googleCalendarScopes are the calendar scopes the SDK client asks for, which
+// grantedAccess recognises.
 var googleCalendarScopes = []string{ScopeCalendarListReadonly, ScopeCalendarEvents}
 
-var (
-	// ErrGoogleCalendarCancelled means the person cancelled or denied on Google.
-	ErrGoogleCalendarCancelled = errors.New("google calendar connect cancelled")
-	// ErrGoogleCalendarFailed is the single generic outcome for every other
-	// callback failure. The cause is logged, never shown.
-	ErrGoogleCalendarFailed = errors.New("google calendar connect failed")
-)
+// ErrGoogleCalendarFailed is the single generic outcome for every failed code
+// exchange or connect failure. The cause is only logged, never shown.
+var ErrGoogleCalendarFailed = errors.New("google calendar connect failed")
 
 // GoogleCalendarConfig configures GoogleCalendar. The URL fields default to
 // Google's endpoints when empty so tests can point the flow at a fake.

@@ -254,8 +254,8 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 
 	staticFS := web.Static(!cfg.Secure)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(staticFS)))
-	// The web client is a single page; these are the paths emailed links (and
-	// the calendar callback redirect) land on.
+	// The web client is a single page; these are the paths emailed links and
+	// the Account page land on.
 	serveIndex := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache")
 		http.ServeFileFS(w, r, staticFS, "index.html")

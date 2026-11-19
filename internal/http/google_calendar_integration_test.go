@@ -833,7 +833,7 @@ func TestGoogleCalendar_Disconnect(t *testing.T) {
 	}
 }
 
-// The calendar callback lands on /account, which serves the web client.
+// The Account page at /account serves the web client.
 func TestGoogleCalendar_AccountPageServesIndex(t *testing.T) {
 	s := newCalendarTestServer(t, nil)
 	resp, err := noRedirect.Get(s.srv.URL + "/account?google_calendar=connected")
