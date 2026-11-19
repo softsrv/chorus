@@ -4,174 +4,184 @@ package app_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/softsrv/chorus/internal/app"
+	"github.com/softsrv/chorus/internal/db"
 )
 
-// TestIntegration_RewardRedemptionsStatusByMigration proves CLM-3 at the
-// schema: 000023 adds status_by as a nullable UUID referencing users with ON
-// DELETE SET NULL; a row decided before the migration keeps status_by NULL (no
-// backfill) and a new pending row has it NULL; deleting the user named in
-// status_by succeeds and leaves the decided row with its status and status_by
-// NULL; down drops the column. Everything runs in one transaction that is
-// rolled back.
-func TestIntegration_RewardRedemptionsStatusByMigration(t *testing.T) {
+// TestIntegration_QuestSchedulesMigration proves CLM-8 at the schema:
+// deleting a quest or a family member removes its quest_schedules rows, and a
+// later rollover assigns nothing for them (a control schedule on a surviving
+// quest and member is still assigned, so the rollover is not simply idle);
+// the composite foreign keys reject a quest or a member of another
+// household; down drops quest_schedules and household_quest_rollovers and up
+// applies again. The data is committed, because the rollover opens its own
+// transactions, and is removed with its households when the test ends; the
+// down and up steps run in one transaction that is rolled back.
+func TestIntegration_QuestSchedulesMigration(t *testing.T) {
 	pool := testDB(t)
+	q := db.New(pool)
 	ctx := context.Background()
-	upSQL := readMigration(t, "000023_reward_redemptions_status_by.up.sql")
-	downSQL := readMigration(t, "000023_reward_redemptions_status_by.down.sql")
+	upSQL := readMigration(t, "000023_quest_schedules.up.sql")
+	downSQL := readMigration(t, "000023_quest_schedules.down.sql")
 
+	mustExec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+	hhID, otherHH := uuid.New(), uuid.New()
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), "DELETE FROM households WHERE id = ANY($1)", []uuid.UUID{hhID, otherHH})
+	})
+	mustExec("INSERT INTO households (id, name, timezone) VALUES ($1, 'Schedule Mig Fam', 'UTC')", hhID)
+	mustExec("INSERT INTO households (id, name, timezone) VALUES ($1, 'Schedule Mig Other', 'UTC')", otherHH)
+
+	newMember := func(hh uuid.UUID, name string) uuid.UUID {
+		t.Helper()
+		id := uuid.New()
+		mustExec("INSERT INTO family_members (id, household_id, name) VALUES ($1, $2, $3)", id, hh, name)
+		return id
+	}
+	newQuest := func(hh uuid.UUID, name string) uuid.UUID {
+		t.Helper()
+		id := uuid.New()
+		mustExec("INSERT INTO household_quests (id, household_id, name) VALUES ($1, $2, $3)", id, hh, name)
+		return id
+	}
+	// A schedule dated yesterday is due at any rollover run today.
+	yesterday := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
+	schedule := func(hh, quest, member uuid.UUID) error {
+		_, err := pool.Exec(ctx, `INSERT INTO quest_schedules (id, household_id, quest_id, member_id, start_date)
+			VALUES ($1, $2, $3, $4, $5::date)`, uuid.New(), hh, quest, member, yesterday)
+		return err
+	}
+	count := func(where string, args ...any) int {
+		t.Helper()
+		var n int
+		if err := pool.QueryRow(ctx, "SELECT count(*) FROM quest_schedules WHERE "+where, args...).Scan(&n); err != nil {
+			t.Fatalf("count schedules: %v", err)
+		}
+		return n
+	}
+
+	memberGone, memberSurvivor, memberControl := newMember(hhID, "Gone"), newMember(hhID, "Survivor"), newMember(hhID, "Control")
+	questGone, questSurvivor, questControl := newQuest(hhID, "Quest gone"), newQuest(hhID, "Quest survivor"), newQuest(hhID, "Quest control")
+	for _, s := range [][2]uuid.UUID{{questGone, memberSurvivor}, {questSurvivor, memberGone}, {questControl, memberControl}} {
+		if err := schedule(hhID, s[0], s[1]); err != nil {
+			t.Fatalf("insert schedule: %v", err)
+		}
+	}
+
+	// A quest or a member of another household cannot be named.
+	otherQuest, otherMember := newQuest(otherHH, "Other quest"), newMember(otherHH, "Other member")
+	for label, args := range map[string][2]uuid.UUID{
+		"quest of another household":  {otherQuest, memberSurvivor},
+		"member of another household": {questSurvivor, otherMember},
+	} {
+		err := schedule(hhID, args[0], args[1])
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "23503" {
+			t.Errorf("%s: got %v, want a foreign key violation", label, err)
+		}
+	}
+	if n := count("household_id = $1", hhID); n != 3 {
+		t.Fatalf("schedules after rejected inserts = %d, want 3", n)
+	}
+
+	// Deleting the quest, then the member, removes their schedules only.
+	mustExec("DELETE FROM household_quests WHERE id = $1", questGone)
+	if n := count("quest_id = $1", questGone); n != 0 {
+		t.Errorf("schedules of the deleted quest = %d, want 0", n)
+	}
+	if n := count("household_id = $1", hhID); n != 2 {
+		t.Errorf("schedules after quest delete = %d, want 2", n)
+	}
+	mustExec("DELETE FROM family_members WHERE id = $1", memberGone)
+	if n := count("member_id = $1", memberGone); n != 0 {
+		t.Errorf("schedules of the deleted member = %d, want 0", n)
+	}
+	if n := count("household_id = $1", hhID); n != 1 {
+		t.Errorf("schedules after member delete = %d, want 1 (the control)", n)
+	}
+
+	// The rollover assigns only the control; nothing fires for the deleted.
+	assigned, err := app.RolloverDueHouseholds(ctx, q, pool, time.Now())
+	if err != nil {
+		t.Fatalf("rollover: %v", err)
+	}
+	if assigned < 1 {
+		t.Errorf("rollover assigned %d, want the control quest at least", assigned)
+	}
+	claimedBy := func(quest uuid.UUID) *uuid.UUID {
+		t.Helper()
+		var by *uuid.UUID
+		if err := pool.QueryRow(ctx, "SELECT claimed_by FROM household_quests WHERE id = $1", quest).Scan(&by); err != nil {
+			t.Fatalf("read quest %s: %v", quest, err)
+		}
+		return by
+	}
+	if by := claimedBy(questControl); by == nil || *by != memberControl {
+		t.Errorf("control quest claimed_by = %v, want %s", by, memberControl)
+	}
+	if by := claimedBy(questSurvivor); by != nil {
+		t.Errorf("quest of the deleted member claimed_by = %v, want nil", by)
+	}
+
+	// Down drops both tables and up applies again; rolled back after.
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	mustExec := func(sql string, args ...any) {
+	registered := func(table string) *string {
 		t.Helper()
-		if _, err := tx.Exec(ctx, sql, args...); err != nil {
-			t.Fatalf("%s: %v", sql, err)
+		var reg *string
+		if err := tx.QueryRow(ctx, "SELECT to_regclass($1)::text", table).Scan(&reg); err != nil {
+			t.Fatalf("to_regclass %s: %v", table, err)
+		}
+		return reg
+	}
+	if _, err := tx.Exec(ctx, downSQL); err != nil {
+		t.Fatalf("down: %v", err)
+	}
+	for _, table := range []string{"quest_schedules", "household_quest_rollovers"} {
+		if registered(table) != nil {
+			t.Errorf("%s still exists after down", table)
 		}
 	}
-	hasColumn := func() bool {
-		t.Helper()
-		var n int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns
-			WHERE table_schema = current_schema() AND table_name = 'reward_redemptions' AND column_name = 'status_by'`).Scan(&n); err != nil {
-			t.Fatalf("read columns: %v", err)
+	if _, err := tx.Exec(ctx, upSQL); err != nil {
+		t.Fatalf("up after down: %v", err)
+	}
+	for _, table := range []string{"quest_schedules", "household_quest_rollovers"} {
+		if registered(table) == nil {
+			t.Errorf("%s missing after re-up", table)
 		}
-		return n == 1
 	}
 
-	// Start from 000022.
-	mustExec(downSQL)
-	if hasColumn() {
-		t.Fatal("status_by present after down")
+	// Repeat column exists with default false.
+	var repeatDefault, repeatNullable, repeatType string
+	if err := tx.QueryRow(ctx, `
+		SELECT column_default, is_nullable, data_type
+		FROM information_schema.columns
+		WHERE table_name = 'quest_schedules' AND column_name = 'repeat'
+	`).Scan(&repeatDefault, &repeatNullable, &repeatType); err != nil {
+		t.Fatalf("query repeat column: %v", err)
 	}
-
-	// A request decided before 000023.
-	hhID, memberID, rewardID := uuid.New(), uuid.New(), uuid.New()
-	mustExec("INSERT INTO households (id, name, timezone) VALUES ($1, 'Status By Mig Fam', 'UTC')", hhID)
-	mustExec("INSERT INTO family_members (id, household_id, name, points) VALUES ($1, $2, 'Sam', 120)", memberID, hhID)
-	mustExec("INSERT INTO household_rewards (id, household_id, description, cost) VALUES ($1, $2, 'Movie night', 100)", rewardID, hhID)
-	oldDecided := uuid.New()
-	mustExec(`INSERT INTO reward_redemptions (id, household_id, member_id, reward_id, description, cost, status, decided_at)
-		VALUES ($1, $2, $3, $4, 'Movie night', 100, 'approved', $5)`, oldDecided, hhID, memberID, rewardID, time.Now())
-
-	mustExec(upSQL)
-
-	statusBy := func(id uuid.UUID) (string, *uuid.UUID) {
-		t.Helper()
-		var status string
-		var by *uuid.UUID
-		if err := tx.QueryRow(ctx, "SELECT status, status_by FROM reward_redemptions WHERE id = $1", id).Scan(&status, &by); err != nil {
-			t.Fatalf("read redemption %s: %v", id, err)
-		}
-		return status, by
+	if repeatType != "boolean" {
+		t.Errorf("repeat data_type = %q, want boolean", repeatType)
 	}
-	if status, by := statusBy(oldDecided); status != "approved" || by != nil {
-		t.Errorf("pre-000023 decided row: status=%q status_by=%v, want approved and NULL (no backfill)", status, by)
+	if repeatNullable != "NO" {
+		t.Errorf("repeat is_nullable = %q, want NO", repeatNullable)
 	}
-	pending := uuid.New()
-	mustExec(`INSERT INTO reward_redemptions (id, household_id, member_id, reward_id, description, cost)
-		VALUES ($1, $2, $3, $4, 'Movie night', 100)`, pending, hhID, memberID, rewardID)
-	if status, by := statusBy(pending); status != "pending" || by != nil {
-		t.Errorf("new pending row: status=%q status_by=%v, want pending and NULL", status, by)
-	}
-
-	// Column shape: nullable uuid with a FK to users(id) ON DELETE SET NULL.
-	var dataType, nullable string
-	if err := tx.QueryRow(ctx, `SELECT data_type, is_nullable FROM information_schema.columns
-		WHERE table_schema = current_schema() AND table_name = 'reward_redemptions' AND column_name = 'status_by'`).Scan(&dataType, &nullable); err != nil {
-		t.Fatalf("read status_by column: %v", err)
-	}
-	if dataType != "uuid" || nullable != "YES" {
-		t.Errorf("status_by: type=%q nullable=%q, want uuid and YES", dataType, nullable)
-	}
-	var refTable, delType string
-	if err := tx.QueryRow(ctx, `SELECT c.confrelid::regclass::text, c.confdeltype::text
-		FROM pg_constraint c
-		JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
-		WHERE c.conrelid = 'reward_redemptions'::regclass AND c.contype = 'f' AND a.attname = 'status_by'`).Scan(&refTable, &delType); err != nil {
-		t.Fatalf("read status_by foreign key: %v", err)
-	}
-	if refTable != "users" || delType != "n" {
-		t.Errorf("status_by FK: references %q on delete %q, want users and 'n' (SET NULL)", refTable, delType)
-	}
-
-	// Deleting the user who decided keeps the row, its status, and nulls status_by.
-	deciderID := uuid.Must(uuid.NewV7())
-	mustExec(`INSERT INTO users (id, email, password_hash, display_name, email_verified)
-		VALUES ($1, $2, 'hash', 'Decider', true)`, deciderID, "status-by-mig-"+deciderID.String()[:8]+"@example.com")
-	decided := uuid.New()
-	mustExec(`INSERT INTO reward_redemptions (id, household_id, member_id, reward_id, description, cost, status, decided_at, status_by)
-		VALUES ($1, $2, $3, $4, 'Movie night', 100, 'rejected', $5, $6)`, decided, hhID, memberID, rewardID, time.Now(), deciderID)
-	if _, by := statusBy(decided); by == nil || *by != deciderID {
-		t.Fatalf("status_by = %v, want %s", by, deciderID)
-	}
-	mustExec("DELETE FROM users WHERE id = $1", deciderID)
-	if status, by := statusBy(decided); status != "rejected" || by != nil {
-		t.Errorf("after deleting the decider: status=%q status_by=%v, want rejected and NULL", status, by)
-	}
-
-	// Down drops the column; the rows stay.
-	mustExec(downSQL)
-	if hasColumn() {
-		t.Error("status_by still present after down")
-	}
-	var kept int
-	if err := tx.QueryRow(ctx, "SELECT count(*) FROM reward_redemptions WHERE household_id = $1", hhID).Scan(&kept); err != nil {
-		t.Fatalf("count rows: %v", err)
-	}
-	if kept != 3 {
-		t.Errorf("rows after down = %d, want 3", kept)
-	}
-	// And up applies again on top of it.
-	mustExec(upSQL)
-}
-
-// TestIntegration_DeleteAccountOfDecidingAdmin proves the account deletion
-// path of CLM-3: AuthService.DeleteAccount of the user named in a decided
-// request's status_by succeeds, and the request stays with its status and
-// status_by NULL. household_members_one_login allows one login per household,
-// so the request sits in a household the deleted user is not a member of
-// (deleting their own sole-login household would cascade it away).
-func TestIntegration_DeleteAccountOfDecidingAdmin(t *testing.T) {
-	pool := testDB(t)
-	mailer := &captureMailer{}
-	authSvc := testAuthService(t, pool, mailer)
-	ctx := context.Background()
-
-	decider := registerVerified(t, pool, authSvc, mailer, "statusbydecider").User.ID
-
-	hhID, memberID, redemptionID := uuid.New(), uuid.New(), uuid.New()
-	if _, err := pool.Exec(ctx, "INSERT INTO households (id, name, timezone) VALUES ($1, 'Status By Del Fam', 'UTC')", hhID); err != nil {
-		t.Fatalf("insert household: %v", err)
-	}
-	t.Cleanup(func() {
-		if _, err := pool.Exec(context.Background(), "DELETE FROM households WHERE id = $1", hhID); err != nil {
-			t.Errorf("delete household %s: %v", hhID, err)
-		}
-	})
-	if _, err := pool.Exec(ctx, "INSERT INTO family_members (id, household_id, name) VALUES ($1, $2, 'Sam')", memberID, hhID); err != nil {
-		t.Fatalf("insert member: %v", err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO reward_redemptions (id, household_id, member_id, description, cost, status, decided_at, status_by)
-		VALUES ($1, $2, $3, 'Movie night', 0, 'approved', NOW(), $4)`, redemptionID, hhID, memberID, decider); err != nil {
-		t.Fatalf("insert decided redemption: %v", err)
-	}
-
-	if err := authSvc.DeleteAccount(ctx, decider, uuid.Nil, "correct-password-123", ""); err != nil {
-		t.Fatalf("DeleteAccount of the deciding admin: %v", err)
-	}
-
-	var status string
-	var by *uuid.UUID
-	if err := pool.QueryRow(ctx, "SELECT status, status_by FROM reward_redemptions WHERE id = $1", redemptionID).Scan(&status, &by); err != nil {
-		t.Fatalf("read redemption after account deletion: %v", err)
-	}
-	if status != "approved" || by != nil {
-		t.Errorf("after DeleteAccount: status=%q status_by=%v, want approved and NULL", status, by)
+	if repeatDefault != "false" {
+		t.Errorf("repeat column_default = %q, want false", repeatDefault)
 	}
 }

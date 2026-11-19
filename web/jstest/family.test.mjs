@@ -33,16 +33,22 @@ function routes() {
     'GET /households': () => [200, { items: [{ id: H, name: 'Home', timezone: 'UTC', role: 'admin' }] }],
     [`GET ${HP}/admin-pin`]: () => [200, { set: srv.adminPinSet }],
     [`POST ${HP}/admin-pin/verify`]: (q) => (q.body.pin === srv.adminPin ? [204, null] : err(403, 'wrong_pin', 'Wrong PIN.')),
-    [`GET ${HP}/quests`]: () => [200, { items: [], next_offset: null }],
+    [`GET ${HP}/quests`]: () => [200, { items: srv.quests, next_offset: null }],
     [`GET ${HP}/combos`]: () => [200, { items: [] }],
     'GET /quest-library': () => [200, { items: [] }],
     [`GET ${HP}/quests/pending`]: () => [200, { items: [] }],
     [`GET ${HP}/reward-redemptions/pending`]: () => [200, { items: [] }],
     [`GET ${HP}/family-members`]: () => [200, { items: srv.members }],
+    [`GET ${HP}/quest-schedules`]: (q) => srv.listSchedules(q),
+    [`POST ${HP}/quest-schedules`]: (q) => srv.createSchedule(q),
   };
+  for (const s of srv.schedules) {
+    r[`DELETE ${HP}/quest-schedules/${s.id}`] = (q) => srv.deleteSchedule(q, s);
+  }
   for (const m of srv.members) {
     r[`GET ${HP}/family-members/${m.id}/points-history`] = (q) => srv.history(q, m);
     r[`GET ${HP}/family-members/${m.id}/reward-history`] = (q) => srv.rewardHistory(q, m);
+    r[`GET ${HP}/family-members/${m.id}/upcoming-quests`] = (q) => srv.upcoming(q, m);
     r[`POST ${HP}/family-members/${m.id}/points-adjustments`] = (q) => srv.adjust(q, m);
     r[`POST ${HP}/family-members/${m.id}/verify`] = (q) => ((q.body.pin || '') === '' && !m.has_pin ? [204, null] : err(403, 'wrong_pin'));
   }
@@ -60,6 +66,15 @@ beforeEach(() => {
     rewardHistory: () => [200, { items: [] }],
     adjust: () => err(500, 'unexpected', 'no adjust stub'),
     fixture: withHistory,
+    // Scheduled quests: the household's quests for the Quest select, and the
+    // household's schedules (every member's; the view filters to its member).
+    quests: [],
+    schedules: [],
+    listSchedules: () => [200, { items: srv.schedules }],
+    createSchedule: () => err(500, 'unexpected', 'no schedule stub'),
+    deleteSchedule: (_, s) => { srv.schedules = srv.schedules.filter((x) => x !== s); return [204, null]; },
+    // The viewed member's upcoming scheduled quests (soonest first).
+    upcoming: () => [200, { items: [] }],
   };
   calls = installFetch(new Proxy({}, { get: (_, k) => routes()[k] }));
 });
@@ -93,10 +108,10 @@ test('admin points history CLM-1: History opens the member view with heading, Ba
 
   const historyNode = sectionNode(env.$app, 'Points history');
   assert.ok(historyNode, 'Points history section exists');
-  // Heading, then Back, then the points history, then the reward history.
+  // Heading, then Back, then scheduling, then the points history, then the reward history.
   const order = walk(env.$app).filter((n) => (n.tagName === 'H3' && n.textContent.includes('points')) || n.tagName === 'H4' || n === back[0]);
-  assert.deepEqual(order.map((n) => n.tagName), ['H3', 'BUTTON', 'H4', 'H4']);
-  assert.deepEqual(order.slice(2).map((n) => n.textContent), ['Points history', 'Reward history']);
+  assert.deepEqual(order.map((n) => n.tagName), ['H3', 'BUTTON', 'H4', 'H4', 'H4', 'H4', 'H4']);
+  assert.deepEqual(order.slice(2).map((n) => n.textContent), ['Schedule a quest', 'Scheduled', 'Upcoming', 'Points history', 'Reward history']);
 
   const ths = walk(historyNode).filter((n) => n.tagName === 'TH').map((n) => n.textContent);
   assert.deepEqual(ths, ['Date', 'Points', 'Reason']);
@@ -334,7 +349,7 @@ test('admin points CLM-4: the member view has the heading, Back above the adjust
   assert.deepEqual(h3s(), ['Maya — 42 points']);
   const back = buttons(env.$app, 'Back to family')[0];
   const order = walk(env.$app).filter((n) => n === back || n.tagName === 'LEGEND' || n.tagName === 'H4');
-  assert.deepEqual(order.map((n) => n.textContent), ['Back to family', 'Adjust points', 'Points history', 'Reward history']);
+  assert.deepEqual(order.map((n) => n.textContent), ['Back to family', 'Adjust points', 'Schedule a quest', 'Scheduled', 'Upcoming', 'Points history', 'Reward history']);
   await click(back);
   assert.deepEqual(h3s(), ['Family']);
   assert.equal(adjustForm(), undefined, 'no adjust form on the family list');
@@ -493,4 +508,190 @@ test('admin points 2.1/7: after an adjustment to the active member, their quest 
   assert.match(text(), /Viewing as: Leo · 7 points/);
   await click(buttons(env.$app, 'Switch member')[0]);
   assert.ok(startingWith('Leo · 7 points'), 'picker shows the new total');
+});
+
+// ── Scheduled quests (CLM-7) ─────────────────────────────────────────────────
+
+const QUESTS = [{ id: 'q-cat', name: 'Feed the cat' }, { id: 'q-room', name: 'Clean your room' }];
+const schedule = (id, questId, questName, memberId, date) => ({
+  id, household_id: H, quest_id: questId, quest_name: questName, member_id: memberId, member_name: 'x', start_date: date,
+});
+const scheduleForm = () => sectionNode(env.$app, 'Schedule a quest').children.find((n) => n.tagName === 'FORM');
+const scheduledText = () => sectionNode(env.$app, 'Scheduled').textContent;
+const openMayaWithPin = async () => {
+  srv.adminPinSet = true;
+  await loadApp();
+  await openFamily();
+  await unlock('9999');
+  await click(buttons(env.$app, 'History')[0]);
+};
+
+test('scheduled quests CLM-7: Schedule POSTs {quest_id, member_id, date, repeat} with X-Admin-PIN and the view shows the new schedule', async () => {
+  srv.quests = QUESTS;
+  srv.createSchedule = (q) => {
+    const s = schedule('s-new', q.body.quest_id, 'Clean your room', q.body.member_id, q.body.date);
+    srv.schedules = [...srv.schedules, s];
+    return [201, s];
+  };
+  await openMayaWithPin();
+  const form = scheduleForm();
+  const $select = walk(form).find((n) => n.tagName === 'SELECT');
+  assert.deepEqual(walk($select).filter((n) => n.tagName === 'OPTION').map((o) => o.textContent), ['Feed the cat', 'Clean your room']);
+  $select.value = 'q-room';
+  walk(form).find((n) => n.tagName === 'INPUT' && n.type === 'date').value = '2026-11-21';
+  assert.equal(buttons(form, 'Schedule').length, 1);
+  assert.equal(buttons(form, 'Schedule')[0].className, 'btn btn-primary btn-sm');
+  await submit(form);
+  const post = calls.find((c) => c.method === 'POST' && c.path === `${HP}/quest-schedules`);
+  assert.deepEqual(post.body, { quest_id: 'q-room', member_id: 'm-maya', date: '2026-11-21', repeat: false });
+  assert.equal(post.headers['X-Admin-PIN'], '9999');
+  assert.match(scheduledText(), /Clean your room — from 2026-11-21/);
+});
+
+test('repeat CLM-10: ticking Repeat sends repeat true and a repeated schedule reads "from <date>, repeats"', async () => {
+  srv.quests = QUESTS;
+  srv.schedules = [{ ...schedule('s-one', 'q-room', 'Clean your room', 'm-maya', '2026-11-25'), repeat: false }];
+  srv.createSchedule = (q) => {
+    const s = { ...schedule('s-rep', q.body.quest_id, 'Feed the cat', q.body.member_id, q.body.date), repeat: q.body.repeat };
+    srv.schedules = [s, ...srv.schedules];
+    return [201, s];
+  };
+  await openMayaWithPin();
+  const form = scheduleForm();
+  walk(form).find((n) => n.tagName === 'INPUT' && n.type === 'date').value = '2026-11-21';
+  const $repeat = walk(form).find((n) => n.tagName === 'INPUT' && n.type === 'checkbox');
+  assert.ok($repeat, 'the form has a Repeat checkbox');
+  assert.match(form.textContent, /Repeat \(every time the quest's cooldown ends\)/);
+  await click($repeat);
+  assert.equal($repeat.checked, true);
+  await submit(form);
+  const post = calls.find((c) => c.method === 'POST' && c.path === `${HP}/quest-schedules`);
+  assert.deepEqual(post.body, { quest_id: 'q-cat', member_id: 'm-maya', date: '2026-11-21', repeat: true });
+  assert.match(scheduledText(), /Feed the cat — from 2026-11-21, repeats/);
+  assert.match(scheduledText(), /Clean your room — from 2026-11-25(?!, repeats)/);
+});
+
+test('scheduled quests CLM-7: a refused date shows the server message on the form and keeps the view', async () => {
+  srv.quests = QUESTS;
+  srv.createSchedule = () => [422, { error: { code: 'validation_failed', message: 'One or more fields are invalid.', fields: { date: 'Date must be today or later.' } } }];
+  await openMayaWithPin();
+  await submit(scheduleForm());
+  const alert = walk(scheduleForm()).find((n) => n.getAttribute('role') === 'alert');
+  assert.equal(alert.textContent, 'Date must be today or later.');
+  assert.deepEqual(h3s(), ['Maya — 42 points']);
+});
+
+test('scheduled quests CLM-7: the list shows only this member\'s schedules; Remove confirms, sends DELETE and the empty line follows', async () => {
+  srv.schedules = [
+    schedule('s1', 'q-cat', 'Feed the cat', 'm-maya', '2026-11-22'),
+    schedule('s2', 'q-room', 'Clean your room', 'm-other', '2026-11-23'),
+  ];
+  await openMayaWithPin();
+  assert.match(scheduledText(), /Feed the cat — from 2026-11-22/);
+  assert.doesNotMatch(scheduledText(), /Clean your room/, 'another member\'s schedule is not listed');
+  const remove = buttons(sectionNode(env.$app, 'Scheduled'), 'Remove');
+  assert.equal(remove.length, 1);
+  assert.equal(remove[0].className, 'btn btn-ghost btn-xs');
+  await click(remove[0]);
+  assert.equal(remove[0].textContent, 'Sure?');
+  assert.equal(calls.filter((c) => c.method === 'DELETE').length, 0, 'first click only arms');
+  await click(remove[0]);
+  const del = calls.filter((c) => c.method === 'DELETE');
+  assert.deepEqual(del.map((c) => c.path), [`${HP}/quest-schedules/s1`]);
+  assert.equal(del[0].headers['X-Admin-PIN'], '9999');
+  assert.match(scheduledText(), /No quests are scheduled\./);
+});
+
+test('scheduled quests CLM-7: with no schedules the Scheduled section says so', async () => {
+  await loadApp();
+  await openFamily();
+  await click(buttons(env.$app, 'History')[0]);
+  const empty = walk(sectionNode(env.$app, 'Scheduled')).find((n) => n.tagName === 'P');
+  assert.equal(empty.textContent, 'No quests are scheduled.');
+  assert.equal(empty.className, 'text-xs opacity-60');
+});
+
+test('scheduled quests CLM-7: a failed schedules read shows an inline error, not an empty list', async () => {
+  srv.listSchedules = () => err(500, 'internal', 'boom');
+  await loadApp();
+  await openFamily();
+  await click(buttons(env.$app, 'History')[0]);
+  assert.match(text(), /Could not load scheduled quests\. Reload to try again\./);
+  assert.doesNotMatch(text(), /No quests are scheduled\./);
+});
+
+test('scheduled quests CLM-7: a wrong_pin on Schedule locks the tab again', async () => {
+  srv.quests = QUESTS;
+  srv.createSchedule = () => err(403, 'wrong_pin', 'Wrong PIN.');
+  await openMayaWithPin();
+  await submit(scheduleForm());
+  assert.match(text(), /Enter the admin PIN to manage the family\./);
+});
+
+test('scheduled quests CLM-7: a wrong_pin on Remove locks the tab again', async () => {
+  srv.schedules = [schedule('s1', 'q-cat', 'Feed the cat', 'm-maya', '2026-11-22')];
+  srv.deleteSchedule = () => err(403, 'wrong_pin', 'Wrong PIN.');
+  await openMayaWithPin();
+  const remove = buttons(sectionNode(env.$app, 'Scheduled'), 'Remove')[0];
+  await click(remove);
+  await click(remove);
+  assert.match(text(), /Enter the admin PIN to manage the family\./);
+});
+
+// ── Upcoming quests in the admin member view (upcoming CLM-2, CLM-5) ──────────
+
+const upcomingNode = () => sectionNode(env.$app, 'Upcoming');
+const upcomingRows = () => walk(upcomingNode()).filter((n) => n.tagName === 'LI');
+
+test('upcoming CLM-5: the member view lists the member\'s upcoming quests in API order with date, name and a Repeats badge', async () => {
+  srv.upcoming = (_, m) => [200, {
+    items: m.id === 'm-maya'
+      ? [
+        { schedule_id: 's1', quest_id: 'q-cat', quest_name: 'Feed the cat', next_date: '2026-11-22', repeat: true },
+        { schedule_id: 's2', quest_id: 'q-room', quest_name: 'Clean your room', next_date: '2026-11-24', repeat: false },
+      ]
+      : [],
+  }];
+  await loadApp();
+  await openFamily();
+  await click(buttons(env.$app, 'History')[0]);
+  const call = calls.find((c) => c.method === 'GET' && c.path === `${HP}/family-members/m-maya/upcoming-quests`);
+  assert.ok(call, 'upcoming-quests was read for the viewed member');
+  const rows = upcomingRows();
+  assert.deepEqual(rows.map((li) => li.children[0].textContent), ['Sun 22 Nov — Feed the cat', 'Tue 24 Nov — Clean your room']);
+  assert.deepEqual(rows.map((li) => walk(li).filter((n) => /\bbadge\b/.test(n.className || '')).map((n) => n.textContent)), [['Repeats'], []]);
+  assert.equal(sectionNode(env.$app, 'Scheduled') !== null, true, 'Upcoming sits beside the schedule controls');
+});
+
+test('upcoming CLM-5: with nothing upcoming the member view says No upcoming quests.', async () => {
+  await loadApp();
+  await openFamily();
+  await click(buttons(env.$app, 'History')[0]);
+  const ps = walk(upcomingNode()).filter((n) => n.tagName === 'P').map((n) => n.textContent);
+  assert.deepEqual(ps, ['No upcoming quests.']);
+  assert.equal(upcomingRows().length, 0);
+});
+
+test('upcoming CLM-5: a failed upcoming read shows an inline error in Upcoming only; the other sections still render', async () => {
+  srv.upcoming = () => err(500, 'internal', 'boom');
+  await loadApp();
+  await openFamily();
+  await click(buttons(env.$app, 'History')[0]);
+  assert.deepEqual(h3s(), ['Maya — 42 points']);
+  assert.match(upcomingNode().textContent, /Could not load upcoming quests\. Reload to try again\./);
+  assert.doesNotMatch(sectionNode(env.$app, 'Scheduled').textContent, /Could not load/);
+  assert.match(sectionNode(env.$app, 'Scheduled').textContent, /No quests are scheduled\./);
+  assert.doesNotMatch(sectionNode(env.$app, 'Points history').textContent, /Could not load/);
+  assert.ok(walk(sectionNode(env.$app, 'Points history')).some((n) => n.tagName === 'TABLE'), 'history still renders');
+});
+
+test('upcoming CLM-2: in the admin view a quest name with markup shows as literal text and creates no element', async () => {
+  const evil = '<img src=x onerror=alert(1)>';
+  srv.upcoming = () => [200, { items: [{ schedule_id: 's1', quest_id: 'q1', quest_name: evil, next_date: '2026-11-22', repeat: false }] }];
+  await loadApp();
+  await openFamily();
+  await click(buttons(env.$app, 'History')[0]);
+  assert.equal(upcomingRows()[0].textContent, `Sun 22 Nov — ${evil}`);
+  assert.equal(walk(upcomingNode()).filter((n) => n.tagName === 'IMG').length, 0);
+  for (const n of walk(upcomingNode())) assert.equal(n.getAttribute?.('style') ?? null, null, 'no inline style');
 });

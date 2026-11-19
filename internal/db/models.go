@@ -184,6 +184,11 @@ type HouseholdQuestParticipant struct {
 	JoinedAt    pgtype.Timestamptz `json:"joined_at"`
 }
 
+type HouseholdQuestRollover struct {
+	HouseholdID      uuid.UUID   `json:"household_id"`
+	LastRolloverDate pgtype.Date `json:"last_rollover_date"`
+}
+
 type HouseholdReward struct {
 	ID          uuid.UUID          `json:"id"`
 	HouseholdID uuid.UUID          `json:"household_id"`
@@ -255,6 +260,16 @@ type QuestLibrary struct {
 	Notes       string             `json:"notes"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	StreakBonus int32              `json:"streak_bonus"`
+}
+
+type QuestSchedule struct {
+	ID          uuid.UUID          `json:"id"`
+	HouseholdID uuid.UUID          `json:"household_id"`
+	QuestID     uuid.UUID          `json:"quest_id"`
+	MemberID    uuid.UUID          `json:"member_id"`
+	StartDate   pgtype.Date        `json:"start_date"`
+	Repeat      bool               `json:"repeat"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 type RefreshToken struct {
