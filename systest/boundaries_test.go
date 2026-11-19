@@ -5,13 +5,15 @@ package systest
 import (
 	"bytes"
 	"net/http"
+	"strings"
 	"testing"
 )
 
 // TestSystem_HouseholdIsolationAndGoogleOff holds the running app to its two
 // boundaries. A user gets the same 404 for another household's resources as
 // for ones that don't exist. With Google unconfigured, the app reports Google
-// off, even when the test runner's own environment carries Google settings.
+// off and sends no request to Google, even when the test runner's own
+// environment carries Google settings.
 func TestSystem_HouseholdIsolationAndGoogleOff(t *testing.T) {
 	// Google settings in the runner's own environment. startApp builds the
 	// app's environment explicitly, so none of these may reach the app; if
@@ -84,6 +86,11 @@ func TestSystem_HouseholdIsolationAndGoogleOff(t *testing.T) {
 	})
 
 	t.Run("google off", func(t *testing.T) {
+		// The app's outbound HTTP(S) goes through app.Egress (startApp sets
+		// HTTP_PROXY/HTTPS_PROXY with nothing exempt), so any call it makes to
+		// Google, from startup through every request below, is recorded there.
+		defer assertNoGoogleCalls(t, app)
+
 		var cfg map[string]bool
 		app.do("GET", "/api/v1/auth/config", "", nil).expect(t, "GET /api/v1/auth/config", http.StatusOK).decode(t, &cfg)
 		if len(cfg) != 2 || cfg["google_sign_in"] || cfg["google_calendar"] {
@@ -108,6 +115,19 @@ func TestSystem_HouseholdIsolationAndGoogleOff(t *testing.T) {
 			t.Fatalf("calendar status = %+v, want status unavailable and no access", status)
 		}
 	})
+}
+
+// assertNoGoogleCalls fails t if the app sent any request to a Google host
+// (google.com, googleapis.com or a subdomain) through the outbound recorder.
+func assertNoGoogleCalls(t *testing.T, app *appProc) {
+	t.Helper()
+	for _, h := range app.Egress.Hosts() {
+		for _, d := range []string{"google.com", "googleapis.com"} {
+			if h == d || strings.HasSuffix(h, "."+d) {
+				t.Errorf("app made an outbound request to %s with Google unconfigured (all outbound hosts: %v)", h, app.Egress.Hosts())
+			}
+		}
+	}
 }
 
 // randUUID is a random version-4 UUID: an id no row has.
