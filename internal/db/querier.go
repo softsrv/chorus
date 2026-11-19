@@ -76,9 +76,6 @@ type Querier interface {
 	// birthday or no limits always pass), read only from this household's
 	// members; a member out of range, or not in this household, gets no row.
 	ClaimQuest(ctx context.Context, arg ClaimQuestParams) (HouseholdQuest, error)
-	// Single use: conditional on used_at IS NULL, unexpired, and the flow's
-	// purpose, so a state can't be replayed or used to complete another flow.
-	ConsumeOAuthState(ctx context.Context, arg ConsumeOAuthStateParams) (OauthState, error)
 	CountHouseholdQuestsByIDs(ctx context.Context, arg CountHouseholdQuestsByIDsParams) (int64, error)
 	CountRecentPasswordResetsByEmail(ctx context.Context, email string) (int64, error)
 	CountRecentVerificationCodesByUserID(ctx context.Context, userID uuid.UUID) (int64, error)
@@ -115,9 +112,7 @@ type Querier interface {
 	DeleteHouseholdReward(ctx context.Context, arg DeleteHouseholdRewardParams) (int64, error)
 	// Deletes every household where the user is the only member.
 	DeleteSoleMemberHouseholds(ctx context.Context, userID uuid.UUID) error
-	DeleteStaleOAuthStates(ctx context.Context) (int64, error)
 	DeleteStalePasswordResetTokens(ctx context.Context) (int64, error)
-	DeleteStaleSignInHandoffs(ctx context.Context) (int64, error)
 	DeleteStaleVerificationCodes(ctx context.Context) (int64, error)
 	DeleteUserByID(ctx context.Context, id uuid.UUID) error
 	GetAdminPin(ctx context.Context, householdID uuid.UUID) (HouseholdAdminPin, error)
@@ -169,7 +164,6 @@ type Querier interface {
 	InsertComboAward(ctx context.Context, arg InsertComboAwardParams) (ComboAward, error)
 	InsertComboQuest(ctx context.Context, arg InsertComboQuestParams) error
 	InsertEmailVerificationCode(ctx context.Context, arg InsertEmailVerificationCodeParams) (EmailVerificationCode, error)
-	InsertOAuthState(ctx context.Context, arg InsertOAuthStateParams) (OauthState, error)
 	InsertPasswordResetToken(ctx context.Context, arg InsertPasswordResetTokenParams) (PasswordResetToken, error)
 	// Points awards are the history of every points credit. Each row is written
 	// by the service layer's creditPoints in the same transaction as the
