@@ -706,8 +706,23 @@ func TestIntegration_HouseholdIsolation(t *testing.T) {
 	} else {
 		t.Errorf("alice's quest list after share: %v", err)
 	}
-	if rows, _, err := quests.List(ctx, mallory, mh.ID, app.QuestPage{Limit: 10}); err != nil || len(rows) != 0 {
-		t.Errorf("mallory's own quest list shows other households' quests: %+v, %v", rows, err)
+	// Mallory's own household now holds her quest; her list must show only
+	// quests of her household, never Alice's or Bob's.
+	if rows, _, err := quests.List(ctx, mallory, mh.ID, app.QuestPage{Limit: 100}); err != nil {
+		t.Errorf("mallory's own quest list: %v", err)
+	} else {
+		sawOwn := false
+		for _, r := range rows {
+			if r.HouseholdID != mh.ID || r.ID == aliceQuest.ID || r.ID == aliceQuest2.ID {
+				t.Errorf("mallory's own quest list shows another household's quest: %+v", r.HouseholdQuest)
+			}
+			if r.ID == malloryQuest.ID {
+				sawOwn = true
+			}
+		}
+		if !sawOwn {
+			t.Errorf("mallory's own quest list misses her quest %v: %+v", malloryQuest.ID, rows)
+		}
 	}
 	if rows, err := quests.ListPending(ctx, alice, h.ID, ""); err != nil || len(rows) != 1 || rows[0].QuestID != alicePending.ID ||
 		rows[0].MemberID != aliceMember.ID {

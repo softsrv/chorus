@@ -211,47 +211,6 @@ func (q *Queries) DeleteQuestSchedule(ctx context.Context, arg DeleteQuestSchedu
 	return result.RowsAffected(), nil
 }
 
-const expireHouseholdQuestClaims = `-- name: ExpireHouseholdQuestClaims :execrows
-WITH expired AS (
-    SELECT q.household_id, q.id
-    FROM household_quests q
-    WHERE q.household_id = $1
-      AND q.claimed_by IS NOT NULL AND q.claim_expires_at <= $2::timestamptz
-    ORDER BY q.id
-    FOR UPDATE OF q
-), dropped AS (
-    DELETE FROM household_quest_participants p
-    USING expired e
-    WHERE p.household_id = e.household_id AND p.quest_id = e.id
-    RETURNING p.member_id
-)
-UPDATE household_quests q
-SET claimed_by = NULL, claimed_at = NULL, done_at = NULL, claim_expires_at = NULL,
-    updated_at = NOW()
-FROM expired e
-WHERE q.household_id = e.household_id AND q.id = e.id
-`
-
-type ExpireHouseholdQuestClaimsParams struct {
-	HouseholdID uuid.UUID          `json:"household_id"`
-	Now         pgtype.Timestamptz `json:"now"`
-}
-
-// The household's part of the end-of-day rule (INT-0176), at now: every held
-// quest of the household whose claim has run out (claim_expires_at at or
-// before now) goes back to the pool exactly as ExpireQuestClaim leaves it:
-// every member on it drops it and the holder, claimed_at, done_at and
-// claim_expires_at are cleared. No completion is recorded, no points move and
-// available_at is left as it is. The caller holds the household's member
-// locks first.
-func (q *Queries) ExpireHouseholdQuestClaims(ctx context.Context, arg ExpireHouseholdQuestClaimsParams) (int64, error) {
-	result, err := q.db.Exec(ctx, expireHouseholdQuestClaims, arg.HouseholdID, arg.Now)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
 const getHouseholdRolloverState = `-- name: GetHouseholdRolloverState :one
 SELECT ($1::timestamptz AT TIME ZONE h.timezone)::date AS local_date,
        r.last_rollover_date

@@ -85,33 +85,6 @@ WHERE household_id = sqlc.arg(household_id)
 ORDER BY id
 FOR UPDATE;
 
--- name: ExpireHouseholdQuestClaims :execrows
--- The household's part of the end-of-day rule (INT-0176), at now: every held
--- quest of the household whose claim has run out (claim_expires_at at or
--- before now) goes back to the pool exactly as ExpireQuestClaim leaves it:
--- every member on it drops it and the holder, claimed_at, done_at and
--- claim_expires_at are cleared. No completion is recorded, no points move and
--- available_at is left as it is. The caller holds the household's member
--- locks first.
-WITH expired AS (
-    SELECT q.household_id, q.id
-    FROM household_quests q
-    WHERE q.household_id = sqlc.arg(household_id)
-      AND q.claimed_by IS NOT NULL AND q.claim_expires_at <= sqlc.arg(now)::timestamptz
-    ORDER BY q.id
-    FOR UPDATE OF q
-), dropped AS (
-    DELETE FROM household_quest_participants p
-    USING expired e
-    WHERE p.household_id = e.household_id AND p.quest_id = e.id
-    RETURNING p.member_id
-)
-UPDATE household_quests q
-SET claimed_by = NULL, claimed_at = NULL, done_at = NULL, claim_expires_at = NULL,
-    updated_at = NOW()
-FROM expired e
-WHERE q.household_id = e.household_id AND q.id = e.id;
-
 -- name: AssignDueSchedules :many
 -- Assigns the household's due schedules at now, under ClaimQuest's rules: the
 -- quest is not held (claimed_by IS NULL), not resting (available_at at or
