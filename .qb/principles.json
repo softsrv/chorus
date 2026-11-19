@@ -1,0 +1,5 @@
+{
+  "on": [
+    "checks-run-before-the-pr"
+  ]
+}
