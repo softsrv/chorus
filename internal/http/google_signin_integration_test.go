@@ -167,7 +167,7 @@ func newGoogleTestServer(t *testing.T, opts googleOpts) *testServer {
 			t.Fatalf("NewTokenCipher: %v", err)
 		}
 		calendar = app.NewGoogleCalendar(q, cipher, app.GoogleCalendarConfig{
-			ClientID: webClientID, ClientSecret: fakeSecret, RedirectURL: calCallbackURL,
+			ClientID: webClientID, ClientSecret: fakeSecret,
 		})
 	}
 

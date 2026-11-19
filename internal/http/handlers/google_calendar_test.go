@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -43,20 +42,6 @@ func (m *mockCalendarSvc) Connect(ctx context.Context, userID uuid.UUID, code, p
 
 func (m *mockCalendarSvc) Disconnect(ctx context.Context, userID uuid.UUID) error {
 	return m.disconnectErr
-}
-
-const authTestSecret = "auth-test-secret-that-is-at-least-32-bytes!!"
-
-type stubFetcher struct {
-	user      db.User
-	sessionID uuid.UUID
-}
-
-func (s *stubFetcher) GetUserForSession(_ context.Context, arg db.GetUserForSessionParams) (db.User, error) {
-	if arg.SessionID != s.sessionID || arg.UserID != s.user.ID {
-		return db.User{}, errors.New("no rows")
-	}
-	return s.user, nil
 }
 
 func authedRequest(method, target string, body any, uid uuid.UUID) *http.Request {
