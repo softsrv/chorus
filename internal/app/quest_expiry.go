@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -14,6 +15,32 @@ import (
 // questExpiryBatch is the most overdue quests one run of the expiry sweep
 // releases; any left over are listed again on the next run.
 const questExpiryBatch = 500
+
+// questExpiryInterval is how often RunQuestExpiry sweeps for overdue quests.
+const questExpiryInterval = time.Minute
+
+// RunQuestExpiry sweeps for overdue quests once at startup and then every
+// questExpiryInterval. It blocks until ctx is cancelled, then returns. A
+// failed sweep is logged and the next tick tries again.
+func RunQuestExpiry(ctx context.Context, svc *QuestService) {
+	ticker := time.NewTicker(questExpiryInterval)
+	defer ticker.Stop()
+	for {
+		if n, err := svc.ExpireOverdueQuests(ctx); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			slog.Error("quest expiry: sweep", "error", err)
+		} else if n > 0 {
+			slog.Info("quest expiry: released overdue quests", "count", n)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
 
 // ExpireOverdueQuests returns to the pool every held quest whose claim has
 // run out: its claim_expires_at, the household-local midnight ending the day
