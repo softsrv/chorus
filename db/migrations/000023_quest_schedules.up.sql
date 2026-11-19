@@ -1,4 +1,4 @@
--- 000022_quest_schedules.up.sql
+-- 000023_quest_schedules.up.sql
 -- Scheduled quests. Expand only: household_quests is not altered and no
 -- existing row changes.
 
