@@ -15,9 +15,10 @@ type Querier interface {
 	// The acting member leaves a quest they hold or are on. Only their part goes:
 	// their participant row. If they held it, the holder of record moves to the
 	// earliest remaining participant (joined_at, then member_id), who keeps
-	// their joined_at as claimed_at; a quest with nobody left is back in the
-	// pool, done_at cleared with the holder so the done_at-needs-a-holder CHECK
-	// holds. A quest left with one member is no longer shared, so that member's
+	// their joined_at as claimed_at and keeps the claim deadline
+	// (claim_expires_at); a quest with nobody left is back in the pool, done_at
+	// and claim_expires_at cleared with the holder so the done_at-needs-a-holder
+	// CHECK holds. A quest left with one member is no longer shared, so that member's
 	// participant row goes too. A member not on the quest, or a quest not in
 	// this household, matches no row and changes nothing. The caller holds the
 	// member locks and then the quest's row lock (LockHouseholdQuest, a statement
@@ -369,8 +370,9 @@ type Querier interface {
 	// members counted here are the ones committed on each quest.
 	// Their participant rows go. On a quest they hold, the holder of record
 	// moves to the earliest remaining participant (joined_at, then member_id),
-	// who keeps their joined_at as claimed_at; a quest with no participant left
-	// is returned to the pool, done_at cleared with the holder so the
+	// who keeps their joined_at as claimed_at and keeps the claim deadline
+	// (claim_expires_at); a quest with no participant left is returned to the
+	// pool, done_at and claim_expires_at cleared with the holder so the
 	// done_at-needs-a-holder CHECK holds. A quest left with one member is no
 	// longer shared, so that member's participant row goes too. The quests are
 	// locked after the caller's lock on the member row (member first). No
