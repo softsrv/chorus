@@ -48,7 +48,7 @@ func newRedeemWorld(t *testing.T, prefix string) *redeemWorld {
 			t.Errorf("delete household %s: %v", h.ID, err)
 		}
 	})
-	return &redeemWorld{t: t, ctx: ctx, pool: pool, family: app.NewFamilyService(q, pool, 10),
+	return &redeemWorld{t: t, ctx: ctx, pool: pool, family: app.NewFamilyService(q, pool, 4),
 		rewards: app.NewRewardService(q, pool), admin: admin, h: h}
 }
 
