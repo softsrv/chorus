@@ -358,7 +358,7 @@ func (s *FamilyService) Remove(ctx context.Context, userID, householdID, memberI
 	if err := releaseMemberQuests(ctx, qtx, userID, householdID, memberID); err != nil {
 		return err
 	}
-	if err := cancelMemberRedemptions(ctx, qtx, householdID, memberID); err != nil {
+	if err := cancelMemberRedemptions(ctx, qtx, userID, householdID, memberID); err != nil {
 		return err
 	}
 	rows, err := qtx.DeleteFamilyMember(ctx, db.DeleteFamilyMemberParams{
