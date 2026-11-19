@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/softsrv/chorus/internal/app"
@@ -564,4 +565,86 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.w.Write(p)
+}
+
+// TestIntegration_QuestScheduleUpcoming proves CLM-1 and CLM-4 against real
+// Postgres: Upcoming returns an empty non-nil slice for a member with
+// nothing scheduled, lists the member's future one-offs with next_date the
+// start date, ordered by next_date and then quest name, leaves out a
+// one-off whose date has passed, drops a one-off once its day's rollover
+// assigned it, and answers ErrNotFound for a member id not in the
+// household.
+func TestIntegration_QuestScheduleUpcoming(t *testing.T) {
+	w := newScheduleWorld(t, "schedupnext")
+	sam, ann := w.member("Sam"), w.member("Ann")
+	w.setAdminPin("4321")
+
+	got, err := w.schedules.Upcoming(w.ctx, w.admin, w.h, sam)
+	if err != nil || got == nil || len(got) != 0 {
+		t.Fatalf("Upcoming with nothing scheduled = %#v, %v; want an empty non-nil slice", got, err)
+	}
+
+	brush := w.quest(app.QuestInput{Name: "Brush the dog", Points: num(5)})
+	apple := w.quest(app.QuestInput{Name: "Apple picking", Points: num(5)})
+	laundry := w.quest(app.QuestInput{Name: "Laundry", Points: num(5)})
+	old := w.quest(app.QuestInput{Name: "Old chore", Points: num(5)})
+	other := w.quest(app.QuestInput{Name: "Ann's chore", Points: num(5)})
+
+	// Scheduled out of order: Laundry (day 3), Brush and Apple (both day 2).
+	laundryS := w.schedule(laundry, sam, 3)
+	brushS := w.schedule(brush, sam, 2)
+	appleS := w.schedule(apple, sam, 2)
+	w.schedule(other, ann, 1) // another member's: never in Sam's list
+
+	// A one-off whose date has passed, as one kept after an age skip is.
+	// Schedule refuses a past date, so it is stored with the query itself.
+	past := w.localMidnight(-2)
+	if _, err := w.q.CreateQuestSchedule(w.ctx, db.CreateQuestScheduleParams{
+		ID: uuid.Must(uuid.NewV7()), StartDate: pgtype.Date{Time: time.Date(past.Year(), past.Month(), past.Day(), 0, 0, 0, 0, time.UTC), Valid: true},
+		HouseholdID: w.h, QuestID: old, MemberID: sam,
+	}); err != nil {
+		t.Fatalf("store passed schedule: %v", err)
+	}
+
+	up, err := w.schedules.Upcoming(w.ctx, w.admin, w.h, sam)
+	if err != nil {
+		t.Fatalf("Upcoming: %v", err)
+	}
+	want := []struct {
+		id    uuid.UUID
+		quest uuid.UUID
+		name  string
+		date  string
+	}{
+		{appleS.ID, apple, "Apple picking", w.date(2)},
+		{brushS.ID, brush, "Brush the dog", w.date(2)},
+		{laundryS.ID, laundry, "Laundry", w.date(3)},
+	}
+	if len(up) != len(want) {
+		t.Fatalf("Upcoming = %+v, want %d items (passed one-off and Ann's left out)", up, len(want))
+	}
+	for i, wnt := range want {
+		u := up[i]
+		if u.ID != wnt.id || u.QuestID != wnt.quest || u.QuestName != wnt.name || u.StartDate != wnt.date || u.NextDate != wnt.date || u.Repeat {
+			t.Errorf("Upcoming[%d] = %+v, want %s one-off on %s", i, u, wnt.name, wnt.date)
+		}
+	}
+
+	// Once the rollover on day 2 assigns Apple and Brush, only Laundry is
+	// upcoming.
+	w.rollover(w.localMidnight(2).Add(time.Minute))
+	if h := w.holder(apple); !isHeldBy(h, sam) {
+		t.Fatalf("after day 2's rollover Apple picking is held by %v, want Sam", h)
+	}
+	up, err = w.schedules.Upcoming(w.ctx, w.admin, w.h, sam)
+	if err != nil {
+		t.Fatalf("Upcoming after rollover: %v", err)
+	}
+	if len(up) != 1 || up[0].ID != laundryS.ID {
+		t.Errorf("Upcoming after rollover = %+v, want only Laundry", up)
+	}
+
+	if _, err := w.schedules.Upcoming(w.ctx, w.admin, w.h, uuid.New()); !errors.Is(err, app.ErrNotFound) {
+		t.Errorf("Upcoming for a member not in the household: err = %v, want ErrNotFound", err)
+	}
 }
