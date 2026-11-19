@@ -7,7 +7,7 @@
 
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import {
   installBrowser, installFetch, loadApp, walk, buttons, buttonStarting, click, submit, sectionNode,
 } from './harness.mjs';
@@ -497,7 +497,57 @@ test('CLM-5: the rewards UI writes only create, edit, delete, from-library and t
   assert.notDeepEqual((planted.match(/adminRequest\('(POST|PUT|DELETE)', [^,)]+/g) || []).length, writes.length);
 });
 
+// The admin's reward-request approvals live on the Quests tab's approvals
+// card (quests.js), not in rewards.js: approvalsCard, from its definition to
+// the next top-level function. It fails loudly when the card is not found.
+function approvalsSource(src) {
+  const start = src.indexOf('async function approvalsCard(');
+  assert.ok(start >= 0, 'approvalsCard not found in quests.js');
+  const next = src.indexOf('\nfunction ', start + 1);
+  return src.slice(start, next >= 0 ? next : src.length);
+}
+
+// Every client module, so a reward write moved out of the scanned surface is caught.
+const JS_DIR = new URL('../static/js/', import.meta.url);
+const ALL_CLIENT_SRC = readdirSync(JS_DIR).filter((f) => f.endsWith('.js'))
+  .map((f) => readFileSync(new URL(f, JS_DIR), 'utf8'));
+const REWARD_WRITE = /\b(?:adminRequest|api)\('(?:POST|PUT|DELETE)', `[^`]*reward[^`]*`/g;
+const APPROVE_REJECT = "adminRequest('POST', `/households/${h.id}/reward-redemptions/${r.id}/${verb}`";
+
+test('CLM-5: the approvals card writes only reward-request approve/reject, and every reward write is scanned', () => {
+  const card = approvalsSource(QUESTS_SRC);
+  // The known approve/reject call site is in the scanned text, with both verbs.
+  assert.ok(card.includes(APPROVE_REJECT), 'reward approve/reject write lives in approvalsCard');
+  assert.match(card, /actReward\('approve', r\)/);
+  assert.match(card, /actReward\('reject', r\)/);
+  assert.equal(SPEND.test(card), false, 'no spend wording on the approvals card');
+  // Its reward writes are exactly approve/reject, and its other writes are the
+  // quest-completion decision and the admin-PIN verify.
+  assert.deepEqual(card.match(REWARD_WRITE) || [], [APPROVE_REJECT]);
+  assert.deepEqual((card.match(/\b(?:adminRequest|api)\('(?:POST|PUT|DELETE)', [^,)]+/g) || []).sort(), [
+    "adminRequest('POST', `/households/${h.id}/quest-completions/${cid}/${verb}`",
+    "adminRequest('POST', `/households/${h.id}/reward-redemptions/${r.id}/${verb}`",
+    "api('POST', `/households/${h.id}/admin-pin/verify`",
+  ]);
+  // No reward write anywhere in the client lies outside the two scanned sections.
+  const scanned = rewardsSource(APP_SRC) + card;
+  const stray = ALL_CLIENT_SRC.flatMap((src) => src.match(REWARD_WRITE) || []).filter((w) => !scanned.includes(w));
+  assert.deepEqual(stray, []);
+  // The checks fail on a planted spend word, reward write or missing card.
+  assert.equal(SPEND.test(card.replace("text: 'Reject'", "text: 'Buy'")), true);
+  const planted = `${card}adminRequest('POST', \`/households/\${h.id}/reward-redemptions/\${r.id}/spend\`)`;
+  assert.notDeepEqual(planted.match(REWARD_WRITE), [APPROVE_REJECT]);
+  assert.throws(() => approvalsSource('function other() {}'), /approvalsCard not found/);
+});
+
 const HTML_SINKS = /innerHTML|insertAdjacentHTML|outerHTML|style:|style=|<script/i;
+
+test('CLM-7: the approvals card renders reward requests as text only — no innerHTML, inline style or script', () => {
+  const card = approvalsSource(QUESTS_SRC);
+  assert.ok(card.includes('text: `Reward: ${r.description}`'), 'read the real reward-request rows');
+  assert.equal(HTML_SINKS.exec(card), null);
+  assert.ok(HTML_SINKS.test(card.replace('text: `Reward: ${r.description}`', 'innerHTML: r.description')), 'check fails on a planted sink');
+});
 
 test('CLM-7: the rewards UI inserts text only — no innerHTML, inline style or script', () => {
   const section = rewardsSource(APP_SRC);
@@ -508,7 +558,7 @@ test('CLM-7: the rewards UI inserts text only — no innerHTML, inline style or 
 
 function rewardHistorySource(src) {
   const fnStart = src.indexOf('function rewardHistoryTable(');
-  assert.ok(fnStart >= 0, 'rewardHistoryTable not found in app.js');
+  assert.ok(fnStart >= 0, 'rewardHistoryTable not found in quests.js');
   // Read until next function or section divider
   const fnEnd = src.indexOf('\nfunction ', fnStart + 1);
   const end = fnEnd >= 0 ? fnEnd : src.length;
