@@ -29,13 +29,14 @@ type RouterConfig struct {
 	AuthSvc           *app.AuthService
 	UserSvc           *app.UserService
 	HouseholdSvc      *app.HouseholdService
-	FamilyCalendar    *app.FamilyCalendar // nil = built from Queries + GoogleCalendar
-	FamilySvc         *app.FamilyService  // nil = built from Queries
-	QuestSvc          *app.QuestService   // nil = built from Queries
-	RewardSvc         *app.RewardService  // nil = built from Queries
-	ComboSvc          *app.ComboService   // nil = built from Queries + Pool
-	GoogleSignIn      *app.GoogleSignIn   // nil = Google sign-in disabled
-	GoogleCalendar    *app.GoogleCalendar // nil = Google Calendar unavailable
+	FamilyCalendar    *app.FamilyCalendar       // nil = built from Queries + GoogleCalendar
+	FamilySvc         *app.FamilyService        // nil = built from Queries
+	QuestSvc          *app.QuestService         // nil = built from Queries
+	RewardSvc         *app.RewardService        // nil = built from Queries
+	ComboSvc          *app.ComboService         // nil = built from Queries + Pool
+	QuestScheduleSvc  *app.QuestScheduleService // nil = built from Queries + Pool
+	GoogleSignIn      *app.GoogleSignIn         // nil = Google sign-in disabled
+	GoogleCalendar    *app.GoogleCalendar       // nil = Google Calendar unavailable
 	JWTSecret         string
 	Secure            bool // true in production
 	TrustedProxyCount int
@@ -78,6 +79,11 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 		comboSvc = app.NewComboService(cfg.Queries, cfg.Pool)
 	}
 	comboH := handlers.NewComboHandler(comboSvc)
+	questScheduleSvc := cfg.QuestScheduleSvc
+	if questScheduleSvc == nil {
+		questScheduleSvc = app.NewQuestScheduleService(cfg.Queries, cfg.Pool)
+	}
+	questScheduleH := handlers.NewQuestScheduleHandler(questScheduleSvc)
 	googleH := handlers.NewGoogleHandler(cfg.GoogleSignIn, cfg.GoogleCalendar != nil, cfg.TrustedProxyCount)
 	calendarH := handlers.NewGoogleCalendarHandler(cfg.GoogleCalendar)
 
@@ -205,6 +211,14 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	// admin PIN is set, needs X-Admin-PIN.
 	api.Handle("POST /api/v1/households/{householdID}/quest-completions/{completionID}/approve", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Approve))))
 	api.Handle("POST /api/v1/households/{householdID}/quest-completions/{completionID}/reject", authMW(middleware.RequireEmailVerified(limit(pinRL, questH.Reject))))
+	// Scheduled quests: admin-only, X-Admin-PIN once one is set, on the PIN
+	// rate limiter, reads included (the list checks the PIN too).
+	api.Handle("POST /api/v1/households/{householdID}/quest-schedules", authMW(middleware.RequireEmailVerified(limit(pinRL, questScheduleH.Create))))
+	api.Handle("GET /api/v1/households/{householdID}/quest-schedules", authMW(middleware.RequireEmailVerified(limit(pinRL, questScheduleH.List))))
+	api.Handle("DELETE /api/v1/households/{householdID}/quest-schedules/{scheduleID}", authMW(middleware.RequireEmailVerified(limit(pinRL, questScheduleH.Delete))))
+	// A member's upcoming quests: a plain household read like the quest list,
+	// no PIN, so it is off the PIN limiter and never spends the action budget.
+	api.Handle("GET /api/v1/households/{householdID}/family-members/{memberID}/upcoming-quests", verified(questScheduleH.Upcoming))
 
 	// ── Rewards ───────────────────────────────────────────────────────────────
 	// Same rules as quest writes: admin-only, X-Admin-PIN once one is set, on

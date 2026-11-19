@@ -2,3 +2,5 @@
 /db/migrations/ @trriplejay
 /.github/ @trriplejay
 /.github/CODEOWNERS @trriplejay
+/.qb/ @trriplejay
+/.github/workflows/qb-starting-eleven.yml @trriplejay
