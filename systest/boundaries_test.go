@@ -5,6 +5,7 @@ package systest
 import (
 	"bytes"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -103,16 +104,11 @@ func TestSystem_HouseholdIsolationAndGoogleOff(t *testing.T) {
 		// Google, from startup through every request below, is recorded there.
 		defer assertNoGoogleCalls(t, app)
 
-		var cfg map[string]bool
+		var cfg map[string]any
 		app.do("GET", "/api/v1/auth/config", "", nil).expect(t, "GET /api/v1/auth/config", http.StatusOK).decode(t, &cfg)
-		if len(cfg) != 2 || cfg["google_sign_in"] || cfg["google_calendar"] {
-			t.Fatalf("auth config = %v, want {google_sign_in:false google_calendar:false}", cfg)
-		}
-		if _, ok := cfg["google_sign_in"]; !ok {
-			t.Fatalf("auth config = %v, missing google_sign_in", cfg)
-		}
-		if _, ok := cfg["google_calendar"]; !ok {
-			t.Fatalf("auth config = %v, missing google_calendar", cfg)
+		want := map[string]any{"google_sign_in": false, "google_calendar": false, "google_client_id": ""}
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatalf("auth config = %v, want %v", cfg, want)
 		}
 
 		app.do("GET", "/api/v1/auth/google/start", "", nil).expect(t, "GET /api/v1/auth/google/start", http.StatusNotFound)
