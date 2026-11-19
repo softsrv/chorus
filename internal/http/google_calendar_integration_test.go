@@ -10,9 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,7 +22,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/softsrv/chorus/internal/app"
-	"github.com/softsrv/chorus/internal/auth"
 	"github.com/softsrv/chorus/internal/db"
 	internalhttp "github.com/softsrv/chorus/internal/http"
 )
@@ -34,11 +31,17 @@ const (
 	calScopeEvents   = "https://www.googleapis.com/auth/calendar.events"
 	calScopeEventsRO = "https://www.googleapis.com/auth/calendar.events.readonly"
 	calBothScopes    = calScopeList + " " + calScopeEvents
-	calCallbackURL   = "http://chorus.test/api/v1/me/google-calendar/callback"
 )
 
 // calendarKey is the 32-byte token key the test service encrypts with.
 var calendarKey = []byte("0123456789abcdef0123456789abcdef")
+
+type codeExchange struct {
+	Code         string
+	RedirectURI  string
+	ClientID     string
+	ClientSecret string
+}
 
 // fakeCalendarGoogle serves Google's token endpoint (code exchange and
 // refresh) and revoke endpoint, counting hits on each.
@@ -59,6 +62,7 @@ type fakeCalendarGoogle struct {
 	revoked       []string
 	issued        []string // access tokens handed out, in order
 	refreshedWith []string // refresh tokens sent to the refresh endpoint
+	exchanges     []codeExchange
 }
 
 func newFakeCalendarGoogle(t *testing.T) *fakeCalendarGoogle {
@@ -73,12 +77,25 @@ func newFakeCalendarGoogle(t *testing.T) *fakeCalendarGoogle {
 		switch r.Form.Get("grant_type") {
 		case "authorization_code":
 			f.codeHits.Add(1)
+			clientID, clientSecret, _ := r.BasicAuth()
+			if clientID == "" {
+				clientID = r.Form.Get("client_id")
+			}
+			if clientSecret == "" {
+				clientSecret = r.Form.Get("client_secret")
+			}
+			f.exchanges = append(f.exchanges, codeExchange{
+				Code:         r.Form.Get("code"),
+				RedirectURI:  r.Form.Get("redirect_uri"),
+				ClientID:     clientID,
+				ClientSecret: clientSecret,
+			})
 			if f.tokenStatus != 0 && f.tokenStatus != http.StatusOK {
 				w.WriteHeader(f.tokenStatus)
 				fmt.Fprintf(w, `{"error":"invalid_grant","error_description":"%s"}`, sentinel)
 				return
 			}
-			if r.Form.Get("code") == "" || r.Form.Get("code_verifier") == "" || r.Form.Get("redirect_uri") != calCallbackURL {
+			if r.Form.Get("code") == "" {
 				w.WriteHeader(http.StatusBadRequest)
 				fmt.Fprintf(w, `{"error":"invalid_request","error_description":"%s"}`, sentinel)
 				return
@@ -162,22 +179,23 @@ func (f *fakeCalendarGoogle) lastRefreshToken() string {
 	return f.refreshedWith[len(f.refreshedWith)-1]
 }
 
+func (f *fakeCalendarGoogle) lastExchange() codeExchange {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.exchanges) == 0 {
+		return codeExchange{}
+	}
+	return f.exchanges[len(f.exchanges)-1]
+}
+
 type calendarServer struct {
 	*testServer
 	cipher *app.TokenCipher
-	// binding is the browser binding cookie connect set, by state: what the
-	// browser that started each connect holds. calCallback sends it back.
-	binding sync.Map // state -> nonce
 }
 
-// calBindingCookie is the HttpOnly cookie connect sets to bind the flow to
-// the initiating browser.
-const calBindingCookie = "chorus_gcal_bind"
-
 // newCalendarTestServer is newTestServer with Google Calendar wired to fake
-// (or unavailable when fake is nil). The authorization URL keeps Google's
-// real endpoint (it is only parsed, never fetched); the token and revoke
-// endpoints point at the fake.
+// (or unavailable when fake is nil). The token and revoke endpoints point
+// at the fake.
 func newCalendarTestServer(t *testing.T, fake *fakeCalendarGoogle) *calendarServer {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
@@ -205,11 +223,11 @@ func newCalendarTestServer(t *testing.T, fake *fakeCalendarGoogle) *calendarServ
 	var calendar *app.GoogleCalendar
 	if fake != nil {
 		calendar = app.NewGoogleCalendar(q, cipher, app.GoogleCalendarConfig{
-			ClientID: "client-id", ClientSecret: "client-secret",
-			RedirectURL: calCallbackURL,
-			TokenURL:    fake.srv.URL + "/token",
-			RevokeURL:   fake.srv.URL + "/revoke",
-			APIBaseURL:  fake.srv.URL + "/calendar/v3",
+			ClientID:     "client-id",
+			ClientSecret: "client-secret",
+			TokenURL:     fake.srv.URL + "/token",
+			RevokeURL:    fake.srv.URL + "/revoke",
+			APIBaseURL:   fake.srv.URL + "/calendar/v3",
 		})
 	}
 
@@ -265,96 +283,46 @@ func (s *calendarServer) doRaw(method, path, token string, body any) (int, strin
 	return resp.StatusCode, string(b)
 }
 
-// connect calls the connect route and returns the parsed authorization URL.
-func (s *calendarServer) connect(token string) *url.URL {
+func (s *calendarServer) connect(token string, body any) (int, calendarStatus, *http.Response) {
 	s.t.Helper()
-	var out struct {
-		URL string `json:"url"`
-	}
-	req, _ := http.NewRequest("POST", s.srv.URL+"/api/v1/me/google-calendar/connect", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		s.t.Fatalf("connect: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		s.t.Fatalf("connect: status %d, want 200", resp.StatusCode)
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		s.t.Fatalf("decode connect: %v", err)
-	}
-	u, err := url.Parse(out.URL)
-	if err != nil || u.Query().Get("state") == "" {
-		s.t.Fatalf("connect url %q: want a URL with a state (%v)", out.URL, err)
-	}
-	var bind *http.Cookie
-	for _, c := range resp.Cookies() {
-		if c.Name == calBindingCookie {
-			bind = c
+	var rdr io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			s.t.Fatalf("marshal connect body: %v", err)
 		}
+		rdr = bytes.NewReader(b)
 	}
-	if bind == nil || bind.Value == "" {
-		s.t.Fatalf("connect set no %s cookie", calBindingCookie)
+	req, _ := http.NewRequest("POST", s.srv.URL+"/api/v1/me/google-calendar/connect", rdr)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
-	s.binding.Store(u.Query().Get("state"), bind.Value)
-	return u
-}
-
-// bindingFor is the binding cookie the browser that started state holds.
-func (s *calendarServer) bindingFor(state string) string {
-	v, _ := s.binding.Load(state)
-	nonce, _ := v.(string)
-	return nonce
-}
-
-// callbackAs GETs the callback as a browser holding the binding cookie nonce
-// ("" = no cookie) and returns status, Location, body and the response's
-// binding cookie (nil if none was set).
-func (s *calendarServer) callbackAs(query url.Values, nonce string) (int, string, string, *http.Cookie) {
-	s.t.Helper()
-	req, _ := http.NewRequest("GET", s.srv.URL+"/api/v1/me/google-calendar/callback?"+query.Encode(), nil)
-	if nonce != "" {
-		req.AddCookie(&http.Cookie{Name: calBindingCookie, Value: nonce})
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := noRedirect.Do(req)
 	if err != nil {
-		s.t.Fatalf("callback: %v", err)
+		s.t.Fatalf("POST connect: %v", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	var set *http.Cookie
-	for _, c := range resp.Cookies() {
-		if c.Name == calBindingCookie {
-			set = c
-		}
-	}
-	return resp.StatusCode, resp.Header.Get("Location"), string(body), set
+	var st calendarStatus
+	_ = json.NewDecoder(resp.Body).Decode(&st)
+	return resp.StatusCode, st, resp
 }
 
-// calCallback GETs the callback from the browser that started the query's
-// state (sending its binding cookie) and returns the Location and body. It
-// fails unless the response is a 303 to the Account page.
-func (s *calendarServer) calCallback(query url.Values) (string, string) {
+func (s *calendarServer) connectCode(token, code string) (int, calendarStatus) {
 	s.t.Helper()
-	status, loc, body, _ := s.callbackAs(query, s.bindingFor(query.Get("state")))
-	if status != http.StatusSeeOther {
-		s.t.Fatalf("callback: status %d, want 303 (Location %q body %q)", status, loc, body)
-	}
-	return loc, body
+	status, st, _ := s.connect(token, map[string]string{"code": code})
+	return status, st
 }
 
-const (
-	calConnected = "/account?google_calendar=connected"
-	calFailed    = "/account?google_calendar=failed"
-)
-
-// connectFlow runs connect + callback and returns the callback Location.
-func (s *calendarServer) connectFlow(token string) string {
+func (s *calendarServer) connectFlow(token string) calendarStatus {
 	s.t.Helper()
-	state := s.connect(token).Query().Get("state")
-	loc, _ := s.calCallback(url.Values{"state": {state}, "code": {"code-" + uuid.NewString()}})
-	return loc
+	status, st, _ := s.connect(token, map[string]string{"code": "code-" + uuid.NewString()})
+	if status != http.StatusOK {
+		s.t.Fatalf("connectFlow: status %d, want 200", status)
+	}
+	return st
 }
 
 func (s *calendarServer) connectionCount(userID uuid.UUID) int {
@@ -405,20 +373,6 @@ func (s *calendarServer) seedConnection(userID uuid.UUID, access, refresh, level
 	}
 }
 
-// insertCalendarState stores a calendar-purpose state for userID directly.
-func (s *calendarServer) insertCalendarState(purpose string, userID uuid.UUID, expiresAt time.Time) string {
-	s.t.Helper()
-	raw := "test-state-" + uuid.NewString()
-	nonce := "test-nonce-" + uuid.NewString()
-	if _, err := s.pool.Exec(context.Background(),
-		`INSERT INTO oauth_states (id, state_hash, purpose, user_id, pkce_verifier, expires_at) VALUES ($1, $2, $3, $4, $5, $6)`,
-		uuid.Must(uuid.NewV7()), auth.HashToken(raw+":"+nonce), purpose, userID, "verifier-"+uuid.NewString(), expiresAt); err != nil {
-		s.t.Fatalf("insert state: %v", err)
-	}
-	s.binding.Store(raw, nonce)
-	return raw
-}
-
 // CLM-1: status is not_connected for a verified user without a connection,
 // connected after a connect; unverified and anonymous callers are refused.
 // With Google Calendar unconfigured status reports unavailable.
@@ -430,8 +384,8 @@ func TestGoogleCalendar_Status(t *testing.T) {
 	if st := s.status(user.AccessToken); st.Status != "not_connected" || st.Access != "" {
 		t.Fatalf("status = %+v, want not_connected without access", st)
 	}
-	if loc := s.connectFlow(user.AccessToken); loc != calConnected {
-		t.Fatalf("callback Location %q, want %q", loc, calConnected)
+	if st := s.connectFlow(user.AccessToken); st.Status != "connected" || st.Access != "read_write" {
+		t.Fatalf("connectFlow = %+v, want connected read_write", st)
 	}
 	if st := s.status(user.AccessToken); st.Status != "connected" || st.Access != "read_write" {
 		t.Errorf("status after connect = %+v, want connected read_write", st)
@@ -450,7 +404,7 @@ func TestGoogleCalendar_Status(t *testing.T) {
 		t.Errorf("unverified status: %d %q, want 403 email_not_verified", status, e.Error.Code)
 	}
 	e = apiError{}
-	if status := s.do("POST", "/api/v1/me/google-calendar/connect", unverified.AccessToken, nil, &e); status != http.StatusForbidden || e.Error.Code != "email_not_verified" {
+	if status := s.do("POST", "/api/v1/me/google-calendar/connect", unverified.AccessToken, map[string]string{"code": "c"}, &e); status != http.StatusForbidden || e.Error.Code != "email_not_verified" {
 		t.Errorf("unverified connect: %d %q, want 403 email_not_verified", status, e.Error.Code)
 	}
 	e = apiError{}
@@ -464,7 +418,7 @@ func TestGoogleCalendar_Status(t *testing.T) {
 	if st := off.status(offUser.AccessToken); st.Status != "unavailable" {
 		t.Errorf("unconfigured status = %+v, want unavailable", st)
 	}
-	if status := off.do("POST", "/api/v1/me/google-calendar/connect", offUser.AccessToken, nil, &e); status != http.StatusNotFound {
+	if status := off.do("POST", "/api/v1/me/google-calendar/connect", offUser.AccessToken, map[string]string{"code": "c"}, &e); status != http.StatusNotFound {
 		t.Errorf("unconfigured connect: %d, want 404", status)
 	}
 	if status, _, _ := off.get("/api/v1/me/google-calendar/callback?state=x&code=y"); status != http.StatusNotFound {
@@ -481,59 +435,50 @@ func TestGoogleCalendar_Status(t *testing.T) {
 	}
 }
 
-// CLM-2: connect returns Google's authorization URL with exactly the two
-// calendar scopes, offline access, forced consent and the callback
-// redirect_uri, and stores a hashed calendar state bound to the caller.
-func TestGoogleCalendar_ConnectURLAndState(t *testing.T) {
-	fake := newFakeCalendarGoogle(t)
-	s := newCalendarTestServer(t, fake)
-	user := s.signUp("calconnect")
-
-	u := s.connect(user.AccessToken)
-	q := u.Query()
-	if u.Scheme != "https" || u.Host != "accounts.google.com" {
-		t.Errorf("auth URL host %s://%s, want https://accounts.google.com", u.Scheme, u.Host)
-	}
-	scopes := strings.Fields(q.Get("scope"))
-	sort.Strings(scopes)
-	if strings.Join(scopes, " ") != calScopeList+" "+calScopeEvents {
-		t.Errorf("scopes = %v, want exactly [%s %s]", scopes, calScopeList, calScopeEvents)
-	}
-	if q.Get("access_type") != "offline" || q.Get("prompt") != "consent" || q.Get("redirect_uri") != calCallbackURL {
-		t.Errorf("access_type=%q prompt=%q redirect_uri=%q", q.Get("access_type"), q.Get("prompt"), q.Get("redirect_uri"))
-	}
-
-	var (
-		purpose   string
-		owner     *uuid.UUID
-		expiresAt time.Time
-		usedAt    pgtype.Timestamptz
-	)
-	if err := s.pool.QueryRow(context.Background(),
-		"SELECT purpose, user_id, expires_at, used_at FROM oauth_states WHERE state_hash = $1",
-		auth.HashToken(q.Get("state")+":"+s.bindingFor(q.Get("state")))).Scan(&purpose, &owner, &expiresAt, &usedAt); err != nil {
-		t.Fatalf("state row for the returned state (stored hashed): %v", err)
-	}
-	if purpose != "calendar" || owner == nil || *owner != user.User.ID || !expiresAt.After(time.Now()) || usedAt.Valid {
-		t.Errorf("state row purpose=%q user=%v expires=%v used=%v; want calendar, caller, future, unused", purpose, owner, expiresAt, usedAt.Valid)
-	}
-	if fake.codeHits.Load() != 0 {
-		t.Error("connect contacted Google's token endpoint")
-	}
-}
-
-// CLM-3: a valid callback stores one read_write connection with encrypted
-// tokens, consumes the state, and redirects to the Account page with success.
+// CLM-1: POST /api/v1/me/google-calendar/connect with a bearer token of a verified
+// account and body {code} exchanges the code at Google's token endpoint using the
+// web client's id and secret, stores the access and refresh tokens encrypted
+// (never plaintext) as one connection for the caller, and answers 200 with the
+// same JSON body as GET /me/google-calendar (status and access). No redirect is
+// returned and no Set-Cookie header is sent.
 func TestGoogleCalendar_CallbackSuccess(t *testing.T) {
 	fake := newFakeCalendarGoogle(t)
 	s := newCalendarTestServer(t, fake)
 	user := s.signUp("calsuccess")
 
-	state := s.connect(user.AccessToken).Query().Get("state")
-	loc, _ := s.calCallback(url.Values{"state": {state}, "code": {"code-1"}})
-	if loc != calConnected {
-		t.Fatalf("Location %q, want %q", loc, calConnected)
+	req, _ := http.NewRequest("POST", s.srv.URL+"/api/v1/me/google-calendar/connect", bytes.NewReader([]byte(`{"code":"code-1"}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+user.AccessToken)
+	resp, err := noRedirect.Do(req)
+	if err != nil {
+		t.Fatalf("POST connect: %v", err)
 	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); loc != "" {
+		t.Errorf("Location header %q; want no redirect", loc)
+	}
+	if len(resp.Cookies()) > 0 || resp.Header.Get("Set-Cookie") != "" {
+		t.Errorf("response set cookies: %v", resp.Header.Values("Set-Cookie"))
+	}
+
+	var connBody calendarStatus
+	if err := json.NewDecoder(resp.Body).Decode(&connBody); err != nil {
+		t.Fatalf("decode connect response: %v", err)
+	}
+	if connBody.Status != "connected" || connBody.Access != "read_write" {
+		t.Errorf("connect body = %+v, want connected read_write", connBody)
+	}
+
+	// Assert body equals subsequent GET /me/google-calendar body
+	getStatus := s.status(user.AccessToken)
+	if getStatus != connBody {
+		t.Errorf("subsequent GET status = %+v, want equal to connect response %+v", getStatus, connBody)
+	}
+
 	if n := s.connectionCount(user.User.ID); n != 1 {
 		t.Fatalf("connections = %d, want 1", n)
 	}
@@ -551,12 +496,11 @@ func TestGoogleCalendar_CallbackSuccess(t *testing.T) {
 		t.Error("tokens stored in plaintext")
 	}
 
-	hits := fake.codeHits.Load()
-	if loc, _ := s.calCallback(url.Values{"state": {state}, "code": {"code-2"}}); loc != calFailed {
-		t.Errorf("replayed state Location %q, want %q", loc, calFailed)
-	}
-	if fake.codeHits.Load() != hits {
-		t.Error("replayed state reached the token endpoint")
+	// Second POST with already consumed code is refused
+	fake.set(func(f *fakeCalendarGoogle) { f.tokenStatus = http.StatusBadRequest })
+	status, _, _ := s.connect(user.AccessToken, map[string]string{"code": "code-replayed"})
+	if status != http.StatusBadRequest {
+		t.Errorf("replayed code status = %d, want 400", status)
 	}
 	if n := s.connectionCount(user.User.ID); n != 1 {
 		t.Errorf("connections after replay = %d, want 1", n)
@@ -566,177 +510,103 @@ func TestGoogleCalendar_CallbackSuccess(t *testing.T) {
 	}
 }
 
-// CLM-5: cancel, a bad state or a failed exchange stores nothing, never
-// exchanges for a bad state, and redirects with only a generic failure.
+// CLM-2: The connect body accepts an optional platform. When absent or "web"
+// the server exchanges the code with redirect_uri=postmessage; for "ios" or
+// "android" it exchanges with an empty redirect_uri; always with the web
+// client's id and secret. Any other platform value is refused with a 4xx and
+// Google is never called.
+func TestGoogleCalendar_ConnectPlatformRedirectURI(t *testing.T) {
+	fake := newFakeCalendarGoogle(t)
+	s := newCalendarTestServer(t, fake)
+	user := s.signUp("calplatform")
+
+	cases := []struct {
+		name       string
+		body       map[string]string
+		wantURI    string
+		wantCode   int
+		callGoogle bool
+	}{
+		{"absent platform", map[string]string{"code": "code-absent"}, "postmessage", http.StatusOK, true},
+		{"web platform", map[string]string{"code": "code-web", "platform": "web"}, "postmessage", http.StatusOK, true},
+		{"ios platform", map[string]string{"code": "code-ios", "platform": "ios"}, "", http.StatusOK, true},
+		{"android platform", map[string]string{"code": "code-android", "platform": "android"}, "", http.StatusOK, true},
+		{"windows platform", map[string]string{"code": "code-win", "platform": "windows"}, "", http.StatusBadRequest, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hitsBefore := fake.codeHits.Load()
+			status, _, _ := s.connect(user.AccessToken, tc.body)
+			if status != tc.wantCode {
+				t.Fatalf("status = %d, want %d", status, tc.wantCode)
+			}
+			if !tc.callGoogle {
+				if fake.codeHits.Load() != hitsBefore {
+					t.Errorf("fake token endpoint hit on refused platform: hits=%d want %d", fake.codeHits.Load(), hitsBefore)
+				}
+				return
+			}
+			if fake.codeHits.Load() != hitsBefore+1 {
+				t.Fatalf("fake token endpoint hits = %d, want %d", fake.codeHits.Load(), hitsBefore+1)
+			}
+			ex := fake.lastExchange()
+			if ex.RedirectURI != tc.wantURI {
+				t.Errorf("exchange redirect_uri = %q, want %q", ex.RedirectURI, tc.wantURI)
+			}
+			if ex.ClientID != "client-id" || ex.ClientSecret != "client-secret" {
+				t.Errorf("exchange client_id/secret = %q/%q, want client-id/client-secret", ex.ClientID, ex.ClientSecret)
+			}
+		})
+	}
+}
+
+// CLM-4: A code Google rejects (invalid_grant, reused code, any token-endpoint
+// failure or empty code) yields a 4xx JSON error with the generic calendar-connect
+// message; the response body contains no text from Google's error body or internal
+// error, and no connection row, token or other state is stored (an existing
+// connection is left as it was).
 func TestGoogleCalendar_CallbackRefusals(t *testing.T) {
 	fake := newFakeCalendarGoogle(t)
 	s := newCalendarTestServer(t, fake)
 	user := s.signUp("calrefuse")
-	other := s.signUp("calrefuseother")
 
 	cases := []struct {
-		name       string
-		badState   bool // the token endpoint must not be hit
-		setup      func() url.Values
-		connection uuid.UUID
+		name        string
+		tokenStatus int
+		body        map[string]string
+		callGoogle  bool
 	}{
-		{"cancel with valid state", true, func() url.Values {
-			return url.Values{"state": {s.connect(user.AccessToken).Query().Get("state")}, "error": {"access_denied"}}
-		}, user.User.ID},
-		{"no state", true, func() url.Values { return url.Values{"code": {"c"}} }, user.User.ID},
-		{"random state", true, func() url.Values {
-			return url.Values{"state": {"random-" + uuid.NewString()}, "code": {"c"}}
-		}, user.User.ID},
-		{"expired state", true, func() url.Values {
-			return url.Values{"state": {s.insertCalendarState("calendar", user.User.ID, time.Now().Add(-time.Minute))}, "code": {"c"}}
-		}, user.User.ID},
-		{"replayed state", true, func() url.Values {
-			state := s.connect(other.AccessToken).Query().Get("state")
-			fake.set(func(f *fakeCalendarGoogle) { f.tokenStatus = http.StatusBadRequest })
-			if loc, _ := s.calCallback(url.Values{"state": {state}, "code": {"c"}}); loc != calFailed {
-				t.Fatalf("setup: first use Location %q", loc)
-			}
-			fake.set(func(f *fakeCalendarGoogle) { f.tokenStatus = 0 })
-			return url.Values{"state": {state}, "code": {"c"}}
-		}, other.User.ID},
-		{"sign-in purpose state", true, func() url.Values {
-			return url.Values{"state": {s.insertCalendarState("sign_in", user.User.ID, time.Now().Add(10*time.Minute))}, "code": {"c"}}
-		}, user.User.ID},
-		{"token endpoint 400", false, func() url.Values {
-			fake.set(func(f *fakeCalendarGoogle) { f.tokenStatus = http.StatusBadRequest })
-			return url.Values{"state": {s.connect(user.AccessToken).Query().Get("state")}, "code": {"c"}}
-		}, user.User.ID},
-		{"token endpoint 500", false, func() url.Values {
-			fake.set(func(f *fakeCalendarGoogle) { f.tokenStatus = http.StatusInternalServerError })
-			return url.Values{"state": {s.connect(user.AccessToken).Query().Get("state")}, "code": {"c"}}
-		}, user.User.ID},
+		{"empty code", 0, map[string]string{"code": ""}, false},
+		{"whitespace code", 0, map[string]string{"code": "   "}, false},
+		{"token endpoint 400", http.StatusBadRequest, map[string]string{"code": "code-400"}, true},
+		{"token endpoint 500", http.StatusInternalServerError, map[string]string{"code": "code-500"}, true},
 	}
+
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fake.set(func(f *fakeCalendarGoogle) { f.tokenStatus = 0 })
-			query := tc.setup()
+			fake.set(func(f *fakeCalendarGoogle) { f.tokenStatus = tc.tokenStatus })
 			hits := fake.codeHits.Load()
-			loc, body := s.calCallback(query)
-			if loc != calFailed {
-				t.Errorf("Location %q, want exactly %q", loc, calFailed)
+			status, body := s.doRaw("POST", "/api/v1/me/google-calendar/connect", user.AccessToken, tc.body)
+			if status < 400 || status >= 500 {
+				t.Fatalf("status = %d, want 4xx", status)
 			}
-			for _, leak := range []string{sentinel, "invalid_grant", "oauth2", "pgx", "sql", "state", "exchange"} {
-				if strings.Contains(body, leak) || strings.Contains(loc, leak) {
-					t.Errorf("response leaks %q: Location %q body %q", leak, loc, body)
+			for _, leak := range []string{sentinel, "invalid_grant", "oauth2", "pgx", "sql", "exchange"} {
+				if strings.Contains(body, leak) {
+					t.Errorf("response leaks %q: body %q", leak, body)
 				}
 			}
-			if tc.badState && fake.codeHits.Load() != hits {
-				t.Error("token endpoint was hit for a refused state")
+			if !tc.callGoogle && fake.codeHits.Load() != hits {
+				t.Error("token endpoint was hit for empty code")
 			}
-			if n := s.connectionCount(tc.connection); n != 0 {
+			if n := s.connectionCount(user.User.ID); n != 0 {
 				t.Errorf("connections = %d, want 0", n)
 			}
 		})
 	}
 }
 
-// The callback is bound to the browser that started connect: a valid state
-// arriving without that browser's binding cookie (an attacker forwarding
-// their consent URL to a victim) stores no connection for anyone and never
-// reaches Google's token endpoint. The state stays usable by its own browser,
-// which still connects. Every callback clears the cookie.
-func TestGoogleCalendar_CallbackBoundToBrowser(t *testing.T) {
-	fake := newFakeCalendarGoogle(t)
-	s := newCalendarTestServer(t, fake)
-	attacker := s.signUp("calbindattacker")
-	victim := s.signUp("calbindvictim")
-
-	attackerState := s.connect(attacker.AccessToken).Query().Get("state")
-	victimState := s.connect(victim.AccessToken).Query().Get("state")
-	victimCookie := s.bindingFor(victimState)
-
-	for _, tc := range []struct {
-		name  string
-		nonce string
-	}{
-		{"no cookie", ""},
-		{"another browser's cookie", victimCookie},
-		{"forged cookie", "forged-" + uuid.NewString()},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			hits := fake.codeHits.Load()
-			status, loc, body, cleared := s.callbackAs(url.Values{"state": {attackerState}, "code": {"victim-code"}}, tc.nonce)
-			if status != http.StatusSeeOther || loc != calFailed {
-				t.Errorf("callback: %d %q, want 303 %q", status, loc, calFailed)
-			}
-			for _, leak := range []string{sentinel, "browser", "state", "cookie"} {
-				if strings.Contains(body, leak) || strings.Contains(loc, leak) {
-					t.Errorf("response leaks %q: Location %q body %q", leak, loc, body)
-				}
-			}
-			if fake.codeHits.Load() != hits {
-				t.Error("token endpoint was hit for an unbound callback")
-			}
-			if cleared == nil || cleared.MaxAge >= 0 {
-				t.Errorf("callback did not clear the binding cookie: %+v", cleared)
-			}
-			if n := s.connectionCount(attacker.User.ID); n != 0 {
-				t.Errorf("attacker connections = %d, want 0", n)
-			}
-			if n := s.connectionCount(victim.User.ID); n != 0 {
-				t.Errorf("victim connections = %d, want 0", n)
-			}
-		})
-	}
-
-	// Happy path: the browser that started connect, with its cookie, still
-	// connects (the refused attempts above did not consume its state).
-	hits := fake.codeHits.Load()
-	status, loc, _, cleared := s.callbackAs(url.Values{"state": {attackerState}, "code": {"own-code"}}, s.bindingFor(attackerState))
-	if status != http.StatusSeeOther || loc != calConnected {
-		t.Fatalf("own browser callback: %d %q, want 303 %q", status, loc, calConnected)
-	}
-	if fake.codeHits.Load() != hits+1 {
-		t.Error("own browser callback did not exchange the code once")
-	}
-	if cleared == nil || cleared.MaxAge >= 0 {
-		t.Errorf("success did not clear the binding cookie: %+v", cleared)
-	}
-	if n := s.connectionCount(attacker.User.ID); n != 1 {
-		t.Errorf("connections after own callback = %d, want 1", n)
-	}
-	if st := s.status(attacker.AccessToken); st.Status != "connected" {
-		t.Errorf("status = %+v, want connected", st)
-	}
-	if st := s.status(victim.AccessToken); st.Status != "not_connected" {
-		t.Errorf("victim status = %+v, want not_connected", st)
-	}
-}
-
-// Connect's binding cookie is HttpOnly, SameSite=Lax, scoped to the callback
-// path and lives no longer than the state.
-func TestGoogleCalendar_ConnectBindingCookie(t *testing.T) {
-	fake := newFakeCalendarGoogle(t)
-	s := newCalendarTestServer(t, fake)
-	user := s.signUp("calbindcookie")
-	req, _ := http.NewRequest("POST", s.srv.URL+"/api/v1/me/google-calendar/connect", nil)
-	req.Header.Set("Authorization", "Bearer "+user.AccessToken)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	var c *http.Cookie
-	for _, ck := range resp.Cookies() {
-		if ck.Name == calBindingCookie {
-			c = ck
-		}
-	}
-	if c == nil {
-		t.Fatal("no binding cookie")
-	}
-	if !c.HttpOnly || c.SameSite != http.SameSiteLaxMode || c.Path != "/api/v1/me/google-calendar/callback" ||
-		c.MaxAge <= 0 || c.MaxAge > int(app.CalendarStateTTL/time.Second) || c.Secure {
-		t.Errorf("cookie = %+v; want HttpOnly, Lax, callback path, short-lived, not Secure on http", c)
-	}
-}
-
-// CLM-6: the access level comes from the scopes Google granted; with no
+// CLM-3: the access level comes from the scopes Google granted; with no
 // calendar scope the token is revoked and nothing is stored.
 func TestGoogleCalendar_GrantedScopes(t *testing.T) {
 	fake := newFakeCalendarGoogle(t)
@@ -745,8 +615,12 @@ func TestGoogleCalendar_GrantedScopes(t *testing.T) {
 	t.Run("both scopes", func(t *testing.T) {
 		u := s.signUp("calboth")
 		fake.set(func(f *fakeCalendarGoogle) { f.grantedScope = calBothScopes })
-		if loc := s.connectFlow(u.AccessToken); loc != calConnected {
-			t.Fatalf("Location %q", loc)
+		status, st := s.connectCode(u.AccessToken, "code-both")
+		if status != http.StatusOK {
+			t.Fatalf("connect status %d", status)
+		}
+		if st.Status != "connected" || st.Access != "read_write" {
+			t.Errorf("status = %+v, want connected read_write", st)
 		}
 		if st := s.status(u.AccessToken); st.Status != "connected" || st.Access != "read_write" {
 			t.Errorf("status = %+v, want connected read_write", st)
@@ -755,8 +629,9 @@ func TestGoogleCalendar_GrantedScopes(t *testing.T) {
 	t.Run("read without events", func(t *testing.T) {
 		u := s.signUp("calro")
 		fake.set(func(f *fakeCalendarGoogle) { f.grantedScope = calScopeList + " " + calScopeEventsRO })
-		if loc := s.connectFlow(u.AccessToken); loc != calConnected {
-			t.Fatalf("Location %q", loc)
+		status, st := s.connectCode(u.AccessToken, "code-ro")
+		if status != http.StatusOK {
+			t.Fatalf("connect status %d", status)
 		}
 		if c := s.connection(u.User.ID); c.AccessLevel != "read_only" {
 			t.Errorf("row access = %q, want read_only", c.AccessLevel)
@@ -769,33 +644,21 @@ func TestGoogleCalendar_GrantedScopes(t *testing.T) {
 		u := s.signUp("calnone")
 		fake.set(func(f *fakeCalendarGoogle) { f.grantedScope = "openid email" })
 		revokedBefore := len(fake.revokedTokens())
-		if loc := s.connectFlow(u.AccessToken); loc != calFailed {
-			t.Errorf("Location %q, want %q", loc, calFailed)
+		status, _ := s.connectCode(u.AccessToken, "code-none")
+		if status != http.StatusBadRequest {
+			t.Errorf("status %d, want 400", status)
 		}
 		if n := s.connectionCount(u.User.ID); n != 0 {
 			t.Errorf("connections = %d, want 0", n)
 		}
 		revoked := fake.revokedTokens()
 		if len(revoked) != revokedBefore+1 || revoked[len(revoked)-1] != fake.lastIssued() {
-			t.Errorf("revoked %v, want the issued token %q", revoked[revokedBefore:], fake.lastIssued())
-		}
-		if st := s.status(u.AccessToken); st.Status != "not_connected" {
-			t.Errorf("status = %+v, want not_connected", st)
-		}
-	})
-	t.Run("scope field omitted", func(t *testing.T) {
-		u := s.signUp("calomitted")
-		fake.set(func(f *fakeCalendarGoogle) { f.grantedScope = "" })
-		if loc := s.connectFlow(u.AccessToken); loc != calFailed {
-			t.Errorf("Location %q, want %q", loc, calFailed)
-		}
-		if n := s.connectionCount(u.User.ID); n != 0 {
-			t.Errorf("connections = %d, want 0", n)
+			t.Errorf("revoked = %v, want token %q revoked", revoked, fake.lastIssued())
 		}
 	})
 }
 
-// CLM-7: without a refresh token a callback is only stored when the user
+// CLM-7: without a refresh token a code exchange is only stored when the user
 // already holds one, which is kept while the access token is updated.
 func TestGoogleCalendar_NoRefreshToken(t *testing.T) {
 	fake := newFakeCalendarGoogle(t)
@@ -804,8 +667,9 @@ func TestGoogleCalendar_NoRefreshToken(t *testing.T) {
 
 	t.Run("no stored refresh token", func(t *testing.T) {
 		u := s.signUp("calnorefresh")
-		if loc := s.connectFlow(u.AccessToken); loc != calFailed {
-			t.Errorf("Location %q, want %q", loc, calFailed)
+		status, _ := s.connectCode(u.AccessToken, "code-norefresh")
+		if status != http.StatusBadRequest {
+			t.Errorf("status %d, want 400", status)
 		}
 		if n := s.connectionCount(u.User.ID); n != 0 {
 			t.Errorf("connections = %d, want 0", n)
@@ -817,8 +681,9 @@ func TestGoogleCalendar_NoRefreshToken(t *testing.T) {
 	t.Run("stored refresh token kept", func(t *testing.T) {
 		u := s.signUp("calkeeprefresh")
 		s.seedConnection(u.User.ID, "old-access", "stored-refresh-R", "read_write", time.Now().Add(time.Hour), false)
-		if loc := s.connectFlow(u.AccessToken); loc != calConnected {
-			t.Fatalf("Location %q, want %q", loc, calConnected)
+		status, st := s.connectCode(u.AccessToken, "code-keeprefresh")
+		if status != http.StatusOK {
+			t.Fatalf("status %d, want 200", status)
 		}
 		c := s.connection(u.User.ID)
 		if got := s.decrypt(c.RefreshTokenEnc); got != "stored-refresh-R" {
@@ -827,7 +692,7 @@ func TestGoogleCalendar_NoRefreshToken(t *testing.T) {
 		if got := s.decrypt(c.AccessTokenEnc); got == "old-access" || got != fake.lastIssued() {
 			t.Errorf("access token = %q, want the new %q", got, fake.lastIssued())
 		}
-		if st := s.status(u.AccessToken); st.Status != "connected" {
+		if st.Status != "connected" {
 			t.Errorf("status = %+v, want connected", st)
 		}
 	})
@@ -978,6 +843,91 @@ func TestGoogleCalendar_AccountPageServesIndex(t *testing.T) {
 	}
 }
 
+// CLM-6: GET /api/v1/me/google-calendar/callback answers 404 (no handler, no redirect);
+// no response from any calendar route carries a Set-Cookie header and no handler
+// reads the chorus_gcal_bind cookie, which no longer exists in the code.
+func TestGoogleCalendar_Callback404AndNoCookies(t *testing.T) {
+	fake := newFakeCalendarGoogle(t)
+	s := newCalendarTestServer(t, fake)
+	user := s.signUp("calclm6")
+
+	// 1. GET callback without bearer token
+	req1, _ := http.NewRequest("GET", s.srv.URL+"/api/v1/me/google-calendar/callback?state=s&code=c", nil)
+	resp1, err := noRedirect.Do(req1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusNotFound {
+		t.Errorf("anonymous callback status = %d, want 404", resp1.StatusCode)
+	}
+	if resp1.Header.Get("Set-Cookie") != "" {
+		t.Errorf("anonymous callback sent Set-Cookie: %q", resp1.Header.Get("Set-Cookie"))
+	}
+
+	// 2. GET callback with bearer token
+	req2, _ := http.NewRequest("GET", s.srv.URL+"/api/v1/me/google-calendar/callback?state=s&code=c", nil)
+	req2.Header.Set("Authorization", "Bearer "+user.AccessToken)
+	resp2, err := noRedirect.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Errorf("authed callback status = %d, want 404", resp2.StatusCode)
+	}
+	if resp2.Header.Get("Set-Cookie") != "" {
+		t.Errorf("authed callback sent Set-Cookie: %q", resp2.Header.Get("Set-Cookie"))
+	}
+
+	// 3. GET callback with cookie
+	req3, _ := http.NewRequest("GET", s.srv.URL+"/api/v1/me/google-calendar/callback?state=s&code=c", nil)
+	req3.AddCookie(&http.Cookie{Name: "chorus_gcal_bind", Value: "test-cookie"})
+	resp3, err := noRedirect.Do(req3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp3.Body.Close()
+	if resp3.StatusCode != http.StatusNotFound {
+		t.Errorf("callback with cookie status = %d, want 404", resp3.StatusCode)
+	}
+	if resp3.Header.Get("Set-Cookie") != "" {
+		t.Errorf("callback with cookie sent Set-Cookie: %q", resp3.Header.Get("Set-Cookie"))
+	}
+
+	// 4. Every calendar route response has no Set-Cookie header
+	calendarRoutes := []struct {
+		method string
+		path   string
+		body   any
+	}{
+		{"GET", "/api/v1/me/google-calendar", nil},
+		{"POST", "/api/v1/me/google-calendar/connect", map[string]string{"code": "code-cookie-check"}},
+		{"DELETE", "/api/v1/me/google-calendar", nil},
+		{"GET", "/api/v1/me/google-calendar/calendars", nil},
+	}
+	for _, cr := range calendarRoutes {
+		var rdr io.Reader
+		if cr.body != nil {
+			b, _ := json.Marshal(cr.body)
+			rdr = bytes.NewReader(b)
+		}
+		req, _ := http.NewRequest(cr.method, s.srv.URL+cr.path, rdr)
+		if cr.body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req.Header.Set("Authorization", "Bearer "+user.AccessToken)
+		resp, err := noRedirect.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", cr.method, cr.path, err)
+		}
+		resp.Body.Close()
+		if resp.Header.Get("Set-Cookie") != "" {
+			t.Errorf("%s %s sent Set-Cookie: %q", cr.method, cr.path, resp.Header.Get("Set-Cookie"))
+		}
+	}
+}
+
 // CLM-12: endpoints act only on the authenticated caller and take no user ID.
 // No response ever contains tokens. Another login cannot see or delete a
 // user's connection, nor reach the household it runs. Route patterns have no
@@ -1008,25 +958,16 @@ func TestGoogleCalendar_IsolationAndNoLeak(t *testing.T) {
 	})
 
 	// A connects: verify connect response body does not leak tokens
-	connectStatus, connectBody := s.doRaw("POST", "/api/v1/me/google-calendar/connect", userA.AccessToken, nil)
+	connectStatus, connectBody := s.doRaw("POST", "/api/v1/me/google-calendar/connect", userA.AccessToken, map[string]string{"code": "code-clm12"})
 	if connectStatus != http.StatusOK {
 		t.Fatalf("connect status: %d, body %s", connectStatus, connectBody)
 	}
-	var connOut struct {
-		URL string `json:"url"`
-	}
+	var connOut calendarStatus
 	if err := json.Unmarshal([]byte(connectBody), &connOut); err != nil {
 		t.Fatalf("decode connect response: %v", err)
 	}
-	if _, err := url.Parse(connOut.URL); err != nil {
-		t.Fatalf("parse connect URL: %v", err)
-	}
-	// Complete a connect from the browser that started it (holding its
-	// binding cookie).
-	state := s.connect(userA.AccessToken).Query().Get("state")
-	loc, _ := s.calCallback(url.Values{"state": {state}, "code": {"code-clm12"}})
-	if loc != calConnected {
-		t.Fatalf("Location %q, want %q", loc, calConnected)
+	if connOut.Status != "connected" {
+		t.Fatalf("connect status = %q, want connected", connOut.Status)
 	}
 
 	// B's status is not_connected
@@ -1117,10 +1058,9 @@ func TestGoogleCalendar_EncryptedAtRest(t *testing.T) {
 	})
 
 	user := s.signUp("calclm13")
-	state := s.connect(user.AccessToken).Query().Get("state")
-	loc, _ := s.calCallback(url.Values{"state": {state}, "code": {"code-clm13"}})
-	if loc != calConnected {
-		t.Fatalf("Location %q, want %q", loc, calConnected)
+	status, st, _ := s.connect(user.AccessToken, map[string]string{"code": "code-clm13"})
+	if status != http.StatusOK || st.Status != "connected" {
+		t.Fatalf("connect status %d (%+v), want 200 connected", status, st)
 	}
 
 	// Read the raw google_calendar_connections row by direct SQL (cast every column to text)
@@ -1182,9 +1122,9 @@ func TestGoogleCalendar_EncryptedAtRest(t *testing.T) {
 	}
 
 	// Read status triggers lazy refresh
-	st := s.status(user.AccessToken)
-	if st.Status != "connected" {
-		t.Fatalf("status after refresh = %+v, want connected", st)
+	stRefresh := s.status(user.AccessToken)
+	if stRefresh.Status != "connected" {
+		t.Fatalf("status after refresh = %+v, want connected", stRefresh)
 	}
 
 	// Assert the fake refresh endpoint received the original refresh token

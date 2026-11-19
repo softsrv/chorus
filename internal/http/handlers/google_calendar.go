@@ -104,8 +104,3 @@ func (h *GoogleCalendarHandler) Disconnect(w http.ResponseWriter, r *http.Reques
 	}
 	respond.JSON(w, http.StatusOK, calendarStatusResponse{Status: app.CalendarNotConnected})
 }
-
-// Callback is no longer supported; it returns 404 until router.go drops the route.
-func (h *GoogleCalendarHandler) Callback(w http.ResponseWriter, _ *http.Request) {
-	notFound(w)
-}

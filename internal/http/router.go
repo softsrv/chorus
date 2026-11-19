@@ -106,7 +106,6 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	// budget member actions (accept, abandon, done) need.
 	historyRL := middleware.NewRateLimiter(ctx, pinLimit, 10*time.Minute, userKey)
 	googleSignInRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
-	calendarCallbackRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
 
 	limit := func(rl *middleware.RateLimiter, h http.HandlerFunc) http.Handler { return rl.Middleware(h) }
 
@@ -142,14 +141,12 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("DELETE /api/v1/me/sessions/{id}", verified(meH.RevokeSession))
 
 	// ── Google Calendar connection. Status reports "unavailable" when Google
-	// isn't configured; connect, disconnect and callback then answer the JSON
-	// 404 without contacting Google. The callback carries no bearer token:
-	// Google redirects the browser there; the state names the user and the
-	// HttpOnly binding cookie set by connect proves it is the same browser.
+	// isn't configured; connect and disconnect then answer the JSON 404
+	// without contacting Google. Connect exchanges a one-time server auth
+	// code from Google SDK for tokens.
 	api.Handle("GET /api/v1/me/google-calendar", verified(calendarH.Status))
 	api.Handle("POST /api/v1/me/google-calendar/connect", verified(calendarH.Connect))
 	api.Handle("DELETE /api/v1/me/google-calendar", verified(calendarH.Disconnect))
-	api.Handle("GET /api/v1/me/google-calendar/callback", limit(calendarCallbackRL, calendarH.Callback))
 	api.Handle("GET /api/v1/me/google-calendar/calendars", verified(familyH.MyCalendars))
 
 	// ── Households ────────────────────────────────────────────────────────────
