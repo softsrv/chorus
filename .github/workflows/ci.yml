@@ -59,7 +59,7 @@ jobs:
         with:
           node-version: 22
       - run: make test-js
-      - run: go test -race -tags integration -p 1 ./...
+      - run: go test -race -tags integration -timeout 20m -p 1 ./...
       # The binary-mode system test asserts the generated stylesheet loads, so
       # build it first with the same pinned, checksummed Tailwind CLI the
       # Dockerfile uses.

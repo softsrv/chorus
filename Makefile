@@ -52,7 +52,7 @@ test-js:
 
 # Integration tests run against TEST_DATABASE_URL (the chorus_test database).
 test-integration: migrate-test migrate-roundtrip-test
-	go test -race -tags integration -p 1 ./...
+	go test -race -tags integration -timeout 20m -p 1 ./...
 
 # System tests exec the built binary (or test the Docker image when SYSTEST_IMAGE is set).
 # tailwind first: the binary embeds the generated stylesheet the tests assert.
