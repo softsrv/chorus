@@ -128,7 +128,7 @@ func connectCalendar(t *testing.T, pool *pgxpool.Pool, userID uuid.UUID, access,
 		t.Fatalf("seed connection: %v", err)
 	}
 	gc := app.NewGoogleCalendar(q, cipher, app.GoogleCalendarConfig{
-		ClientID: "client-id", ClientSecret: "client-secret", RedirectURL: "http://chorus.test/cb",
+		ClientID: "client-id", ClientSecret: "client-secret",
 		TokenURL: f.srv.URL + "/token", RevokeURL: f.srv.URL + "/revoke", APIBaseURL: f.srv.URL,
 	})
 	return app.NewFamilyCalendar(q, gc)
