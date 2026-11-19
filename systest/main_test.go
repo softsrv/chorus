@@ -18,17 +18,17 @@ import (
 // appBinary is the path of the app TestMain built (binary mode only).
 var appBinary string
 
-// skipReason, when set, makes every startApp skip its test.
-var skipReason string
-
 func TestMain(m *testing.M) {
 	os.Exit(run(m))
 }
 
 func run(m *testing.M) int {
+	// No database means no system under test. Fail rather than skip, so a
+	// run (or a CI job) that lost the variable goes red instead of passing
+	// with nothing exercised.
 	if os.Getenv("TEST_DATABASE_URL") == "" {
-		skipReason = "TEST_DATABASE_URL not set; skipping system tests (make test-system migrates chorus_test and sets it)"
-		return m.Run()
+		fmt.Fprintln(os.Stderr, "systest: TEST_DATABASE_URL is not set; the system tests need a migrated database: set it in .env (see .env.example) or the environment, then run make test-system, which migrates it first")
+		return 1
 	}
 	if os.Getenv("SYSTEST_IMAGE") != "" {
 		// Image mode: the image is the system under test; nothing to build.

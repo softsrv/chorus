@@ -54,6 +54,7 @@ type appProc struct {
 	cmd     *exec.Cmd
 	BaseURL string
 	Mail    *smtpCapture
+	Egress  *egressRecorder // every outbound HTTP(S) request the app made
 	out     *syncBuffer
 	done    chan struct{} // closed when cmd.Wait returns
 	waitErr error
@@ -63,14 +64,14 @@ type appProc struct {
 // startApp starts the app for this test function only; no process is shared
 // at package level, so each test gets the app's fresh in-memory rate limiters.
 // It runs with an environment built explicitly here: the listed settings, a
-// capture SMTP server of its own, and no GOOGLE_* variable.
+// capture SMTP server of its own, an outbound HTTP(S) proxy that records and
+// refuses every request (so the test can observe any call the app makes off
+// the machine), and no GOOGLE_* variable.
 func startApp(t *testing.T, opts appOpts) *appProc {
 	t.Helper()
-	if skipReason != "" {
-		t.Skip(skipReason)
-	}
 
 	mail := newSMTPCapture(t)
+	egress := newEgressRecorder(t)
 	port := freePort(t)
 	base := "http://127.0.0.1:" + port
 
@@ -83,6 +84,12 @@ func startApp(t *testing.T, opts appOpts) *appProc {
 		"SMTP_HOST":       "127.0.0.1",
 		"SMTP_PORT":       mail.Port,
 		"SMTP_FROM_EMAIL": "noreply@example.test",
+		// Go's default transport (which the app's outbound clients use)
+		// sends every non-loopback request through this proxy; NO_PROXY is
+		// empty so no host is exempt.
+		"HTTP_PROXY":  egress.URL,
+		"HTTPS_PROXY": egress.URL,
+		"NO_PROXY":    "",
 	}
 	for k, v := range opts.Env {
 		if v == "" {
@@ -97,18 +104,27 @@ func startApp(t *testing.T, opts appOpts) *appProc {
 	}
 	sort.Strings(keys)
 
-	p := &appProc{t: t, BaseURL: base, Mail: mail, out: &syncBuffer{}, done: make(chan struct{})}
+	p := &appProc{t: t, BaseURL: base, Mail: mail, Egress: egress, out: &syncBuffer{}, done: make(chan struct{})}
 
 	if image := os.Getenv("SYSTEST_IMAGE"); image != "" {
 		p.name = "chorus-systest-" + randHex(t, 6)
 		// Values travel in cmd.Env and are passed by name only, never argv.
+		// The proxy settings are the exception: they are not secret, and the
+		// docker CLI must not itself route its daemon traffic through the
+		// recorder, so they go to the container only, as -e K=V.
 		args := []string{"run", "--rm", "--network", "host", "--name", p.name}
+		cliEnv := make(map[string]string, len(env))
 		for _, k := range keys {
+			if proxyKey(k) {
+				args = append(args, "-e", k+"="+env[k])
+				continue
+			}
 			args = append(args, "-e", k)
+			cliEnv[k] = env[k]
 		}
 		args = append(args, image)
 		p.cmd = exec.Command("docker", args...)
-		p.cmd.Env = dockerClientEnv(env)
+		p.cmd.Env = dockerClientEnv(cliEnv)
 	} else {
 		if appBinary == "" {
 			t.Fatal("startApp: TestMain built no app binary")
@@ -394,6 +410,65 @@ func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+// ── Outbound HTTP(S) recorder ────────────────────────────────────────────
+
+// proxyKey reports whether k is one of the proxy settings startApp gives the app.
+func proxyKey(k string) bool {
+	return k == "HTTP_PROXY" || k == "HTTPS_PROXY" || k == "NO_PROXY"
+}
+
+// egressRecorder is a loopback HTTP proxy the app is pointed at through
+// HTTP_PROXY/HTTPS_PROXY. It records the target host of every request that
+// reaches it (a CONNECT for HTTPS, an absolute-URI request for HTTP) and
+// refuses it with 403, so nothing leaves the machine and every attempt is seen.
+type egressRecorder struct {
+	URL   string
+	srv   *http.Server
+	mu    sync.Mutex
+	hosts []string
+}
+
+func newEgressRecorder(t *testing.T) *egressRecorder {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("egress recorder listen: %v", err)
+	}
+	e := &egressRecorder{URL: "http://" + l.Addr().String()}
+	e.srv = &http.Server{
+		Handler:           e,
+		ReadHeaderTimeout: requestTimeout,
+	}
+	go func() { _ = e.srv.Serve(l) }()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = e.srv.Shutdown(ctx)
+	})
+	return e
+}
+
+func (e *egressRecorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	host := r.Host
+	if r.Method != http.MethodConnect && r.URL.Host != "" {
+		host = r.URL.Host
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	e.mu.Lock()
+	e.hosts = append(e.hosts, strings.ToLower(host))
+	e.mu.Unlock()
+	http.Error(w, "systest: outbound requests are refused", http.StatusForbidden)
+}
+
+// Hosts is every target host the app tried to reach so far, in order.
+func (e *egressRecorder) Hosts() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.hosts...)
 }
 
 // ── SMTP capture ──────────────────────────────────────────────────────────
