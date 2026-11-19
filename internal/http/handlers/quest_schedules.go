@@ -33,6 +33,7 @@ type questScheduleRequest struct {
 	QuestID  uuid.UUID `json:"quest_id"`
 	MemberID uuid.UUID `json:"member_id"`
 	Date     string    `json:"date"`
+	Repeat   bool      `json:"repeat"`
 }
 
 // Create schedules a quest for a member: {"quest_id", "member_id", "date"}
@@ -50,6 +51,7 @@ func (h *QuestScheduleHandler) Create(w http.ResponseWriter, r *http.Request) {
 		QuestID:  req.QuestID,
 		MemberID: req.MemberID,
 		Date:     req.Date,
+		Repeat:   req.Repeat,
 	}, r.Header.Get("X-Admin-PIN"))
 	if err != nil {
 		writeError(w, r, err)

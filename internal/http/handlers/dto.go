@@ -210,6 +210,7 @@ type questScheduleJSON struct {
 	MemberID   uuid.UUID `json:"member_id"`
 	MemberName string    `json:"member_name"`
 	StartDate  string    `json:"start_date"`
+	Repeat     bool      `json:"repeat"`
 	CreatedAt  time.Time `json:"created_at"`
 }
 
@@ -221,6 +222,7 @@ func toQuestSchedule(s app.QuestSchedule) questScheduleJSON {
 		MemberID:   s.MemberID,
 		MemberName: s.MemberName,
 		StartDate:  s.StartDate,
+		Repeat:     s.Repeat,
 		CreatedAt:  s.CreatedAt.UTC(),
 	}
 }
