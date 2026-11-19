@@ -84,8 +84,7 @@ func main() {
 	var googleSignIn *app.GoogleSignIn
 	if cfg.Google.Enabled {
 		googleSignIn = app.NewGoogleSignIn(queries, authSvc, app.GoogleSignInConfig{
-			ClientIDs:    cfg.Google.ClientIDs,
-			ClientSecret: cfg.Google.ClientSecret,
+			ClientIDs: cfg.Google.ClientIDs,
 		})
 	}
 

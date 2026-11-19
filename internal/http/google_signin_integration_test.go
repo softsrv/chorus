@@ -692,16 +692,66 @@ func TestGoogle_DisabledAndConfig(t *testing.T) {
 		}
 	}
 
-	// The redirect sign-in routes are gone, configured or not.
+	// CLM-12: the redirect sign-in routes are gone, configured or not; none
+	// redirects or sets a cookie, and the old landing page is no longer the
+	// single-page app.
+	_, indexLoc, index := on.get("/")
+	if indexLoc != "" || index == "" {
+		t.Fatalf("GET /: Location %q, empty body %v; want the SPA index", indexLoc, index == "")
+	}
 	for _, s := range []*testServer{off, on} {
-		for _, path := range []string{"/api/v1/auth/google/start", "/api/v1/auth/google/callback?state=x&code=y"} {
-			if status, loc, _ := s.get(path); status != http.StatusNotFound || loc != "" {
-				t.Errorf("GET %s: status %d Location %q, want 404", path, status, loc)
+		for _, rt := range []struct{ method, path string }{
+			{"GET", "/api/v1/auth/google/start"},
+			{"GET", "/api/v1/auth/google/callback?state=x&code=y"},
+			{"POST", "/api/v1/auth/google/redeem"},
+			{"GET", "/google-sign-in?code=x"},
+		} {
+			req, _ := http.NewRequest(rt.method, s.srv.URL+rt.path, strings.NewReader(`{"code":"x"}`))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := noRedirect.Do(req)
+			if err != nil {
+				t.Fatalf("%s %s: %v", rt.method, rt.path, err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusNotFound || resp.Header.Get("Location") != "" || len(resp.Header.Values("Set-Cookie")) != 0 {
+				t.Errorf("%s %s: status %d Location %q Set-Cookie %q, want 404 with neither",
+					rt.method, rt.path, resp.StatusCode, resp.Header.Get("Location"), resp.Header.Values("Set-Cookie"))
+			}
+			if string(body) == index {
+				t.Errorf("%s %s served the single-page app index", rt.method, rt.path)
 			}
 		}
-		if status := s.do("POST", "/api/v1/auth/google/redeem", "", map[string]string{"code": "x"}, nil); status != http.StatusNotFound {
-			t.Errorf("POST redeem: status %d, want 404", status)
+	}
+}
+
+// CLM-17: POST /auth/google sits behind one per-IP limiter (30 per 15
+// minutes, like the other public auth routes); past it the caller gets 429
+// with Retry-After and Google is never contacted.
+func TestGoogle_SignInRateLimited(t *testing.T) {
+	keys := newFakeGoogleKeys(t)
+	s := newGoogleTestServer(t, googleOpts{keys: keys})
+	empty := []byte(`{"id_token":""}`)
+	for i := range 30 {
+		if status, body := s.postRaw("/api/v1/auth/google", empty); status == http.StatusTooManyRequests {
+			t.Fatalf("request %d limited early: %s", i+1, body)
 		}
+	}
+	req, _ := http.NewRequest(http.MethodPost, s.srv.URL+"/api/v1/auth/google", bytes.NewReader(empty))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := noRedirect.Do(req)
+	if err != nil {
+		t.Fatalf("POST /auth/google: %v", err)
+	}
+	defer resp.Body.Close()
+	var e apiError
+	_ = json.NewDecoder(resp.Body).Decode(&e)
+	if resp.StatusCode != http.StatusTooManyRequests || resp.Header.Get("Retry-After") == "" || e.Error.Code != "rate_limited" {
+		t.Fatalf("31st request: status %d Retry-After %q code %q, want 429 rate_limited with Retry-After",
+			resp.StatusCode, resp.Header.Get("Retry-After"), e.Error.Code)
+	}
+	if n := keys.hits.Load(); n != 0 {
+		t.Errorf("fake Google got %d hits for empty tokens", n)
 	}
 }
 

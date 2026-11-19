@@ -258,12 +258,12 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	staticFS := web.Static(!cfg.Secure)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(staticFS)))
 	// The web client is a single page; these are the paths emailed links (and
-	// the Google sign-in and calendar callback redirects) land on.
+	// the calendar callback redirect) land on.
 	serveIndex := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache")
 		http.ServeFileFS(w, r, staticFS, "index.html")
 	}
-	for _, p := range []string{"/{$}", "/verify-email", "/reset-password", "/forgot-password", "/google-sign-in", "/account"} {
+	for _, p := range []string{"/{$}", "/verify-email", "/reset-password", "/forgot-password", "/account"} {
 		mux.HandleFunc("GET "+p, serveIndex)
 	}
 
