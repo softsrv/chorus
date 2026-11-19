@@ -7,7 +7,8 @@ Chorus is a family chore and calendar app. This repo holds the backend JSON API 
 ## Commands
 
 ```bash
-make dev              # Postgres + smtp4dev → migrate → app container (air, detached) + Tailwind watch on host
+make dev              # Postgres + smtp4dev → migrate → CSS build → app container (air, detached); returns the terminal
+make tailwind-watch   # Rebuild CSS on change (host); run separately while editing web client styles
 make app              # Just the app container, foreground, hot reload (Ctrl-C stops it)
 make run              # One-off app container without hot reload
 make test             # Unit tests (-race)
