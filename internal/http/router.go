@@ -78,7 +78,7 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 		comboSvc = app.NewComboService(cfg.Queries, cfg.Pool)
 	}
 	comboH := handlers.NewComboHandler(comboSvc)
-	googleH := handlers.NewGoogleHandler(cfg.GoogleSignIn, cfg.TrustedProxyCount)
+	googleH := handlers.NewGoogleHandler(cfg.GoogleSignIn, cfg.GoogleCalendar != nil, cfg.TrustedProxyCount)
 	calendarH := handlers.NewGoogleCalendarHandler(cfg.GoogleCalendar)
 
 	// ── Rate limiters ─────────────────────────────────────────────────────────
@@ -105,9 +105,7 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	// it on member selection, and a correct read must never spend the
 	// budget member actions (accept, abandon, done) need.
 	historyRL := middleware.NewRateLimiter(ctx, pinLimit, 10*time.Minute, userKey)
-	googleStartRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
-	googleCallbackRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
-	googleRedeemRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
+	googleSignInRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
 	calendarCallbackRL := middleware.NewRateLimiter(ctx, 30, 15*time.Minute, ipKey)
 
 	limit := func(rl *middleware.RateLimiter, h http.HandlerFunc) http.Handler { return rl.Middleware(h) }
@@ -128,11 +126,11 @@ func NewRouter(ctx context.Context, cfg RouterConfig) http.Handler {
 	api.Handle("POST /api/v1/auth/logout", authed(authH.Logout))
 
 	// ── Google sign-in (public). When Google isn't configured, config reports
-	// it off and the other three answer the JSON 404 without contacting Google.
+	// it off and POST /auth/google answers the JSON 404 without contacting
+	// Google. One route for every app: web, iOS and Android post a Google ID
+	// token.
 	api.HandleFunc("GET /api/v1/auth/config", googleH.AuthConfig)
-	api.Handle("GET /api/v1/auth/google/start", limit(googleStartRL, googleH.GoogleStart))
-	api.Handle("GET /api/v1/auth/google/callback", limit(googleCallbackRL, googleH.GoogleCallback))
-	api.Handle("POST /api/v1/auth/google/redeem", limit(googleRedeemRL, googleH.GoogleRedeem))
+	api.Handle("POST /api/v1/auth/google", limit(googleSignInRL, googleH.GoogleSignIn))
 
 	// ── Current user ──────────────────────────────────────────────────────────
 	api.Handle("GET /api/v1/me", authed(meH.Get))

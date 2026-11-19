@@ -66,7 +66,13 @@ type GoogleSignInConfig struct {
 	AuthURL      string
 	TokenURL     string
 	UserInfoURL  string
-	HTTPClient   *http.Client
+	// ClientIDs are the accepted ID-token audiences: the web client ID
+	// first, then the iOS and Android client IDs when configured.
+	ClientIDs []string
+	// JWKSURL is where Google's ID-token signing keys are fetched;
+	// defaults to Google's published key set.
+	JWKSURL    string
+	HTTPClient *http.Client
 }
 
 // GoogleSignIn runs "Sign in with Google": the OAuth authorization-code flow
@@ -78,6 +84,8 @@ type GoogleSignIn struct {
 	oauth       oauth2.Config
 	userInfoURL string
 	client      *http.Client
+	verifier    *idTokenVerifier
+	webClientID string
 }
 
 // NewGoogleSignIn builds the sign-in service. authSvc issues the token pair.
@@ -118,7 +126,16 @@ func NewGoogleSignIn(q *db.Queries, authSvc *AuthService, cfg GoogleSignInConfig
 		},
 		userInfoURL: userInfoURL,
 		client:      client,
+		verifier:    newIDTokenVerifier(cfg.ClientIDs, cfg.JWKSURL, client),
+		webClientID: firstOrEmpty(cfg.ClientIDs),
 	}
+}
+
+func firstOrEmpty(s []string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(s[0])
 }
 
 // AuthCodeURL builds the Google authorization URL for a state value and PKCE
