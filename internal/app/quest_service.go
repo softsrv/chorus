@@ -946,7 +946,7 @@ func (s *QuestService) Approve(ctx context.Context, userID, householdID, complet
 	}
 	// Re-read under the locks: a concurrent approval, reject or removal that
 	// committed first leaves no pending row, so this one is ErrNotFound.
-	row, err := notFoundIfNoRows(qtx.ApproveCompletion(ctx, db.ApproveCompletionParams{HouseholdID: householdID, ID: completionID, MemberID: markerID}))
+	row, err := notFoundIfNoRows(qtx.ApproveCompletion(ctx, db.ApproveCompletionParams{HouseholdID: householdID, ID: completionID, MemberID: markerID, StatusBy: userID}))
 	if err != nil {
 		return fail(err)
 	}

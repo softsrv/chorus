@@ -620,7 +620,7 @@ WITH pending AS (
     FOR UPDATE OF pc
 ), approved AS (
     UPDATE quest_completions c
-    SET status = 'approved', approved_at = NOW()
+    SET status = 'approved', approved_at = NOW(), status_by = sqlc.arg(status_by)::uuid
     FROM pending p
     WHERE c.id = p.id AND c.status = 'pending'
     RETURNING c.id, c.household_id, c.quest_id, c.member_id, c.done_at, c.approved_at, p.points, p.teamwork_bonus,

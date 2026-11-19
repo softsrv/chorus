@@ -115,7 +115,7 @@ WITH pending AS (
     FOR UPDATE OF pc
 ), approved AS (
     UPDATE quest_completions c
-    SET status = 'approved', approved_at = NOW()
+    SET status = 'approved', approved_at = NOW(), status_by = $4::uuid
     FROM pending p
     WHERE c.id = p.id AND c.status = 'pending'
     RETURNING c.id, c.household_id, c.quest_id, c.member_id, c.done_at, c.approved_at, p.points, p.teamwork_bonus,
@@ -135,6 +135,7 @@ type ApproveCompletionParams struct {
 	HouseholdID uuid.UUID `json:"household_id"`
 	ID          uuid.UUID `json:"id"`
 	MemberID    uuid.UUID `json:"member_id"`
+	StatusBy    uuid.UUID `json:"status_by"`
 }
 
 type ApproveCompletionRow struct {
@@ -165,7 +166,12 @@ type ApproveCompletionRow struct {
 // marker's streak as fixed at this completion's mark-done (NULL for one
 // marked done before streaks existed); neither is recomputed from NOW().
 func (q *Queries) ApproveCompletion(ctx context.Context, arg ApproveCompletionParams) (ApproveCompletionRow, error) {
-	row := q.db.QueryRow(ctx, approveCompletion, arg.HouseholdID, arg.ID, arg.MemberID)
+	row := q.db.QueryRow(ctx, approveCompletion,
+		arg.HouseholdID,
+		arg.ID,
+		arg.MemberID,
+		arg.StatusBy,
+	)
 	var i ApproveCompletionRow
 	err := row.Scan(
 		&i.ID,
