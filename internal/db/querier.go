@@ -313,7 +313,10 @@ type Querier interface {
 	// participants are cleared. Members keep their order: participants by
 	// joined_at, the lone marker at now. NOW() is one instant per transaction, so
 	// completed_at equals the completion's done_at. A quest the member is not on
-	// matches no row and writes nothing. No points move here. The caller holds
+	// matches no row and writes nothing, and neither does a quest whose claim has
+	// run out (claim_expires_at at or before now, the end of the day it was
+	// accepted), even before the sweep has released it: no completion, no streak
+	// step. No points move here. The caller holds
 	// the row locks of every member on the quest and then the quest's row lock
 	// (LockHouseholdQuest, a statement of its own), so the participants recorded
 	// and cleared here are the committed ones.
