@@ -12,8 +12,10 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -88,6 +90,41 @@ func newFakeGoogleKeys(t *testing.T) *fakeGoogleKeys {
 	}))
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+// egressReroute sends every request for a non-loopback host to target
+// (scheme and host rewritten, path kept) and passes loopback requests
+// (the test servers) through to next.
+type egressReroute struct {
+	target *url.URL
+	next   http.RoundTripper
+}
+
+func (e egressReroute) RoundTrip(r *http.Request) (*http.Response, error) {
+	if ip := net.ParseIP(r.URL.Hostname()); (ip != nil && ip.IsLoopback()) || r.URL.Hostname() == "localhost" {
+		return e.next.RoundTrip(r)
+	}
+	r = r.Clone(r.Context())
+	r.URL.Scheme, r.URL.Host, r.Host = e.target.Scheme, e.target.Host, e.target.Host
+	return e.next.RoundTrip(r)
+}
+
+// routeEgressTo swaps http.DefaultTransport, which every Google client in
+// the app uses when none is configured, for one that reroutes outbound
+// requests to target, so a fake's hit counter sees any attempt to reach
+// Google. The returned func (also run at cleanup) restores the original.
+func routeEgressTo(t *testing.T, target string) func() {
+	t.Helper()
+	u, err := url.Parse(target)
+	if err != nil {
+		t.Fatalf("parse %q: %v", target, err)
+	}
+	orig := http.DefaultTransport
+	http.DefaultTransport = egressReroute{target: u, next: orig}
+	var once sync.Once
+	restore := func() { once.Do(func() { http.DefaultTransport = orig }) }
+	t.Cleanup(restore)
+	return restore
 }
 
 // idClaims returns the claims of a valid Google ID token for sub and email,
@@ -644,6 +681,11 @@ func TestGoogle_MalformedRequests(t *testing.T) {
 // redirect routes are gone.
 func TestGoogle_DisabledAndConfig(t *testing.T) {
 	keys := newFakeGoogleKeys(t)
+	// While the disabled server is exercised, every outbound request this
+	// process makes to a non-loopback host (Google's real key URL or any
+	// other Google endpoint) is rerouted to the fake key server, so a
+	// disabled path that contacted Google moves keys.hits.
+	restoreEgress := routeEgressTo(t, keys.srv.URL)
 	off := newGoogleTestServer(t, googleOpts{})
 
 	type authConfig struct {
@@ -671,9 +713,6 @@ func TestGoogle_DisabledAndConfig(t *testing.T) {
 	if status := off.do("POST", "/api/v1/auth/google", "", map[string]string{"id_token": token}, &e); status != http.StatusNotFound || e.Error.Code != "not_found" {
 		t.Errorf("sign-in disabled: status %d code %q, want 404 not_found", status, e.Error.Code)
 	}
-	if n := keys.hits.Load(); n != 0 {
-		t.Errorf("fake Google got %d hits with Google disabled", n)
-	}
 	pw := off.signUp("stillworks")
 	var me struct {
 		Email string `json:"email"`
@@ -681,6 +720,20 @@ func TestGoogle_DisabledAndConfig(t *testing.T) {
 	off.expect(http.StatusOK, "GET", "/api/v1/me", pw.AccessToken, nil, &me)
 	off.expect(http.StatusOK, "POST", "/api/v1/auth/login", "",
 		map[string]string{"email": me.Email, "password": "correct-password-123"}, nil)
+	if n := keys.hits.Load(); n != 0 {
+		t.Errorf("fake Google got %d hits with Google disabled", n)
+	}
+	// The check can fail: a request to Google's real key URL lands on the fake.
+	if resp, err := http.Get("https://www.googleapis.com/oauth2/v3/certs"); err != nil {
+		t.Fatalf("egress canary: %v", err)
+	} else {
+		resp.Body.Close()
+	}
+	if n := keys.hits.Load(); n != 1 {
+		t.Fatalf("egress canary: fake Google got %d hits, want 1; the disabled check is not wired", n)
+	}
+	restoreEgress()
+	keys.hits.Store(0)
 
 	all := []string{webClientID, iosClientID, androidClientID}
 	on := newGoogleTestServer(t, googleOpts{keys: keys, clientIDs: all})

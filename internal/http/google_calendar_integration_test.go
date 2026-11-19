@@ -63,11 +63,18 @@ type fakeCalendarGoogle struct {
 	issued        []string // access tokens handed out, in order
 	refreshedWith []string // refresh tokens sent to the refresh endpoint
 	exchanges     []codeExchange
+	// Google account identity, for the tokeninfo endpoint: codeSub is the
+	// account a code exchange's access token belongs to; refreshSubs maps a
+	// refresh token to its account, and tokens minted from it carry that sub.
+	codeSub     string
+	refreshSubs map[string]string
+	accessSubs  map[string]string // access token -> sub, filled as issued
 }
 
 func newFakeCalendarGoogle(t *testing.T) *fakeCalendarGoogle {
 	t.Helper()
-	f := &fakeCalendarGoogle{grantedScope: calBothScopes, refreshToken: "refresh-" + uuid.NewString()}
+	f := &fakeCalendarGoogle{grantedScope: calBothScopes, refreshToken: "refresh-" + uuid.NewString(),
+		codeSub: "google-sub-A", refreshSubs: map[string]string{}, accessSubs: map[string]string{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /token", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
@@ -105,6 +112,7 @@ func newFakeCalendarGoogle(t *testing.T) *fakeCalendarGoogle {
 				access = "cal-access-" + uuid.NewString()
 			}
 			f.issued = append(f.issued, access)
+			f.accessSubs[access] = f.codeSub
 			resp := map[string]any{"access_token": access, "token_type": "Bearer", "expires_in": 3600}
 			if f.grantedScope != "" {
 				resp["scope"] = f.grantedScope
@@ -127,6 +135,7 @@ func newFakeCalendarGoogle(t *testing.T) *fakeCalendarGoogle {
 			}
 			access := "cal-refreshed-" + uuid.NewString()
 			f.issued = append(f.issued, access)
+			f.accessSubs[access] = f.refreshSubs[r.Form.Get("refresh_token")]
 			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": access, "token_type": "Bearer", "expires_in": 3600})
 		default:
 			w.WriteHeader(http.StatusBadRequest)
@@ -143,6 +152,23 @@ func newFakeCalendarGoogle(t *testing.T) *fakeCalendarGoogle {
 			w.WriteHeader(f.revokeStatus)
 			fmt.Fprint(w, sentinel)
 		}
+	})
+	mux.HandleFunc("POST /tokeninfo", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		// The token must arrive in the form body, never the URL query.
+		sub := ""
+		if r.URL.RawQuery == "" {
+			sub = f.accessSubs[r.PostForm.Get("access_token")]
+		}
+		if sub == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `{"error":"invalid_token","error_description":"%s"}`, sentinel)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"sub": sub})
 	})
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
@@ -227,6 +253,7 @@ func newCalendarTestServer(t *testing.T, fake *fakeCalendarGoogle) *calendarServ
 			ClientSecret: "client-secret",
 			TokenURL:     fake.srv.URL + "/token",
 			RevokeURL:    fake.srv.URL + "/revoke",
+			TokenInfoURL: fake.srv.URL + "/tokeninfo",
 			APIBaseURL:   fake.srv.URL + "/calendar/v3",
 		})
 	}
@@ -412,7 +439,9 @@ func TestGoogleCalendar_Status(t *testing.T) {
 		t.Errorf("unverified disconnect: %d %q, want 403 email_not_verified", status, e.Error.Code)
 	}
 
-	fakeDisabled := newFakeCalendarGoogle(t)
+	// An unconfigured server has no Google Calendar service at all (nil), so
+	// there is no Google endpoint for a fake to be wired to; the proofs here
+	// are the responses, which can fail.
 	off := newCalendarTestServer(t, nil)
 	offUser := off.signUp("caloff")
 	if st := off.status(offUser.AccessToken); st.Status != "unavailable" {
@@ -421,17 +450,11 @@ func TestGoogleCalendar_Status(t *testing.T) {
 	if status := off.do("POST", "/api/v1/me/google-calendar/connect", offUser.AccessToken, map[string]string{"code": "c"}, &e); status != http.StatusNotFound {
 		t.Errorf("unconfigured connect: %d, want 404", status)
 	}
+	if status := off.do("DELETE", "/api/v1/me/google-calendar", offUser.AccessToken, nil, &e); status != http.StatusNotFound {
+		t.Errorf("unconfigured disconnect: %d, want 404", status)
+	}
 	if status, _, _ := off.get("/api/v1/me/google-calendar/callback?state=x&code=y"); status != http.StatusNotFound {
 		t.Errorf("unconfigured callback: %d, want 404", status)
-	}
-	if hits := fakeDisabled.codeHits.Load(); hits != 0 {
-		t.Errorf("fake codeHits = %d, want 0", hits)
-	}
-	if hits := fakeDisabled.refreshHits.Load(); hits != 0 {
-		t.Errorf("fake refreshHits = %d, want 0", hits)
-	}
-	if hits := fakeDisabled.revokeHits.Load(); hits != 0 {
-		t.Errorf("fake revokeHits = %d, want 0", hits)
 	}
 }
 
@@ -695,6 +718,10 @@ func TestGoogleCalendar_NoRefreshToken(t *testing.T) {
 	t.Run("stored refresh token kept", func(t *testing.T) {
 		u := s.signUp("calkeeprefresh")
 		s.seedConnection(u.User.ID, "old-access", "stored-refresh-R", "read_write", time.Now().Add(time.Hour), false)
+		fake.set(func(f *fakeCalendarGoogle) {
+			f.codeSub = "google-sub-A"
+			f.refreshSubs["stored-refresh-R"] = "google-sub-A"
+		})
 		status, st := s.connectCode(u.AccessToken, "code-keeprefresh")
 		if status != http.StatusOK {
 			t.Fatalf("status %d, want 200", status)
@@ -708,6 +735,49 @@ func TestGoogleCalendar_NoRefreshToken(t *testing.T) {
 		}
 		if st.Status != "connected" {
 			t.Errorf("status = %+v, want connected", st)
+		}
+	})
+	// A reconnect with a different Google account that returns no refresh
+	// token must not pair account B's access token with account A's stored
+	// refresh token: it is refused and the stored connection is untouched.
+	t.Run("different Google account refused", func(t *testing.T) {
+		u := s.signUp("calswitchacct")
+		s.seedConnection(u.User.ID, "old-access-A", "stored-refresh-A", "read_write", time.Now().Add(time.Hour), false)
+		fake.set(func(f *fakeCalendarGoogle) {
+			f.codeSub = "google-sub-B"
+			f.refreshSubs["stored-refresh-A"] = "google-sub-A"
+		})
+		status, body := s.doRaw("POST", "/api/v1/me/google-calendar/connect", u.AccessToken, map[string]string{"code": "code-switch"})
+		if status != http.StatusBadRequest {
+			t.Fatalf("status %d, want 400", status)
+		}
+		if !strings.Contains(body, "google_calendar_failed") || strings.Contains(body, sentinel) {
+			t.Errorf("body = %q, want generic google_calendar_failed", body)
+		}
+		c := s.connection(u.User.ID)
+		if got := s.decrypt(c.AccessTokenEnc); got != "old-access-A" {
+			t.Errorf("access token = %q, want the stored one untouched", got)
+		}
+		if got := s.decrypt(c.RefreshTokenEnc); got != "stored-refresh-A" {
+			t.Errorf("refresh token = %q, want the stored one untouched", got)
+		}
+	})
+	// The stored refresh token's account cannot be proven (Google refuses
+	// it): fail closed, store nothing new.
+	t.Run("unprovable stored account refused", func(t *testing.T) {
+		u := s.signUp("calunprovable")
+		s.seedConnection(u.User.ID, "old-access-U", "stored-refresh-U", "read_write", time.Now().Add(time.Hour), false)
+		fake.set(func(f *fakeCalendarGoogle) {
+			f.codeSub = "google-sub-A"
+			f.refreshStatus, f.refreshError = http.StatusBadRequest, "invalid_grant"
+		})
+		defer fake.set(func(f *fakeCalendarGoogle) { f.refreshStatus, f.refreshError = 0, "" })
+		status, _ := s.connectCode(u.AccessToken, "code-unprovable")
+		if status != http.StatusBadRequest {
+			t.Fatalf("status %d, want 400", status)
+		}
+		if got := s.decrypt(s.connection(u.User.ID).AccessTokenEnc); got != "old-access-U" {
+			t.Errorf("access token = %q, want the stored one untouched", got)
 		}
 	})
 }
