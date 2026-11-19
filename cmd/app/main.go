@@ -152,6 +152,11 @@ func main() {
 	// ── Quest expiry background worker ────────────────────────────────────────
 	go app.RunQuestExpiry(cleanupCtx, questSvc)
 
+	// ── Quest rollover background worker ──────────────────────────────────────
+	// At each household's local midnight: end-of-day expiry, then the day's
+	// quest schedules are assigned.
+	go app.RunQuestRollover(cleanupCtx, queries, pool)
+
 	// ── Graceful shutdown ─────────────────────────────────────────────────────
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

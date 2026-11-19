@@ -385,6 +385,37 @@ func TestIntegration_QuestSchedules(t *testing.T) {
 		}
 	})
 
+	t.Run("missed_midnights_run_once", func(t *testing.T) {
+		w := newScheduleWorld(t, "schedmissed")
+		ann := w.member("Ann")
+		a := w.quest(app.QuestInput{Name: "Day one", Points: num(5)})
+		b := w.quest(app.QuestInput{Name: "Day two", Points: num(5)})
+		w.schedule(a, ann, 1)
+		w.schedule(b, ann, 2)
+		// The server was down over both midnights: the first run after
+		// them assigns both days' schedules in one pass.
+		now := w.localMidnight(2).Add(time.Hour)
+		if n := w.rollover(now); n != 2 {
+			t.Fatalf("first run after two missed midnights assigned %d, want 2", n)
+		}
+		if !isHeldBy(w.holder(a), ann) || !isHeldBy(w.holder(b), ann) {
+			t.Fatalf("missed schedules not assigned: a=%v b=%v", w.holder(a), w.holder(b))
+		}
+		if ids := w.scheduleIDs(); len(ids) != 0 {
+			t.Errorf("one-off schedules after their pass: %v", ids)
+		}
+		// A second run of the same local date is a no-op.
+		if _, err := w.quests.Abandon(w.ctx, w.admin, w.h, a, app.MemberAction{MemberID: ann}); err != nil {
+			t.Fatalf("abandon: %v", err)
+		}
+		if n := w.rollover(now.Add(time.Minute)); n != 0 {
+			t.Errorf("second run of the day assigned %d, want 0", n)
+		}
+		if got := w.holder(a); got != nil {
+			t.Errorf("second run re-assigned the abandoned quest to %v", got)
+		}
+	})
+
 	t.Run("concurrent_runs_assign_once", func(t *testing.T) {
 		w := newScheduleWorld(t, "schedconc")
 		ann := w.member("Ann")

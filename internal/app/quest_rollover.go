@@ -18,6 +18,35 @@ import (
 // rollover pages through them until none are left.
 const questRolloverBatch = 100
 
+// questRolloverInterval is how often RunQuestRollover looks for households
+// whose local day has turned.
+const questRolloverInterval = time.Minute
+
+// RunQuestRollover rolls over every due household once at startup, so a
+// midnight missed while the server was down runs on the next start, and
+// then every questRolloverInterval. It blocks until ctx is cancelled, then
+// returns. A failed run is logged and the next tick tries again; a failed
+// household is logged by RolloverDueHouseholds and the others still run.
+func RunQuestRollover(ctx context.Context, q *db.Queries, pool pgxBeginner) {
+	ticker := time.NewTicker(questRolloverInterval)
+	defer ticker.Stop()
+	for {
+		if n, err := RolloverDueHouseholds(ctx, q, pool, time.Now()); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			slog.Error("quest rollover: run", "error", err)
+		} else if n > 0 {
+			slog.Info("quest rollover: assigned scheduled quests", "count", n)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
 // RolloverDueHouseholds runs the rollover of every household with a schedule
 // due at now: dated on or before the household's local date at now and after
 // the last date it rolled over. Each household rolls over in a transaction
