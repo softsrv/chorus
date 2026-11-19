@@ -1,4 +1,4 @@
--- 000016_quest_streaks.up.sql
+-- 000017_quest_streaks.up.sql
 -- Quest streaks: member_quest_streaks tracking streak counts and expirations,
 -- and streak_bonus column on household_quests and quest_library.
 

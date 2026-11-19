@@ -320,3 +320,80 @@ func TestQuestClaimExpiresAtJSON(t *testing.T) {
 		t.Errorf("held claim_expires_at = %v, want %s", val, instant.Format(time.RFC3339))
 	}
 }
+
+// TestQuestScheduleJSON pins the schedule wire shape: the ids, the quest and
+// member names, start_date as YYYY-MM-DD, repeat as boolean, and created_at in UTC, and no
+// household_id or other model field.
+func TestQuestScheduleJSON(t *testing.T) {
+	t.Parallel()
+
+	created := time.Date(2026, 11, 19, 3, 0, 0, 0, time.FixedZone("CST", -6*3600))
+	for _, repeat := range []bool{true, false} {
+		s := app.QuestSchedule{
+			ID:          uuid.MustParse("018f25b3-8b77-7000-8000-0000000000a1"),
+			HouseholdID: uuid.MustParse("018f25b3-8b77-7000-8000-0000000000a2"),
+			QuestID:     uuid.MustParse("018f25b3-8b77-7000-8000-0000000000a3"),
+			QuestName:   "Feed the cat",
+			MemberID:    uuid.MustParse("018f25b3-8b77-7000-8000-0000000000a4"),
+			MemberName:  "Sam",
+			StartDate:   "2026-11-21",
+			Repeat:      repeat,
+			CreatedAt:   created,
+		}
+		data, err := json.Marshal(toQuestSchedule(s))
+		if err != nil {
+			t.Fatalf("json.Marshal failed: %v", err)
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(data, &raw); err != nil {
+			t.Fatalf("json.Unmarshal failed: %v", err)
+		}
+		want := map[string]any{
+			"id":          s.ID.String(),
+			"quest_id":    s.QuestID.String(),
+			"quest_name":  "Feed the cat",
+			"member_id":   s.MemberID.String(),
+			"member_name": "Sam",
+			"start_date":  "2026-11-21",
+			"repeat":      repeat,
+			"created_at":  "2026-11-19T09:00:00Z",
+		}
+		if !reflect.DeepEqual(raw, want) {
+			t.Errorf("schedule JSON (repeat=%v) = %v, want %v", repeat, raw, want)
+		}
+	}
+}
+
+// TestUpcomingQuestJSON pins the upcoming quest wire shape: the ids, quest_name,
+// start_date and next_date as YYYY-MM-DD, repeat as boolean, and no internal fields.
+func TestUpcomingQuestJSON(t *testing.T) {
+	t.Parallel()
+
+	u := app.UpcomingQuest{
+		ID:        uuid.MustParse("018f25b3-8b77-7000-8000-0000000000b1"),
+		QuestID:   uuid.MustParse("018f25b3-8b77-7000-8000-0000000000b2"),
+		QuestName: "Clean room",
+		StartDate: "2026-11-21",
+		NextDate:  "2026-11-22",
+		Repeat:    true,
+	}
+	data, err := json.Marshal(toUpcomingQuest(u))
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+	want := map[string]any{
+		"id":         u.ID.String(),
+		"quest_id":   u.QuestID.String(),
+		"quest_name": "Clean room",
+		"start_date": "2026-11-21",
+		"next_date":  "2026-11-22",
+		"repeat":     true,
+	}
+	if !reflect.DeepEqual(raw, want) {
+		t.Errorf("upcoming quest JSON = %v, want %v", raw, want)
+	}
+}

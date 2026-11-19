@@ -27,7 +27,7 @@ func newComboHistoryBase(t *testing.T, prefix string) *comboWorld {
 	q := db.New(pool)
 	return &comboWorld{
 		ctx: context.Background(), pool: pool, q: q,
-		quests: app.NewQuestService(q, pool), family: app.NewFamilyService(q, pool, 10), combos: app.NewComboService(q, pool),
+		quests: app.NewQuestService(q, pool), family: app.NewFamilyService(q, pool, 4), combos: app.NewComboService(q, pool),
 		admin: registerVerified(t, pool, authSvc, mailer, prefix).User.ID,
 	}
 }

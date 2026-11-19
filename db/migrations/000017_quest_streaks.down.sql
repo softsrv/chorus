@@ -1,4 +1,4 @@
--- 000016_quest_streaks.down.sql
+-- 000017_quest_streaks.down.sql
 -- Reverse quest streaks: drop member_quest_streaks and streak_bonus columns.
 
 DROP TABLE IF EXISTS member_quest_streaks;
