@@ -633,6 +633,9 @@ func TestGoogleCalendar_GrantedScopes(t *testing.T) {
 		if status != http.StatusOK {
 			t.Fatalf("connect status %d", status)
 		}
+		if st.Status != "connected" || st.Access != "read_only" {
+			t.Errorf("status = %+v, want connected read_only", st)
+		}
 		if c := s.connection(u.User.ID); c.AccessLevel != "read_only" {
 			t.Errorf("row access = %q, want read_only", c.AccessLevel)
 		}

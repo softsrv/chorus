@@ -4,16 +4,20 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/softsrv/chorus/internal/app"
+	"github.com/softsrv/chorus/internal/auth"
+	"github.com/softsrv/chorus/internal/db"
 	"github.com/softsrv/chorus/internal/http/middleware"
 )
 
@@ -41,6 +45,20 @@ func (m *mockCalendarSvc) Disconnect(ctx context.Context, userID uuid.UUID) erro
 	return m.disconnectErr
 }
 
+const authTestSecret = "auth-test-secret-that-is-at-least-32-bytes!!"
+
+type stubFetcher struct {
+	user      db.User
+	sessionID uuid.UUID
+}
+
+func (s *stubFetcher) GetUserForSession(_ context.Context, arg db.GetUserForSessionParams) (db.User, error) {
+	if arg.SessionID != s.sessionID || arg.UserID != s.user.ID {
+		return db.User{}, errors.New("no rows")
+	}
+	return s.user, nil
+}
+
 func authedRequest(method, target string, body any, uid uuid.UUID) *http.Request {
 	var rdr *bytes.Reader
 	if body != nil {
@@ -53,8 +71,19 @@ func authedRequest(method, target string, body any, uid uuid.UUID) *http.Request
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	ctx := middleware.WithUser(req.Context(), middleware.AuthUser{ID: uid, EmailVerified: true})
-	return req.WithContext(ctx)
+	sessionID := uuid.New()
+	tp, _ := auth.IssueAccessToken(uid, sessionID, authTestSecret, time.Hour)
+	req.Header.Set("Authorization", "Bearer "+tp.AccessToken)
+
+	fetcher := &stubFetcher{
+		user:      db.User{ID: uid, EmailVerified: true},
+		sessionID: sessionID,
+	}
+	var authedReq *http.Request
+	middleware.Authenticate(fetcher, authTestSecret)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authedReq = r
+	})).ServeHTTP(httptest.NewRecorder(), req)
+	return authedReq
 }
 
 // CLM-6: A static check test that fails if 'chorus_gcal_bind' or 'SetCookie'
