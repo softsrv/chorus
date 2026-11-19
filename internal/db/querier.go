@@ -131,7 +131,8 @@ type Querier interface {
 	// schedule_id): those assigned and those skipped because the quest was held
 	// or resting. A schedule skipped because the member is outside the quest's
 	// age range is kept for the admin to see; it is never due again, since its
-	// date is now at or before the household's last rollover date.
+	// date is now at or before the household's last rollover date. A repeated
+	// schedule is never ended here: it stays until the admin removes it.
 	DeleteFinishedSchedules(ctx context.Context, arg DeleteFinishedSchedulesParams) (int64, error)
 	// Returns the deleted row so its token can be revoked at Google afterwards.
 	DeleteGoogleCalendarConnectionByUser(ctx context.Context, userID uuid.UUID) (GoogleCalendarConnection, error)

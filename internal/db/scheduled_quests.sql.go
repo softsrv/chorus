@@ -159,6 +159,7 @@ const deleteFinishedSchedules = `-- name: DeleteFinishedSchedules :execrows
 DELETE FROM quest_schedules s
 USING household_quests q, family_members m, households h
 WHERE s.household_id = $1::uuid
+  AND NOT s.repeat
   AND q.household_id = s.household_id AND q.id = s.quest_id
   AND m.household_id = s.household_id AND m.id = s.member_id
   AND h.id = s.household_id
@@ -179,7 +180,8 @@ type DeleteFinishedSchedulesParams struct {
 // schedule_id): those assigned and those skipped because the quest was held
 // or resting. A schedule skipped because the member is outside the quest's
 // age range is kept for the admin to see; it is never due again, since its
-// date is now at or before the household's last rollover date.
+// date is now at or before the household's last rollover date. A repeated
+// schedule is never ended here: it stays until the admin removes it.
 func (q *Queries) DeleteFinishedSchedules(ctx context.Context, arg DeleteFinishedSchedulesParams) (int64, error) {
 	result, err := q.db.Exec(ctx, deleteFinishedSchedules,
 		arg.HouseholdID,
