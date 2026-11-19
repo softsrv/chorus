@@ -32,7 +32,7 @@ func TestIntegration_PointsHistory(t *testing.T) {
 	q := db.New(pool)
 	households := app.NewHouseholdService(q, pool)
 	quests := app.NewQuestService(q, pool)
-	familySvc := app.NewFamilyService(q, pool, 10)
+	familySvc := app.NewFamilyService(q, pool, 4)
 	ctx := context.Background()
 
 	parent := registerVerified(t, pool, authSvc, mailer, "pointshistory").User.ID
@@ -196,7 +196,7 @@ func newStreakWorld(t *testing.T, prefix string) *streakWorld {
 	if err != nil {
 		t.Fatalf("create household: %v", err)
 	}
-	member, err := app.NewFamilyService(q, pool, 10).Create(ctx, admin, h.ID, app.FamilyMemberInput{Name: "Maya", PIN: "1234"}, "")
+	member, err := app.NewFamilyService(q, pool, 4).Create(ctx, admin, h.ID, app.FamilyMemberInput{Name: "Maya", PIN: "1234"}, "")
 	if err != nil {
 		t.Fatalf("create member: %v", err)
 	}

@@ -71,7 +71,7 @@ func newScheduleWorldIn(t *testing.T, prefix, tz string) *scheduleWorld {
 	return &scheduleWorld{
 		t: t, ctx: ctx, q: q, pool: pool, admin: admin, h: h.ID, loc: loc,
 		quests:    app.NewQuestService(q, pool),
-		family:    app.NewFamilyService(q, pool, 10),
+		family:    app.NewFamilyService(q, pool, 4),
 		schedules: app.NewQuestScheduleService(q, pool),
 	}
 }
