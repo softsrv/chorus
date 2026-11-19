@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -21,7 +22,10 @@ import (
 // looks up database-wide.
 const scratchSchemaPrefix = "mig_roundtrip_"
 
-var migrationFileRE = regexp.MustCompile(`^(\d+)_(.+)\.(up|down)\.sql$`)
+var (
+	migrationFileRE          = regexp.MustCompile(`^(\d+)_(.+)\.(up|down)\.sql$`)
+	migrationNameInCommentRE = regexp.MustCompile(`\b\d+_[a-zA-Z0-9_]+\.(?:up|down)\.sql\b`)
+)
 
 type migrationPair struct {
 	version int
