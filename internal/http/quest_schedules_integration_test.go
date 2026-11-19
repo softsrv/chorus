@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -168,6 +169,37 @@ func TestAPI_QuestSchedules(t *testing.T) {
 	var otherSched questScheduleWire
 	s.expect(http.StatusCreated, "POST", op+"/quest-schedules", parent.AccessToken, body(otherQuest, otherMember, future), &otherSched)
 
+	// Upcoming (CLM-4): the member's schedules, soonest first, with the exact
+	// wire field names; the other household's schedule never shows.
+	soon := time.Now().In(loc).AddDate(0, 0, 10).Format(time.DateOnly)
+	soonQuest := newQuest(hp, "Take out recycling")
+	var soonSched questScheduleWire
+	s.expect(http.StatusCreated, "POST", hp+"/quest-schedules", parent.AccessToken, body(soonQuest, sam, soon), &soonSched)
+	upPath := hp + "/family-members/" + sam.String() + "/upcoming-quests"
+	var up struct {
+		Items []map[string]any `json:"items"`
+	}
+	s.expect(http.StatusOK, "GET", upPath, parent.AccessToken, nil, &up)
+	wantUp := []map[string]any{
+		{"id": soonSched.ID.String(), "quest_id": soonQuest.String(), "quest_name": "Take out recycling", "start_date": soon, "next_date": soon, "repeat": false},
+		{"id": created.ID.String(), "quest_id": quest.String(), "quest_name": "Feed the cat", "start_date": future, "next_date": future, "repeat": false},
+	}
+	if !reflect.DeepEqual(up.Items, wantUp) {
+		t.Fatalf("upcoming = %v, want %v", up.Items, wantUp)
+	}
+	s.expect(http.StatusOK, "GET", op+"/family-members/"+otherMember.String()+"/upcoming-quests", parent.AccessToken, nil, &up)
+	if len(up.Items) != 1 || up.Items[0]["id"] != otherSched.ID.String() {
+		t.Fatalf("other household upcoming: %v", up.Items)
+	}
+	// A non-member, and a member id of another household, are 404.
+	refused("non-member upcoming", http.StatusNotFound, "not_found", "GET", upPath, stranger.AccessToken, nil, nil)
+	refused("other household's member upcoming", http.StatusNotFound, "not_found", "GET",
+		hp+"/family-members/"+otherMember.String()+"/upcoming-quests", parent.AccessToken, nil, nil)
+	refused("unknown member upcoming", http.StatusNotFound, "not_found", "GET",
+		hp+"/family-members/"+uuid.NewString()+"/upcoming-quests", parent.AccessToken, nil, nil)
+	// Put the household back to one schedule for the checks below.
+	s.expect(http.StatusNoContent, "DELETE", hp+"/quest-schedules/"+soonSched.ID.String(), parent.AccessToken, nil, nil)
+
 	// Removing an unknown schedule, or another household's, is 404.
 	refused("delete unknown", http.StatusNotFound, "not_found", "DELETE", hp+"/quest-schedules/"+uuid.NewString(), parent.AccessToken, nil, nil)
 	refused("delete other household's", http.StatusNotFound, "not_found", "DELETE", hp+"/quest-schedules/"+otherSched.ID.String(), parent.AccessToken, nil, nil)
@@ -190,6 +222,11 @@ func TestAPI_QuestSchedules(t *testing.T) {
 	s.expectWithHeaders(http.StatusOK, "GET", hp+"/quest-schedules", parent.AccessToken, right, nil, &list)
 	if len(list.Items) != 1 {
 		t.Fatalf("list with PIN: %+v", list.Items)
+	}
+	// The member's upcoming read needs no admin PIN, even once one is set.
+	s.expect(http.StatusOK, "GET", upPath, parent.AccessToken, nil, &up)
+	if len(up.Items) != 1 || up.Items[0]["id"] != created.ID.String() {
+		t.Fatalf("upcoming without PIN: %v", up.Items)
 	}
 
 	// 204: removed; the list is empty again and a second remove is 404.
