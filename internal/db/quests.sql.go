@@ -1191,6 +1191,28 @@ func (q *Queries) MarkQuestDone(ctx context.Context, arg MarkQuestDoneParams) (M
 	return i, err
 }
 
+const questClaimLapsed = `-- name: QuestClaimLapsed :one
+SELECT (q.claim_expires_at IS NOT NULL AND q.claim_expires_at <= NOW())::boolean AS lapsed
+FROM household_quests q
+WHERE q.household_id = $1 AND q.id = $2
+`
+
+type QuestClaimLapsedParams struct {
+	HouseholdID uuid.UUID `json:"household_id"`
+	ID          uuid.UUID `json:"id"`
+}
+
+// Whether a quest of the household is held past its claim deadline
+// (claim_expires_at at or before now). NOW() is the transaction's start, so
+// inside one transaction this agrees with ShareQuest's and MarkQuestDone's
+// own expiry checks. A quest not in this household gets no row.
+func (q *Queries) QuestClaimLapsed(ctx context.Context, arg QuestClaimLapsedParams) (bool, error) {
+	row := q.db.QueryRow(ctx, questClaimLapsed, arg.HouseholdID, arg.ID)
+	var lapsed bool
+	err := row.Scan(&lapsed)
+	return lapsed, err
+}
+
 const questHasPendingCompletion = `-- name: QuestHasPendingCompletion :one
 SELECT EXISTS (
     SELECT 1 FROM quest_completions c
@@ -1467,8 +1489,10 @@ WITH quest AS (
     FROM household_quests q
     WHERE q.household_id = $2 AND q.id = $3
       AND q.shareable AND q.claimed_by = $1::uuid
-    -- Locked and re-checked, so a share racing the holder's mark-done or
-    -- abandon either sees the quest still held or writes nothing.
+      AND (q.claim_expires_at IS NULL OR q.claim_expires_at > NOW())
+    -- Locked and re-checked, so a share racing the holder's mark-done,
+    -- abandon or the expiry sweep either sees the quest still held or writes
+    -- nothing.
     FOR UPDATE OF q
 ), target AS (
     SELECT m.id
@@ -1508,7 +1532,9 @@ type ShareQuestParams struct {
 // by the acting member, and the target must be a household member other than
 // the actor who is not on the quest yet and is within the quest's age range
 // (quest_age_eligible, in the household's timezone: no birthday or no limits
-// always pass); otherwise nothing is written. The
+// always pass); otherwise nothing is written. A hold whose claim has run out
+// (claim_expires_at at or before now, the end of the day it was accepted) is
+// not held, even before the expiry sweep has released it. The
 // first share also records the holder, joined at the time they accepted, so
 // the holder stays the earliest member. Returns the member ids it added.
 func (q *Queries) ShareQuest(ctx context.Context, arg ShareQuestParams) ([]uuid.UUID, error) {

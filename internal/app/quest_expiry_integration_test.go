@@ -3,9 +3,14 @@
 package app_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -368,5 +373,330 @@ func TestIntegration_QuestExpiry_SweepScope(t *testing.T) {
 	}
 	if n := completionRows(t, pool, overdue); n != 0 {
 		t.Errorf("completions of the expired quest: %d, want 0", n)
+	}
+}
+
+// expiryWorld is one household with members and shareable quests for the
+// expiry tests below.
+type expiryWorld struct {
+	t      *testing.T
+	pool   *pgxpool.Pool
+	q      *db.Queries
+	quests *app.QuestService
+	ctx    context.Context
+	admin  uuid.UUID
+	h      uuid.UUID
+}
+
+func newExpiryWorld(t *testing.T, user, name string) *expiryWorld {
+	t.Helper()
+	pool := testDB(t)
+	mailer := &captureMailer{}
+	authSvc := testAuthService(t, pool, mailer)
+	q := db.New(pool)
+	ctx := context.Background()
+	admin := registerVerified(t, pool, authSvc, mailer, user).User.ID
+	h, err := app.NewHouseholdService(q, pool).Create(ctx, admin, app.HouseholdInput{Name: name, Timezone: "America/Chicago"})
+	if err != nil {
+		t.Fatalf("create household: %v", err)
+	}
+	return &expiryWorld{t: t, pool: pool, q: q, quests: app.NewQuestService(q, pool), ctx: ctx, admin: admin, h: h.ID}
+}
+
+func (w *expiryWorld) member(name string) app.MemberAction {
+	w.t.Helper()
+	m, err := app.NewFamilyService(w.q, w.pool, 10).Create(w.ctx, w.admin, w.h, app.FamilyMemberInput{Name: name}, "")
+	if err != nil {
+		w.t.Fatalf("create %s: %v", name, err)
+	}
+	return app.MemberAction{MemberID: m.ID}
+}
+
+func (w *expiryWorld) quest(in app.QuestInput) uuid.UUID {
+	w.t.Helper()
+	v, err := w.quests.Create(w.ctx, w.admin, w.h, in, "")
+	if err != nil {
+		w.t.Fatalf("create %s: %v", in.Name, err)
+	}
+	return v.ID
+}
+
+// backDate puts a quest's claim deadline a minute in the past.
+func (w *expiryWorld) backDate(questID uuid.UUID) {
+	w.t.Helper()
+	if _, err := w.pool.Exec(w.ctx,
+		`UPDATE household_quests SET claim_expires_at = NOW() - INTERVAL '1 minute' WHERE household_id = $1 AND id = $2`,
+		w.h, questID); err != nil {
+		w.t.Fatalf("back-date deadline: %v", err)
+	}
+}
+
+// snapshot is the quest row and its participant rows as JSON text.
+func (w *expiryWorld) snapshot(questID uuid.UUID) string {
+	w.t.Helper()
+	return rowJSON(w.t, w.pool, `SELECT to_jsonb(q)::text FROM household_quests q WHERE id = $1`, questID) +
+		rowJSON(w.t, w.pool, `SELECT coalesce(jsonb_agg(to_jsonb(p) ORDER BY p.member_id), '[]')::text
+			FROM household_quest_participants p WHERE quest_id = $1`, questID)
+}
+
+func (w *expiryWorld) get(questID uuid.UUID) db.HouseholdQuest {
+	w.t.Helper()
+	got, err := w.q.GetHouseholdQuest(w.ctx, db.GetHouseholdQuestParams{HouseholdID: w.h, ID: questID})
+	if err != nil {
+		w.t.Fatalf("get quest: %v", err)
+	}
+	return got
+}
+
+// TestIntegration_QuestExpiry_Share: sharing a quest whose claim day has
+// ended, before the sweep has released it, is refused as for a quest the
+// member does not hold (ErrNotFound) whoever the target is: a new member, a
+// member already on the quest, the actor themselves, or a member outside the
+// quest's age range. Each refusal writes no participant row and leaves the
+// quest as it was. The same share before the deadline succeeds.
+func TestIntegration_QuestExpiry_Share(t *testing.T) {
+	w := newExpiryWorld(t, "questexpiryshare", "Late sharers")
+	ann, ben, cara, tot := w.member("Ann"), w.member("Ben"), w.member("Cara"), w.member("Tot")
+	if _, err := w.pool.Exec(w.ctx, `UPDATE family_members SET birthday = CURRENT_DATE - INTERVAL '2 years' WHERE id = $1`, tot.MemberID); err != nil {
+		t.Fatalf("set Tot's birthday: %v", err)
+	}
+	solo := w.quest(app.QuestInput{Name: "Wash the car", Points: num(30), Shareable: true, MinAge: num(6)})
+	shared := w.quest(app.QuestInput{Name: "Rake leaves", Points: num(30), Shareable: true, MinAge: num(6)})
+
+	if _, err := w.quests.Accept(w.ctx, w.admin, w.h, solo, ann); err != nil {
+		t.Fatalf("Ann accepts solo: %v", err)
+	}
+	if _, err := w.quests.Accept(w.ctx, w.admin, w.h, shared, ann); err != nil {
+		t.Fatalf("Ann accepts shared: %v", err)
+	}
+	// Before the deadline: Tot is refused for age, and Ben is added, so the
+	// refusals below come from the expiry, not from these cases.
+	if _, err := w.quests.Share(w.ctx, w.admin, w.h, solo, ann, tot); !errors.Is(err, app.ErrAgeRestricted) {
+		t.Fatalf("share with Tot before deadline: %v, want ErrAgeRestricted", err)
+	}
+	if _, err := w.quests.Share(w.ctx, w.admin, w.h, shared, ann, ben); err != nil {
+		t.Fatalf("share before deadline: %v", err)
+	}
+	w.backDate(solo)
+	w.backDate(shared)
+
+	cases := []struct {
+		name          string
+		quest         uuid.UUID
+		target        app.MemberAction
+		wouldBeOnTime error
+	}{
+		{"a new member", solo, cara, nil},
+		{"the actor themselves", solo, ann, app.ErrAlreadyParticipant},
+		{"a member outside the age range", solo, tot, app.ErrAgeRestricted},
+		{"a member already on it", shared, ben, app.ErrAlreadyParticipant},
+		{"a new member of a shared quest", shared, cara, nil},
+	}
+	for _, c := range cases {
+		before := w.snapshot(c.quest)
+		_, err := w.quests.Share(w.ctx, w.admin, w.h, c.quest, ann, c.target)
+		if !errors.Is(err, app.ErrNotFound) {
+			t.Errorf("share expired quest with %s: %v, want ErrNotFound", c.name, err)
+		}
+		if c.wouldBeOnTime != nil && errors.Is(err, c.wouldBeOnTime) {
+			t.Errorf("share expired quest with %s fell through to %v", c.name, c.wouldBeOnTime)
+		}
+		if after := w.snapshot(c.quest); after != before {
+			t.Errorf("refused share with %s changed the quest:\n got %s\nwant %s", c.name, after, before)
+		}
+	}
+	if n := participantRows(t, w.pool, solo); n != 0 {
+		t.Errorf("participant rows of the expired solo quest: %d, want 0", n)
+	}
+}
+
+// failQuestRelease installs a trigger that makes any update clearing the
+// holder of questID raise, so ExpireQuestClaim fails after its participant
+// delete has run in the same statement. The returned func drops it.
+func failQuestRelease(t *testing.T, pool *pgxpool.Pool, questID uuid.UUID) func() {
+	t.Helper()
+	fn := "test_fail_release_" + strings.ReplaceAll(questID.String(), "-", "")
+	if _, err := pool.Exec(context.Background(), fmt.Sprintf(`
+CREATE FUNCTION %[1]s() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.id = '%[2]s' AND NEW.claimed_by IS NULL THEN RAISE EXCEPTION 'injected release failure'; END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER %[1]s BEFORE UPDATE ON household_quests FOR EACH ROW EXECUTE FUNCTION %[1]s();`, fn, questID)); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	dropped := false
+	drop := func() {
+		if dropped {
+			return
+		}
+		dropped = true
+		if _, err := pool.Exec(context.Background(), fmt.Sprintf(`DROP TRIGGER IF EXISTS %[1]s ON household_quests; DROP FUNCTION IF EXISTS %[1]s()`, fn)); err != nil {
+			t.Errorf("drop trigger: %v", err)
+		}
+	}
+	t.Cleanup(drop)
+	return drop
+}
+
+// syncBuffer is a log sink safe for concurrent writes.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// captureSlog routes the default slog logger to a buffer until the test ends.
+func captureSlog(t *testing.T) *syncBuffer {
+	t.Helper()
+	buf := &syncBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return buf
+}
+
+// TestIntegration_QuestExpiry_FailedRelease: when releasing one overdue
+// shared quest fails after its participant rows were deleted in the same
+// statement, that quest's transaction rolls back whole: it keeps its holder,
+// claimed_at, deadline and participants. The failure is logged with
+// slog.Error naming the quest, another overdue quest in the same run is
+// still released, and once the fault is gone the next run releases the
+// first. A run with a cancelled context changes nothing and returns its
+// error.
+func TestIntegration_QuestExpiry_FailedRelease(t *testing.T) {
+	w := newExpiryWorld(t, "questexpiryfault", "Faulty")
+	ann, ben, cara := w.member("Ann"), w.member("Ben"), w.member("Cara")
+	stuck := w.quest(app.QuestInput{Name: "Sweep the porch", Points: num(20), Shareable: true})
+	other := w.quest(app.QuestInput{Name: "Water plants", Points: num(5)})
+
+	if _, err := w.quests.Accept(w.ctx, w.admin, w.h, stuck, ann); err != nil {
+		t.Fatalf("Ann accepts: %v", err)
+	}
+	for _, m := range []app.MemberAction{ben, cara} {
+		if _, err := w.quests.Share(w.ctx, w.admin, w.h, stuck, ann, m); err != nil {
+			t.Fatalf("share: %v", err)
+		}
+	}
+	if _, err := w.quests.Accept(w.ctx, w.admin, w.h, other, ben); err != nil {
+		t.Fatalf("Ben accepts other: %v", err)
+	}
+	w.backDate(stuck)
+	w.backDate(other)
+	stuckBefore := w.snapshot(stuck)
+	if n := participantRows(t, w.pool, stuck); n != 3 {
+		t.Fatalf("participants before: %d, want 3", n)
+	}
+
+	// A cancelled context stops the run before it writes anything.
+	cancelled, cancel := context.WithCancel(w.ctx)
+	cancel()
+	if _, err := w.quests.ExpireOverdueQuests(cancelled); err == nil {
+		t.Errorf("ExpireOverdueQuests with a cancelled context: nil error, want one")
+	}
+	if got := w.snapshot(stuck); got != stuckBefore {
+		t.Errorf("cancelled run changed the quest:\n got %s\nwant %s", got, stuckBefore)
+	}
+	if w.get(other).ClaimedBy == nil {
+		t.Errorf("cancelled run released the other quest")
+	}
+
+	logs := captureSlog(t)
+	drop := failQuestRelease(t, w.pool, stuck)
+	if _, err := w.quests.ExpireOverdueQuests(w.ctx); err != nil {
+		t.Fatalf("ExpireOverdueQuests with one failing quest: %v, want the run to go on", err)
+	}
+	if got := w.snapshot(stuck); got != stuckBefore {
+		t.Errorf("failed release left the quest half released:\n got %s\nwant %s", got, stuckBefore)
+	}
+	if got := w.get(other); got.ClaimedBy != nil || got.ClaimExpiresAt.Valid {
+		t.Errorf("other quest in the same run: claimed_by=%v claim_expires_at=%v, want released", got.ClaimedBy, got.ClaimExpiresAt)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "level=ERROR") || !strings.Contains(out, stuck.String()) || !strings.Contains(out, "injected release failure") {
+		t.Errorf("failure not logged as an error naming the quest; log:\n%s", out)
+	}
+
+	drop()
+	if _, err := w.quests.ExpireOverdueQuests(w.ctx); err != nil {
+		t.Fatalf("ExpireOverdueQuests after the fault: %v", err)
+	}
+	if got := w.get(stuck); got.ClaimedBy != nil || got.ClaimedAt.Valid || got.ClaimExpiresAt.Valid {
+		t.Errorf("later run: claimed_by=%v claimed_at=%v claim_expires_at=%v, want released", got.ClaimedBy, got.ClaimedAt, got.ClaimExpiresAt)
+	}
+	if n := participantRows(t, w.pool, stuck); n != 0 {
+		t.Errorf("participants after the later run: %d, want 0", n)
+	}
+	if n := completionRows(t, w.pool, stuck); n != 0 {
+		t.Errorf("completions of the expired quest: %d, want 0", n)
+	}
+}
+
+// TestIntegration_QuestExpiry_Race: the sweep racing a participant's abandon
+// and the holder's share of the same overdue shared quest never leaves a
+// half state. The share is refused (ErrNotFound: the day has ended), the
+// abandon either goes first or finds the quest gone (ErrNotFound), and after
+// the sweep the quest is back in the pool with no participant rows and no
+// completion.
+func TestIntegration_QuestExpiry_Race(t *testing.T) {
+	w := newExpiryWorld(t, "questexpiryrace", "Racing the clock")
+	ann, ben, cara, dan := w.member("Ann"), w.member("Ben"), w.member("Cara"), w.member("Dan")
+	quest := w.quest(app.QuestInput{Name: "Tidy the garage", Points: num(60), Shareable: true, TeamworkBonus: num(10)})
+
+	for round := range 15 {
+		if _, err := w.quests.Accept(w.ctx, w.admin, w.h, quest, ann); err != nil {
+			t.Fatalf("round %d: Ann accepts: %v", round, err)
+		}
+		for _, m := range []app.MemberAction{ben, cara} {
+			if _, err := w.quests.Share(w.ctx, w.admin, w.h, quest, ann, m); err != nil {
+				t.Fatalf("round %d: share: %v", round, err)
+			}
+		}
+		w.backDate(quest)
+
+		var wg sync.WaitGroup
+		var sweepErr, abandonErr, shareErr error
+		start := make(chan struct{})
+		wg.Add(3)
+		go func() { defer wg.Done(); <-start; _, sweepErr = w.quests.ExpireOverdueQuests(w.ctx) }()
+		go func() { defer wg.Done(); <-start; _, abandonErr = w.quests.Abandon(w.ctx, w.admin, w.h, quest, ben) }()
+		go func() { defer wg.Done(); <-start; _, shareErr = w.quests.Share(w.ctx, w.admin, w.h, quest, ann, dan) }()
+		close(start)
+		wg.Wait()
+
+		if sweepErr != nil {
+			t.Fatalf("round %d: sweep: %v", round, sweepErr)
+		}
+		if abandonErr != nil && !errors.Is(abandonErr, app.ErrNotFound) {
+			t.Errorf("round %d: abandon: %v, want nil or ErrNotFound", round, abandonErr)
+		}
+		if !errors.Is(shareErr, app.ErrNotFound) {
+			t.Errorf("round %d: share of an overdue quest: %v, want ErrNotFound", round, shareErr)
+		}
+		got := w.get(quest)
+		if got.ClaimedBy != nil || got.ClaimedAt.Valid || got.ClaimExpiresAt.Valid {
+			t.Errorf("round %d: claimed_by=%v claimed_at=%v claim_expires_at=%v, want back in the pool",
+				round, got.ClaimedBy, got.ClaimedAt, got.ClaimExpiresAt)
+		}
+		if n := participantRows(t, w.pool, quest); n != 0 {
+			t.Errorf("round %d: participant rows %d, want 0", round, n)
+		}
+		if n := completionRows(t, w.pool, quest); n != 0 {
+			t.Errorf("round %d: completions %d, want 0", round, n)
+		}
+		if t.Failed() {
+			return
+		}
 	}
 }

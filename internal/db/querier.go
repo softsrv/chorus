@@ -333,6 +333,11 @@ type Querier interface {
 	MarkQuestDone(ctx context.Context, arg MarkQuestDoneParams) (MarkQuestDoneRow, error)
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
 	MarkVerificationCodeUsed(ctx context.Context, id uuid.UUID) (int64, error)
+	// Whether a quest of the household is held past its claim deadline
+	// (claim_expires_at at or before now). NOW() is the transaction's start, so
+	// inside one transaction this agrees with ShareQuest's and MarkQuestDone's
+	// own expiry checks. A quest not in this household gets no row.
+	QuestClaimLapsed(ctx context.Context, arg QuestClaimLapsedParams) (bool, error)
 	// Whether the quest has a completion waiting for the administrator.
 	QuestHasPendingCompletion(ctx context.Context, arg QuestHasPendingCompletionParams) (bool, error)
 	// Check whether a member of a household is age-eligible for a quest in that
@@ -403,7 +408,9 @@ type Querier interface {
 	// by the acting member, and the target must be a household member other than
 	// the actor who is not on the quest yet and is within the quest's age range
 	// (quest_age_eligible, in the household's timezone: no birthday or no limits
-	// always pass); otherwise nothing is written. The
+	// always pass); otherwise nothing is written. A hold whose claim has run out
+	// (claim_expires_at at or before now, the end of the day it was accepted) is
+	// not held, even before the expiry sweep has released it. The
 	// first share also records the holder, joined at the time they accepted, so
 	// the holder stays the earliest member. Returns the member ids it added.
 	ShareQuest(ctx context.Context, arg ShareQuestParams) ([]uuid.UUID, error)

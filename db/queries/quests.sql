@@ -193,7 +193,9 @@ RETURNING q.id, q.household_id, q.library_id, q.name, q.points, q.repeat_days, q
 -- by the acting member, and the target must be a household member other than
 -- the actor who is not on the quest yet and is within the quest's age range
 -- (quest_age_eligible, in the household's timezone: no birthday or no limits
--- always pass); otherwise nothing is written. The
+-- always pass); otherwise nothing is written. A hold whose claim has run out
+-- (claim_expires_at at or before now, the end of the day it was accepted) is
+-- not held, even before the expiry sweep has released it. The
 -- first share also records the holder, joined at the time they accepted, so
 -- the holder stays the earliest member. Returns the member ids it added.
 WITH quest AS (
@@ -201,8 +203,10 @@ WITH quest AS (
     FROM household_quests q
     WHERE q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id)
       AND q.shareable AND q.claimed_by = sqlc.arg(member_id)::uuid
-    -- Locked and re-checked, so a share racing the holder's mark-done or
-    -- abandon either sees the quest still held or writes nothing.
+      AND (q.claim_expires_at IS NULL OR q.claim_expires_at > NOW())
+    -- Locked and re-checked, so a share racing the holder's mark-done,
+    -- abandon or the expiry sweep either sees the quest still held or writes
+    -- nothing.
     FOR UPDATE OF q
 ), target AS (
     SELECT m.id
@@ -228,6 +232,15 @@ CROSS JOIN LATERAL (VALUES
 ) AS v(member_id, joined_at)
 ON CONFLICT (quest_id, member_id) DO NOTHING
 RETURNING member_id;
+
+-- name: QuestClaimLapsed :one
+-- Whether a quest of the household is held past its claim deadline
+-- (claim_expires_at at or before now). NOW() is the transaction's start, so
+-- inside one transaction this agrees with ShareQuest's and MarkQuestDone's
+-- own expiry checks. A quest not in this household gets no row.
+SELECT (q.claim_expires_at IS NOT NULL AND q.claim_expires_at <= NOW())::boolean AS lapsed
+FROM household_quests q
+WHERE q.household_id = sqlc.arg(household_id) AND q.id = sqlc.arg(id);
 
 -- name: QuestMemberAgeEligible :one
 -- Check whether a member of a household is age-eligible for a quest in that
