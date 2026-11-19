@@ -491,9 +491,13 @@ func (s *QuestService) Abandon(ctx context.Context, userID, householdID, questID
 // target's PIN so a wrong target PIN is only reported on a share that would
 // otherwise succeed. A quest that is not in this household, not shareable or
 // not held by the acting member, and a target that is not a member of this
-// household, are ErrNotFound. Sharing with oneself or with a member already
-// on the quest is ErrAlreadyParticipant. A target outside the quest's age
-// range is ErrAgeRestricted. Nothing changes on any error. The first share
+// household, are ErrNotFound. A hold whose claim day has ended
+// (claim_expires_at at or before the database's now, even before the expiry
+// sweep has released it) is not held: ErrNotFound, checked before the
+// target's PIN and before the already-participant and age checks. Sharing
+// with oneself or with a member already on the quest is
+// ErrAlreadyParticipant. A target outside the quest's age range is
+// ErrAgeRestricted. Nothing changes on any error. The first share
 // records the holder as a participant too.
 func (s *QuestService) Share(ctx context.Context, userID, householdID, questID uuid.UUID, act, target MemberAction) (QuestView, error) {
 	if err := s.verifyActingMember(ctx, userID, householdID, act); err != nil {
@@ -517,7 +521,11 @@ func (s *QuestService) Share(ctx context.Context, userID, householdID, questID u
 	if err != nil {
 		return QuestView{}, err
 	}
-	if !quest.Shareable || quest.ClaimedBy == nil || *quest.ClaimedBy != act.MemberID {
+	held, err := heldForShare(ctx, qtx, quest, act.MemberID)
+	if err != nil {
+		return QuestView{}, err
+	}
+	if !held {
 		return QuestView{}, ErrNotFound
 	}
 	if _, err := VerifyMemberPin(ctx, qtx, householdID, target.MemberID, target.PIN); err != nil {
@@ -535,8 +543,17 @@ func (s *QuestService) Share(ctx context.Context, userID, householdID, questID u
 	if len(added) == 0 {
 		// Nothing written: either the quest is not one the actor may share,
 		// or the target is the actor or already on it, or the target is
-		// outside the quest's age range.
-		if !quest.Shareable || quest.ClaimedBy == nil || *quest.ClaimedBy != act.MemberID {
+		// outside the quest's age range. The quest is read again first: a
+		// mark-done, abandon or expiry sweep that committed after the read
+		// above leaves it not held, which is ErrNotFound like any quest the
+		// actor does not hold, never a target error.
+		again, err := notFoundIfNoRows(qtx.GetHouseholdQuest(ctx, db.GetHouseholdQuestParams{HouseholdID: householdID, ID: questID}))
+		if err != nil {
+			return QuestView{}, err
+		}
+		if held, err := heldForShare(ctx, qtx, again, act.MemberID); err != nil {
+			return QuestView{}, err
+		} else if !held {
 			return QuestView{}, ErrNotFound
 		}
 		if target.MemberID == act.MemberID {
@@ -573,6 +590,28 @@ func (s *QuestService) Share(ctx context.Context, userID, householdID, questID u
 		return QuestView{}, fmt.Errorf("commit: %w", err)
 	}
 	return s.view(ctx, quest)
+}
+
+// heldForShare reports whether quest is one member may share: shareable,
+// held by them, and not past its claim deadline. The deadline is judged by
+// the database's clock in this transaction (QuestClaimLapsed), the clock
+// ShareQuest, MarkQuestDone and the expiry sweep judge it by, so a hold whose
+// day has ended counts as not held even before the sweep has released it.
+func heldForShare(ctx context.Context, qtx *db.Queries, quest db.HouseholdQuest, memberID uuid.UUID) (bool, error) {
+	if !quest.Shareable || quest.ClaimedBy == nil || *quest.ClaimedBy != memberID {
+		return false, nil
+	}
+	if !quest.ClaimExpiresAt.Valid {
+		return true, nil
+	}
+	lapsed, err := notFoundIfNoRows(qtx.QuestClaimLapsed(ctx, db.QuestClaimLapsedParams{HouseholdID: quest.HouseholdID, ID: quest.ID}))
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return !lapsed, nil
 }
 
 // lockQuestMembers locks, in ascending id order, the acting member and every
@@ -672,7 +711,9 @@ func memberLockOrder(a, b uuid.UUID) []uuid.UUID {
 // cooldown from now: the quest comes back at local midnight in the
 // household's timezone, repeat_days days after today, whether or not the
 // administrator has approved by then. No points move until approval. A quest
-// the member is not on, or a member removed meanwhile, is ErrNotFound.
+// the member is not on, a quest whose claim day has ended (claim_expires_at
+// at or before now, even before the expiry sweep has released it), or a
+// member removed meanwhile, is ErrNotFound: no completion, no streak step.
 //
 // The member locks come first, in id order, because FamilyService.Remove
 // takes a member's lock before it releases that member's quests and

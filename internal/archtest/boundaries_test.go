@@ -40,6 +40,7 @@ var prodAllow = map[string][]string{
 	"web":                      nil,
 	"internal/archtest":        nil,
 	"internal/testnet":         nil,
+	"systest":                  nil,
 }
 
 // testExtra is what a package's _test.go files (internal and external test
@@ -211,7 +212,7 @@ func scanEdges(root, module string, tags []string) ([]edge, error) {
 	return edges, err
 }
 
-var tagSets = [][]string{nil, {"integration"}}
+var tagSets = [][]string{nil, {"integration"}, {"systest"}}
 
 func TestImportBoundaries(t *testing.T) {
 	root, module := moduleRoot(t)
@@ -312,7 +313,7 @@ func TestImportBoundaries(t *testing.T) {
 		}
 	})
 
-	t.Run("detector fires: integration-tagged and external test files are seen", func(t *testing.T) {
+	t.Run("detector fires: integration-tagged, systest-tagged and external test files are seen", func(t *testing.T) {
 		dir := t.TempDir()
 		write := func(rel, src string) {
 			p := filepath.Join(dir, filepath.FromSlash(rel))
@@ -326,13 +327,20 @@ func TestImportBoundaries(t *testing.T) {
 		write("go.mod", "module "+module+"\n")
 		write("internal/auth/bad.go", "//go:build integration\n\npackage auth\n\nimport _ \""+module+"/internal/db\"\n")
 		write("internal/users/x_test.go", "package users_test\n\nimport _ \""+module+"/cmd/app\"\n")
+		write("systest/bad_test.go", "//go:build systest\n\npackage systest\n\nimport _ \""+module+"/internal/app\"\n")
 
 		plain, err := scanEdges(dir, module, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := checkEdges(plain); len(got) != 1 || !strings.Contains(got[0], "internal/users/x_test.go") {
-			t.Errorf("default tags: want only the external test edge to cmd/app flagged, got %v", got)
+		gotPlain := checkEdges(plain)
+		if len(gotPlain) != 1 || !strings.Contains(gotPlain[0], "internal/users/x_test.go") {
+			t.Errorf("default tags: want only the external test edge to cmd/app flagged, got %v", gotPlain)
+		}
+		for _, msg := range gotPlain {
+			if strings.Contains(msg, "systest") {
+				t.Errorf("default tags: untagged scan flagged systest: %s", msg)
+			}
 		}
 		tagged, err := scanEdges(dir, module, []string{"integration"})
 		if err != nil {
@@ -342,6 +350,21 @@ func TestImportBoundaries(t *testing.T) {
 		sort.Strings(got)
 		if len(got) != 2 || !strings.Contains(got[0], "internal/auth/bad.go") || !strings.Contains(got[0], "internal/auth -> internal/db") {
 			t.Errorf("integration tag: want the tagged internal/auth -> internal/db edge flagged, got %v", got)
+		}
+		sysTagged, err := scanEdges(dir, module, []string{"systest"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		gotSys := checkEdges(sysTagged)
+		var foundSys bool
+		for _, msg := range gotSys {
+			if strings.Contains(msg, "systest/bad_test.go") && strings.Contains(msg, "systest -> internal/app") {
+				foundSys = true
+				break
+			}
+		}
+		if len(gotSys) != 2 || !foundSys {
+			t.Errorf("systest tag: want exactly 2 violations including systest/bad_test.go (systest -> internal/app), got %v", gotSys)
 		}
 	})
 }

@@ -15,9 +15,10 @@ type Querier interface {
 	// The acting member leaves a quest they hold or are on. Only their part goes:
 	// their participant row. If they held it, the holder of record moves to the
 	// earliest remaining participant (joined_at, then member_id), who keeps
-	// their joined_at as claimed_at; a quest with nobody left is back in the
-	// pool, done_at cleared with the holder so the done_at-needs-a-holder CHECK
-	// holds. A quest left with one member is no longer shared, so that member's
+	// their joined_at as claimed_at and keeps the claim deadline
+	// (claim_expires_at); a quest with nobody left is back in the pool, done_at
+	// and claim_expires_at cleared with the holder so the done_at-needs-a-holder
+	// CHECK holds. A quest left with one member is no longer shared, so that member's
 	// participant row goes too. A member not on the quest, or a quest not in
 	// this household, matches no row and changes nothing. The caller holds the
 	// member locks and then the quest's row lock (LockHouseholdQuest, a statement
@@ -75,6 +76,9 @@ type Querier interface {
 	// the quest's age range (quest_age_eligible, in the household's timezone: no
 	// birthday or no limits always pass), read only from this household's
 	// members; a member out of range, or not in this household, gets no row.
+	// Accepting stamps claim_expires_at: the household-local midnight that ends
+	// today (quest_claim_expires_at), after which the expiry sweep returns the
+	// quest to the pool.
 	ClaimQuest(ctx context.Context, arg ClaimQuestParams) (HouseholdQuest, error)
 	// Single use: conditional on used_at IS NULL, unexpired, and the flow's
 	// purpose, so a state can't be replayed or used to complete another flow.
@@ -120,6 +124,15 @@ type Querier interface {
 	DeleteStaleSignInHandoffs(ctx context.Context) (int64, error)
 	DeleteStaleVerificationCodes(ctx context.Context) (int64, error)
 	DeleteUserByID(ctx context.Context, id uuid.UUID) error
+	// Returns a quest whose claim has run out to the pool: every member on it
+	// drops it (all its participant rows go) and the holder, claimed_at, done_at
+	// and claim_expires_at are cleared, in one statement. No completion is
+	// recorded, no points move and available_at is left as it is. The expiry is
+	// re-checked here: the caller holds the row locks of every member on the
+	// quest and then the quest's row lock (LockHouseholdQuest), so a quest marked
+	// done, abandoned or released meanwhile is no longer held and matches no row.
+	// A quest not in this household matches no row either.
+	ExpireQuestClaim(ctx context.Context, arg ExpireQuestClaimParams) (uuid.UUID, error)
 	GetAdminPin(ctx context.Context, householdID uuid.UUID) (HouseholdAdminPin, error)
 	GetEvent(ctx context.Context, arg GetEventParams) (Event, error)
 	GetFamilyMember(ctx context.Context, arg GetFamilyMemberParams) (FamilyMember, error)
@@ -195,6 +208,12 @@ type Querier interface {
 	ListCombosCompletedByMemberOnDay(ctx context.Context, arg ListCombosCompletedByMemberOnDayParams) ([]ListCombosCompletedByMemberOnDayRow, error)
 	// Events overlapping [range_start, range_end).
 	ListEventsInRange(ctx context.Context, arg ListEventsInRangeParams) ([]Event, error)
+	// Held quests whose claim has run out (claim_expires_at, the household-local
+	// midnight ending the day the quest was accepted, is now or past), across
+	// every household, earliest deadline first, at most max_rows per run. The
+	// expiry sweep releases each one in a transaction of its own
+	// (ExpireQuestClaim); what it misses is listed again on the next run.
+	ListExpiredQuestClaims(ctx context.Context, maxRows int32) ([]ListExpiredQuestClaimsRow, error)
 	// Every member of the household with their birthday and their age today in
 	// the household's timezone (quest_member_age). As above, age is 0 and not
 	// meaningful for a member with no birthday.
@@ -295,7 +314,10 @@ type Querier interface {
 	// participants are cleared. Members keep their order: participants by
 	// joined_at, the lone marker at now. NOW() is one instant per transaction, so
 	// completed_at equals the completion's done_at. A quest the member is not on
-	// matches no row and writes nothing. No points move here. The caller holds
+	// matches no row and writes nothing, and neither does a quest whose claim has
+	// run out (claim_expires_at at or before now, the end of the day it was
+	// accepted), even before the sweep has released it: no completion, no streak
+	// step. No points move here. The caller holds
 	// the row locks of every member on the quest and then the quest's row lock
 	// (LockHouseholdQuest, a statement of its own), so the participants recorded
 	// and cleared here are the committed ones.
@@ -311,6 +333,11 @@ type Querier interface {
 	MarkQuestDone(ctx context.Context, arg MarkQuestDoneParams) (MarkQuestDoneRow, error)
 	// Conditional on used_at IS NULL so two concurrent redemptions can't both succeed.
 	MarkVerificationCodeUsed(ctx context.Context, id uuid.UUID) (int64, error)
+	// Whether a quest of the household is held past its claim deadline
+	// (claim_expires_at at or before now). NOW() is the transaction's start, so
+	// inside one transaction this agrees with ShareQuest's and MarkQuestDone's
+	// own expiry checks. A quest not in this household gets no row.
+	QuestClaimLapsed(ctx context.Context, arg QuestClaimLapsedParams) (bool, error)
 	// Whether the quest has a completion waiting for the administrator.
 	QuestHasPendingCompletion(ctx context.Context, arg QuestHasPendingCompletionParams) (bool, error)
 	// Check whether a member of a household is age-eligible for a quest in that
@@ -348,8 +375,9 @@ type Querier interface {
 	// members counted here are the ones committed on each quest.
 	// Their participant rows go. On a quest they hold, the holder of record
 	// moves to the earliest remaining participant (joined_at, then member_id),
-	// who keeps their joined_at as claimed_at; a quest with no participant left
-	// is returned to the pool, done_at cleared with the holder so the
+	// who keeps their joined_at as claimed_at and keeps the claim deadline
+	// (claim_expires_at); a quest with no participant left is returned to the
+	// pool, done_at and claim_expires_at cleared with the holder so the
 	// done_at-needs-a-holder CHECK holds. A quest left with one member is no
 	// longer shared, so that member's participant row goes too. The quests are
 	// locked after the caller's lock on the member row (member first). No
@@ -380,7 +408,9 @@ type Querier interface {
 	// by the acting member, and the target must be a household member other than
 	// the actor who is not on the quest yet and is within the quest's age range
 	// (quest_age_eligible, in the household's timezone: no birthday or no limits
-	// always pass); otherwise nothing is written. The
+	// always pass); otherwise nothing is written. A hold whose claim has run out
+	// (claim_expires_at at or before now, the end of the day it was accepted) is
+	// not held, even before the expiry sweep has released it. The
 	// first share also records the holder, joined at the time they accepted, so
 	// the holder stays the earliest member. Returns the member ids it added.
 	ShareQuest(ctx context.Context, arg ShareQuestParams) ([]uuid.UUID, error)

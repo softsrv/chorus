@@ -122,8 +122,9 @@ func toFamilyMember(m db.FamilyMember) familyMemberJSON {
 }
 
 // questJSON is a household quest. The lifecycle fields (claimed_by,
-// claimed_at, completed_at, available_at) are read-only and change only
-// through quest actions. completed_at is when it was last marked done and
+// claimed_at, claim_expires_at, completed_at, available_at) are read-only and change only
+// through quest actions. claim_expires_at is the deadline when a held quest returns to
+// the pool if not completed. completed_at is when it was last marked done and
 // available_at when its cooldown from that moment ends. available says the
 // quest is in the pool; awaiting_approval says at least one of its
 // completions waits for the administrator to approve or reject it.
@@ -139,6 +140,7 @@ type questJSON struct {
 	Available        bool        `json:"available"`
 	ClaimedBy        *uuid.UUID  `json:"claimed_by"`
 	ClaimedAt        *time.Time  `json:"claimed_at"`
+	ClaimExpiresAt   *time.Time  `json:"claim_expires_at"`
 	AwaitingApproval bool        `json:"awaiting_approval"`
 	CompletedAt      *time.Time  `json:"completed_at"`
 	AvailableAt      *time.Time  `json:"available_at"`
@@ -179,6 +181,7 @@ func toQuest(v app.QuestView) questJSON {
 		Available:        app.QuestAvailable(q, time.Now()),
 		ClaimedBy:        q.ClaimedBy,
 		ClaimedAt:        timePtr(q.ClaimedAt),
+		ClaimExpiresAt:   timePtr(q.ClaimExpiresAt),
 		AwaitingApproval: v.AwaitingApproval,
 		CompletedAt:      timePtr(q.CompletedAt),
 		AvailableAt:      timePtr(q.AvailableAt),

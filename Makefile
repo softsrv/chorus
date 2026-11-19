@@ -5,10 +5,10 @@ BIN_DIR          := ./bin
 -include .env
 export
 
-.PHONY: dev run build test test-js test-integration test-cover boundaries fmt vet lint vulncheck secret-scan check \
+.PHONY: dev run build test test-js test-integration test-system test-system-image test-cover boundaries fmt vet lint vulncheck secret-scan check \
         services-up services-down services-reset \
         daisyui-install tailwind tailwind-watch app \
-        migrate-up migrate-down migrate-create migrate-status migrate-test migrate-roundtrip-test \
+        migrate-up migrate-down migrate-create migrate-status require-test-db migrate-test migrate-roundtrip-test \
         sqlc-generate docker-build prod clean
 
 ## ── Development ─────────────────────────────────────────────────────────────
@@ -54,6 +54,16 @@ test-js:
 test-integration: migrate-test migrate-roundtrip-test
 	go test -race -tags integration -p 1 ./...
 
+# System tests exec the built binary (or test the Docker image when SYSTEST_IMAGE is set).
+# tailwind first: the binary embeds the generated stylesheet the tests assert.
+test-system: migrate-test tailwind
+	go test -race -tags systest -p 1 ./systest/...
+
+# test-system-image builds the image and runs system tests against it (Linux-only: uses host networking).
+test-system-image: migrate-test
+	docker build -t chorus:systest .
+	SYSTEST_IMAGE=chorus:systest go test -tags systest -p 1 ./systest/...
+
 test-cover:
 	go test -coverprofile=coverage.out ./...
 	go tool cover -html=coverage.out
@@ -67,6 +77,7 @@ fmt:
 vet:
 	go vet ./...
 	go vet -tags integration ./...
+	go vet -tags systest ./...
 
 lint:
 	golangci-lint run
@@ -79,7 +90,7 @@ secret-scan:
 	go run github.com/zricethezav/gitleaks/v8@v$(GITLEAKS_VERSION) git --redact --config .gitleaks.toml
 
 # Everything CI runs.
-check: boundaries vet test test-js test-integration vulncheck secret-scan
+check: boundaries vet test test-js test-integration test-system vulncheck secret-scan
 
 ## ── CSS ──────────────────────────────────────────────────────────────────────
 
@@ -108,10 +119,17 @@ migrate-up:
 migrate-down:
 	migrate -path db/migrations -database "$(DATABASE_URL)" down 1
 
-migrate-test:
-	migrate -path db/migrations -database "$(TEST_DATABASE_URL)" up
+# Every target that touches the test database needs TEST_DATABASE_URL, from
+# .env (copy .env.example) or the environment. Fail fast with that, rather
+# than running migrate against an empty URL.
+require-test-db:
+	@test -n "$(TEST_DATABASE_URL)" || { echo "TEST_DATABASE_URL is not set: set it in .env (see .env.example) or the environment" >&2; exit 1; }
 
-migrate-roundtrip-test:
+# Migrates the way CI does (go run, pinned), so no migrate binary is needed.
+migrate-test: require-test-db
+	go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@v4.20.1 -path db/migrations -database "$(TEST_DATABASE_URL)" up
+
+migrate-roundtrip-test: require-test-db
 	@url='$(TEST_DATABASE_URL)'; u="$${url%%\?*}"; db="$${u##*/}"; case "$$db" in *_test) ;; *) echo "migrate-roundtrip-test: refusing to run: TEST_DATABASE_URL database name must end in _test (got '$$db')" >&2; exit 1;; esac
 	go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@v4.20.1 -path db/migrations -database "$(TEST_DATABASE_URL)" down -all
 	go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@v4.20.1 -path db/migrations -database "$(TEST_DATABASE_URL)" up
