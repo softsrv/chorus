@@ -20,10 +20,13 @@ import (
 //     and no leftover idx_household_invites_* or idx_chores_* indexes exist.
 //     DROP TABLE IF EXISTS makes a second run of 000026 up change nothing and error free.
 //   - survivors check: Applying 000026 up removes only the three named tables: every other table,
-//     and seeded rows (including households, household_members, and household_quests
-//     migrated from chores with matching IDs) survives unchanged with identical counts.
-//   - latest-schema check: On the shared public schema migrated to latest, assert that
-//     to_regclass is NULL for household_invites, chores, and household_members_retired.
+//     and seeded rows (users, households, household_members, family_members, and a
+//     household_quests row seeded with the same id as a seeded chore, standing in for
+//     a quest carried over from chores) survives unchanged with identical counts.
+//   - latest-schema check: First assert the shared public schema is migrated to at
+//     least version 26 (schema_migrations, not dirty) and that household_quests exists
+//     there, so the absence check can fail; then assert to_regclass is NULL for
+//     household_invites, chores, and household_members_retired.
 func TestIntegration_DropUnusedTablesMigration(t *testing.T) {
 	admin := testDB(t)
 	ctx := context.Background()
@@ -243,6 +246,25 @@ func TestIntegration_DropUnusedTablesMigration(t *testing.T) {
 	}
 	if got := countRows("household_quests"); got != hqCountBefore {
 		t.Errorf("household_quests row count changed after re-up: %d -> %d", hqCountBefore, got)
+	}
+
+	// latest-schema check: the absence check below is only proof if the shared
+	// public schema really is migrated past 000026; an empty or behind schema
+	// would pass it vacuously, so require that first.
+	var publicVersion int64
+	var publicDirty bool
+	if err := admin.QueryRow(ctx, `SELECT version, dirty FROM public.schema_migrations`).Scan(&publicVersion, &publicDirty); err != nil {
+		t.Fatalf("read public.schema_migrations (is the test database migrated? run make migrate-test): %v", err)
+	}
+	if publicDirty || publicVersion < 26 {
+		t.Fatalf("public schema at version %d (dirty=%v), want >= 26 and clean before checking the dropped tables", publicVersion, publicDirty)
+	}
+	var survivor *string
+	if err := admin.QueryRow(ctx, `SELECT to_regclass('public.household_quests')::text`).Scan(&survivor); err != nil {
+		t.Fatalf("to_regclass public.household_quests: %v", err)
+	}
+	if survivor == nil {
+		t.Fatalf("public.household_quests missing: the shared schema is not migrated, so the absence check would prove nothing")
 	}
 
 	// latest-schema check: Verify none of the dropped tables exist in the shared public schema
