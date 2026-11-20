@@ -11,20 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-type Chore struct {
-	ID          uuid.UUID          `json:"id"`
-	HouseholdID uuid.UUID          `json:"household_id"`
-	Title       string             `json:"title"`
-	Description string             `json:"description"`
-	AssigneeID  *uuid.UUID         `json:"assignee_id"`
-	DueOn       pgtype.Date        `json:"due_on"`
-	CompletedAt pgtype.Timestamptz `json:"completed_at"`
-	CompletedBy *uuid.UUID         `json:"completed_by"`
-	CreatedBy   *uuid.UUID         `json:"created_by"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
-}
-
 type Combo struct {
 	ID          uuid.UUID          `json:"id"`
 	HouseholdID uuid.UUID          `json:"household_id"`
@@ -129,25 +115,7 @@ type HouseholdCalendar struct {
 	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
 }
 
-type HouseholdInvite struct {
-	ID          uuid.UUID          `json:"id"`
-	HouseholdID uuid.UUID          `json:"household_id"`
-	TokenHash   string             `json:"token_hash"`
-	CreatedBy   *uuid.UUID         `json:"created_by"`
-	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	UsedBy      *uuid.UUID         `json:"used_by"`
-	UsedAt      pgtype.Timestamptz `json:"used_at"`
-}
-
 type HouseholdMember struct {
-	HouseholdID uuid.UUID          `json:"household_id"`
-	UserID      uuid.UUID          `json:"user_id"`
-	Role        string             `json:"role"`
-	JoinedAt    pgtype.Timestamptz `json:"joined_at"`
-}
-
-type HouseholdMembersRetired struct {
 	HouseholdID uuid.UUID          `json:"household_id"`
 	UserID      uuid.UUID          `json:"user_id"`
 	Role        string             `json:"role"`
@@ -182,6 +150,11 @@ type HouseholdQuestParticipant struct {
 	QuestID     uuid.UUID          `json:"quest_id"`
 	MemberID    uuid.UUID          `json:"member_id"`
 	JoinedAt    pgtype.Timestamptz `json:"joined_at"`
+}
+
+type HouseholdQuestRollover struct {
+	HouseholdID      uuid.UUID   `json:"household_id"`
+	LastRolloverDate pgtype.Date `json:"last_rollover_date"`
 }
 
 type HouseholdReward struct {
@@ -237,6 +210,7 @@ type QuestCompletion struct {
 	ApprovedAt  pgtype.Timestamptz `json:"approved_at"`
 	Status      string             `json:"status"`
 	StreakCount pgtype.Int4        `json:"streak_count"`
+	StatusBy    *uuid.UUID         `json:"status_by"`
 }
 
 type QuestCompletionMember struct {
@@ -255,6 +229,16 @@ type QuestLibrary struct {
 	Notes       string             `json:"notes"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	StreakBonus int32              `json:"streak_bonus"`
+}
+
+type QuestSchedule struct {
+	ID          uuid.UUID          `json:"id"`
+	HouseholdID uuid.UUID          `json:"household_id"`
+	QuestID     uuid.UUID          `json:"quest_id"`
+	MemberID    uuid.UUID          `json:"member_id"`
+	StartDate   pgtype.Date        `json:"start_date"`
+	Repeat      bool               `json:"repeat"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 type RefreshToken struct {
@@ -287,6 +271,7 @@ type RewardRedemption struct {
 	Status      string             `json:"status"`
 	RequestedAt pgtype.Timestamptz `json:"requested_at"`
 	DecidedAt   pgtype.Timestamptz `json:"decided_at"`
+	StatusBy    *uuid.UUID         `json:"status_by"`
 }
 
 type User struct {

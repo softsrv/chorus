@@ -12,18 +12,19 @@ make tailwind-watch   # Rebuild CSS on change (host); run separately while editi
 make app              # Just the app container, foreground, hot reload (Ctrl-C stops it)
 make run              # One-off app container without hot reload
 make test             # Unit tests (-race)
-make test-js          # Web client unit tests (node --test web/jstest/quests.test.mjs; needs Node 22+)
+make test-js          # Web client unit tests (runs node --test over every web/jstest/*.test.mjs; needs Node 22+)
 make test-integration # Migrates chorus_test, runs round-trip test, then runs integration tests
 make test-system      # Migrates chorus_test, builds the stylesheet (make tailwind; needs tailwindcss), runs system tests against the built binary
 make test-system-image # Runs system tests against the built Docker image (Linux-only: host networking)
 make boundaries       # Boundary check (internal/archtest)
 make secret-scan      # Pinned gitleaks full-history scan (--redact) against .gitleaks.toml
-make check            # boundaries + vet + unit + web JS unit + integration + test-system + govulncheck + secret-scan (what CI runs)
+make check            # boundaries + fmt-check + sqlc-check + mod-verify + vet + unit + JS (web JS unit) + integration + system tests (test-system) + govulncheck + secret-scan (what CI's `ci` job runs)
 make vet / fmt / lint
+make fmt-check | sqlc-check | mod-verify
 
 # Database
 make migrate-up | migrate-down | migrate-status
-make migrate-roundtrip-test       # Round-trip (down -all then up) on chorus_test; every new migration needs a working .down.sql
+make migrate-roundtrip-test       # Round-trip (down -all then up) on chorus_test; every new migration needs a working .down.sql; TestIntegration_MigrationsRoundTrip (internal/app) checks each down restores the prior schema snapshot
 make migrate-create NAME=<name>
 make sqlc-generate                # Regenerate internal/db/ from db/queries/
 make services-reset               # Wipe the local DB volume
@@ -41,6 +42,8 @@ Tests are hermetic: in the internal/http and internal/app test binaries, interna
 Local stack (`docker-compose.yml`): the app runs in the `app` container (dev image `deploy/dev.Dockerfile`, Go + air, repo bind-mounted at `/src`) on http://localhost:8080 (`PORT` in `.env` sets both the listen and published port; keep `APP_BASE_URL` in step). It reaches `postgres` and `smtp4dev` by service name over the internal `backend` network; compose overrides `DATABASE_URL`/`SMTP_HOST`/`SMTP_PORT` for it, so `.env` keeps host-side values. Published to the host (127.0.0.1 only): Postgres on `:5433` (databases `chorus` and `chorus_test`, used by host-side migrate and integration tests) and the smtp4dev web UI at http://localhost:5080, where verification and reset emails land. smtp4dev's SMTP port is not published.
 
 ## Architecture
+
+Architecture documentation is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); architecture decisions are in [docs/adr/](docs/adr/).
 
 ```
 cmd/app/main.go                 bootstrap only: config, pool, wiring, graceful shutdown
@@ -105,7 +108,7 @@ A household has exactly one login account, its administrator. Family members bel
 
 ## Database
 
-Migrations run manually (`make migrate-up`), never on startup. After editing `db/queries/*.sql`, run `make sqlc-generate` (CI fails if `internal/db` is stale). Daily 03:00 job (`app.RunTokenCleanup`) purges stale tokens. `app.RunQuestExpiry` sweeps at startup and every minute, returning quests held past their household-local midnight to the pool.
+Migrations run manually (`make migrate-up`), never on startup. After editing `db/queries/*.sql`, run `make sqlc-generate` (CI fails if `internal/db` is stale). Daily 03:00 job (`app.RunTokenCleanup`) purges stale tokens. `app.RunQuestExpiry` sweeps at startup and every minute, returning quests held past their household-local midnight to the pool. `app.RunQuestRollover` sweeps at startup and on a bounded tick, assigning due quest schedules at each household's local midnight.
 
 ## Environment
 
@@ -113,7 +116,7 @@ Copy `.env.example` → `.env`. Required: `DATABASE_URL`, `JWT_SECRET` (≥32 by
 
 ## Web test client
 
-`web/static/index.html` + `js/api.js` (token handling, auto-refresh) + `js/app.js` (views). No framework, no build step beyond Tailwind/DaisyUI. Strict CSP (`script-src 'self'` plus `https://accounts.google.com/gsi/client`; `frame`/`connect`/`style-src` add `https://accounts.google.com/gsi/` only; still no inline script or style), so no inline `<script>`/`style=`. Insert API data with `textContent` only. It's a test harness, so keep it simple; it is not the product UI.
+`web/static/index.html` + `js/api.js` (token handling, auto-refresh) + `js/app.js` (the one script entry: boot, routing, household home) and the flat ES modules it imports: `state.js` (all mutable client state, reset by `boot()`), `dom.js`, `household.js`, and one module per section (`auth`, `quests`, `rewards`, `family`, `events`, `account`). Section modules never import `app.js`; `web/client_guards_test.go` checks the import graph and keeps each file under 1000 lines. No framework, no build step beyond Tailwind/DaisyUI. Strict CSP (`script-src 'self'` plus `https://accounts.google.com/gsi/client`; `frame`/`connect`/`style-src` add `https://accounts.google.com/gsi/` only; still no inline script or style), so no inline `<script>`/`style=`. Insert API data with `textContent` only. It's a test harness, so keep it simple; it is not the product UI.
 
 ## Tech constraints
 

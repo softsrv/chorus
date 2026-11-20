@@ -1,0 +1,22 @@
+# Starts QB's check, which lives in `.qb`: GitHub only starts a workflow from this folder.
+# Someone on your team marks `QB · Starting Eleven` as required on the branch. QB never asks for
+# Administration. To remove it, leave Enforce in the Playbook: QB opens the pull request.
+name: QB · Starting Eleven
+
+on: [pull_request, merge_group]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # This job's name is the check's name, the one a branch requires.
+    name: QB · Starting Eleven
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Full history: the check reads the merge base, and the list and the tool on the base branch.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          fetch-depth: 0
+      - uses: ./.qb

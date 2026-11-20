@@ -1,0 +1,12 @@
+-- 000026_drop_unused_tables.up.sql
+-- Intended data loss: the governor decided (ruling ddf912d4-7016-4f15-96ad-6c9412513a4a)
+-- to remove these three tables and the rows in them:
+--   - household_invites: the invite routes that wrote it are gone and nothing reads it.
+--   - chores: every chore was carried over into household_quests (same id) by
+--     000010; the old /households/{id}/chores routes answer 404 and no code reads
+--     the leftover chore details.
+--   - household_members_retired: written once by 000011's conversion and never
+--     read since.
+-- Their rows are not kept anywhere else. The down migration recreates the three
+-- tables empty, with their version-25 structure; it does not restore the rows.
+DROP TABLE IF EXISTS household_invites, chores, household_members_retired;

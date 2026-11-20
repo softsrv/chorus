@@ -1,7 +1,7 @@
 // A minimal browser stand-in for the web test client's unit tests: just enough
-// DOM for app.js's el()/replaceChildren rendering, storage, history and a
-// routed fetch stub. Only fetch (the server) is substituted; app.js and api.js
-// run as shipped.
+// DOM for the client modules' el()/replaceChildren rendering, storage, history
+// and a routed fetch stub. Only fetch (the server) is substituted; the client
+// modules (app.js and what it imports) run as shipped.
 
 class Node {
   constructor() { this.childNodes = []; this.parentNode = null; }
@@ -159,8 +159,8 @@ export function sectionNode(root, title) {
 }
 
 let importCount = 0;
-// loadApp imports a fresh copy of app.js (its module state starts over); it
-// boots on import.
+// loadApp imports a fresh copy of app.js; it boots on import. The modules it
+// imports stay cached, so boot() resets the shared state (state.js) first.
 export async function loadApp() {
   importCount += 1;
   await import(`../static/js/app.js?run=${importCount}`);

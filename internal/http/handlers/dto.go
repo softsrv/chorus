@@ -201,6 +201,54 @@ func toQuest(v app.QuestView) questJSON {
 	}
 }
 
+// questScheduleJSON is one scheduled quest; start_date is the
+// household-local date it is assigned on, YYYY-MM-DD.
+type questScheduleJSON struct {
+	ID         uuid.UUID `json:"id"`
+	QuestID    uuid.UUID `json:"quest_id"`
+	QuestName  string    `json:"quest_name"`
+	MemberID   uuid.UUID `json:"member_id"`
+	MemberName string    `json:"member_name"`
+	StartDate  string    `json:"start_date"`
+	Repeat     bool      `json:"repeat"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+func toQuestSchedule(s app.QuestSchedule) questScheduleJSON {
+	return questScheduleJSON{
+		ID:         s.ID,
+		QuestID:    s.QuestID,
+		QuestName:  s.QuestName,
+		MemberID:   s.MemberID,
+		MemberName: s.MemberName,
+		StartDate:  s.StartDate,
+		Repeat:     s.Repeat,
+		CreatedAt:  s.CreatedAt.UTC(),
+	}
+}
+
+// upcomingQuestJSON is one of a member's upcoming scheduled quests;
+// start_date and next_date are household-local dates, YYYY-MM-DD.
+type upcomingQuestJSON struct {
+	ID        uuid.UUID `json:"id"`
+	QuestID   uuid.UUID `json:"quest_id"`
+	QuestName string    `json:"quest_name"`
+	StartDate string    `json:"start_date"`
+	NextDate  string    `json:"next_date"`
+	Repeat    bool      `json:"repeat"`
+}
+
+func toUpcomingQuest(u app.UpcomingQuest) upcomingQuestJSON {
+	return upcomingQuestJSON{
+		ID:        u.ID,
+		QuestID:   u.QuestID,
+		QuestName: u.QuestName,
+		StartDate: u.StartDate,
+		NextDate:  u.NextDate,
+		Repeat:    u.Repeat,
+	}
+}
+
 // int4Ptr is nil for a NULL column, so it marshals as null.
 func int4Ptr(n pgtype.Int4) *int32 {
 	if !n.Valid {
