@@ -5,7 +5,7 @@ go 1.27
 require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
-	github.com/jackc/pgx/v5 v5.11.0
+	github.com/jackc/pgx/v5 v5.13.0
 	github.com/mssola/useragent v1.0.0
 	golang.org/x/crypto v0.58.0
 	golang.org/x/oauth2 v0.38.0
